@@ -297,3 +297,91 @@ class TransformerConfig:
                 ), f"Key {key} is defined as an input key to be masked but not in in_keys {self.in_keys}"
 
         assert len(self.out_keys) == 1, "Transformer supports exactly one output key"
+
+
+# =============================================================================
+# VAE Configurations
+# =============================================================================
+
+@dataclass
+class VAEConfig(NormObsBaseConfig):
+    """Configuration for a VAE with an optional Learned Prior.
+
+    Architecture:
+    1. Posterior: (Self Obs + Task Obs) -> Z_posterior
+    2. Prior:     (Self Obs Only)       -> Z_prior
+    3. Decoder:   Z                     -> Action
+    """
+
+    _target_: str = "protomotions.agents.common.vae.VAE"
+
+    # ---------------- Data Flow Configuration ----------------
+
+    # 1. Posterior Inputs (Used for Training)
+    # Typically includes both robot state and target info (e.g., ["max_coords_obs", "mimic_target_poses"])
+    in_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Input keys for the Posterior Encoder (Self + Task)."}
+    )
+
+    # 2. Prior Inputs (Used for Inference / KL Loss)
+    # Typically includes only robot state (e.g., ["max_coords_obs"])
+    prior_in_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Input keys for the Prior Network (Self Only)."}
+    )
+
+    # 3. Outputs
+    # Order matters: [Action, Sampled_Z, Post_Mu, Post_LogVar, Prior_Mu, Prior_LogVar]
+    out_keys: List[str] = field(
+        default_factory=list,
+        metadata={
+            "help": "Must contain 6 keys: [action, z, post_mu, post_logvar, prior_mu, prior_logvar]. "
+                    "If prior is unused, the last 2 keys are ignored."
+        }
+    )
+
+    # ---------------- Architecture Configuration ----------------
+
+    latent_dim: int = 32
+
+    # Enable the secondary network that learns p(z|self_obs)
+    use_learned_prior: bool = field(
+        default=True,
+        metadata={"help": "If True, builds a separate Prior network taking prior_in_keys."}
+    )
+
+    # Posterior Encoder Structure
+    encoder_layers: List[MLPLayerConfig] = field(
+        default_factory=lambda: [
+            MLPLayerConfig(units=512, activation="relu"),
+            MLPLayerConfig(units=256, activation="relu"),
+        ]
+    )
+
+    # Prior Network Structure (Usually smaller or same size as encoder)
+    prior_layers: List[MLPLayerConfig] = field(
+        default_factory=lambda: [
+            MLPLayerConfig(units=256, activation="relu"),
+            MLPLayerConfig(units=256, activation="relu"),
+        ]
+    )
+
+    # Decoder Structure (Latent -> Action)
+    decoder_layers: List[MLPLayerConfig] = field(
+        default_factory=lambda: [
+            MLPLayerConfig(units=256, activation="relu"),
+            MLPLayerConfig(units=512, activation="relu"),
+        ]
+    )
+
+    num_out: int = None  # Action Dimension (Required)
+    decoder_activation: Optional[str] = "tanh"  # Bound actions to [-1, 1]
+
+    def __post_init__(self):
+        assert self.num_out is not None, "num_out (action dimension) must be provided"
+
+        # Validation: Ensure enough keys are provided for the outputs
+        expected_keys = 6 if self.use_learned_prior else 4
+        if len(self.out_keys) < expected_keys:
+            raise ValueError(f"VAEConfig needs {expected_keys} out_keys, got {len(self.out_keys)}")
