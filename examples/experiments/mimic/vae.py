@@ -144,7 +144,8 @@ def agent_config(
         mu_model=VAEConfig(
             in_keys=["max_coords_obs", "mimic_target_poses"],
             prior_in_keys=["max_coords_obs"],
-
+            normalize_obs=True,
+            norm_clamp_value=5,
             # 3. Outputs: [Action, Z, Post_Mu, Post_LogVar, Prior_Mu, Prior_LogVar]
             out_keys=[
                 "actor_trunk_out",  # The Action
@@ -156,7 +157,7 @@ def agent_config(
             ],
 
             use_learned_prior=True,
-            latent_dim=32,
+            latent_dim=128,
             num_out=robot_config.number_of_actions,
 
             # Architectures

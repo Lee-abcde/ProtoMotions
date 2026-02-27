@@ -7,7 +7,7 @@ from torch import nn
 from tensordict import TensorDict
 from tensordict.nn import TensorDictModuleBase
 
-from protomotions.agents.common.common import NormObsBase
+from protomotions.agents.common.common import NormObsBase, apply_module_operations
 from protomotions.agents.utils.training import get_activation_func
 from protomotions.agents.common.config import VAEConfig, MLPLayerConfig
 
@@ -55,8 +55,8 @@ class VAE(TensorDictModuleBase):
             self.prior_logvar_key = self.out_keys[5]
 
         # 1. Normalization
-        # Shared normalization for all inputs.
         self.norm = NormObsBase(config)
+        self.prior_norm = NormObsBase(config) if config.use_learned_prior else None
 
         # ================== A. Posterior Network (Encoder) ==================
         # Takes full state (Self + Task)
@@ -91,17 +91,28 @@ class VAE(TensorDictModuleBase):
         # 1. Process Posterior (Used for Z sampling during Training)
         # -----------------------------------------------------------
         # Concatenate Self + Task
-        post_obs = torch.cat([tensordict[key] for key in self.in_keys], dim=-1)
+        post_obs_raw = torch.cat([tensordict[key] for key in self.in_keys], dim=-1)
 
-        # Apply Normalization
-        if self.config.normalize_obs:
-            self.norm.update(post_obs)
-            post_obs = self.norm(post_obs)
+        # Apply module operations (Flatten -> Normalize -> Encode)
+        post_result = apply_module_operations(
+            post_obs_raw, 
+            self.config.module_operations, 
+            normalizer=self.norm, 
+            forward_model=self.posterior_backbone
+        )
+        post_hidden = post_result["output"]
+        
+        # Save normalized observations if they exist (to match MLP behavior)
+        if self.config.normalize_obs and "norm_obs" in post_result:
+            norm_obs = post_result["norm_obs"]
+            if norm_obs.shape[0] == tensordict.batch_size[0]:
+                tensordict[f"norm_{self.in_keys[0]}"] = norm_obs
 
-        # Encode Posterior
-        post_hidden = self.posterior_backbone(post_obs)
         post_mu = self.post_mu(post_hidden)
         post_logvar = self.post_logvar(post_hidden)
+        
+        # Clamp logvar to prevent overflow
+        post_logvar = torch.clamp(post_logvar, min=-20, max=10)
 
         # Sample Z using Posterior distribution
         # Note: During training, we use the "privileged" posterior z
@@ -112,21 +123,22 @@ class VAE(TensorDictModuleBase):
         # -----------------------------------------------------------
         if self.config.use_learned_prior:
             # Concatenate Self Only
-            # Note: We assume these keys exist in the tensordict
-            prior_obs = torch.cat([tensordict[key] for key in self.prior_in_keys], dim=-1)
+            prior_obs_raw = torch.cat([tensordict[key] for key in self.prior_in_keys], dim=-1)
 
-            # Apply Normalization (Reusing the same normalizer stats)
-            # IMPORTANT: Since `prior_obs` is a subset of `post_obs`, and `NormObsBase`
-            # usually expects a fixed input size, reusing `self.norm` directly might fail
-            # if `NormObsBase` learns a fixed-size mean vector.
-            #
-            # Solution for this snippet: We assume LazyLinear handles the un-normalized features
-            # if dimensions mismatch, OR that you are using a normalization scheme that handles this.
-            # Ideally, you might want a separate `self.prior_norm` in __init__.
+            # Apply module operations (Flatten -> Normalize -> Encode)
+            prior_result = apply_module_operations(
+                prior_obs_raw, 
+                self.config.module_operations, 
+                normalizer=self.prior_norm, 
+                forward_model=self.prior_backbone
+            )
+            prior_hidden = prior_result["output"]
 
-            prior_hidden = self.prior_backbone(prior_obs)
             prior_mu = self.prior_mu(prior_hidden)
             prior_logvar = self.prior_logvar(prior_hidden)
+            
+            # Clamp logvar to prevent overflow
+            prior_logvar = torch.clamp(prior_logvar, min=-20, max=10)
 
             # Write Prior outputs to tensordict
             tensordict[self.prior_mu_key] = prior_mu

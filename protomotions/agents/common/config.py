@@ -341,6 +341,11 @@ class VAEConfig(NormObsBaseConfig):
         }
     )
 
+    module_operations: List[ModuleOperationConfig] = field(
+        default_factory=lambda: [ModuleOperationForwardConfig()],
+        metadata={"help": "Sequence of operations including forward pass and reshapes (used for inputs)."}
+    )
+
     # ---------------- Architecture Configuration ----------------
 
     latent_dim: int = 32
