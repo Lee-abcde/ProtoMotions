@@ -12,16 +12,25 @@ from protomotions.agents.utils.training import get_activation_func
 from protomotions.agents.common.config import VAEConfig, MLPLayerConfig
 
 
-def build_sequential_layers(layers_config):
-    """Helper to build a sequence of LazyLinear layers from config."""
+def build_sequential_layers(input_dim: int, layers_config: list):
+    """
+    Helper to build a sequence of Linear layers from config.
+    Returns the constructed Sequential network and the output dimension of the final layer.
+    """
     net = []
+    current_dim = input_dim
+
     for layer in layers_config:
-        # LazyLinear infers input shape automatically on first forward pass
-        net.append(nn.LazyLinear(layer.units))
+        # Use standard nn.Linear, explicitly specifying input and output dimensions
+        net.append(nn.Linear(current_dim, layer.units))
         if layer.use_layer_norm:
             net.append(nn.LayerNorm(layer.units))
         net.append(get_activation_func(layer.activation))
-    return nn.Sequential(*net)
+
+        # Update current_dim for the next layer to use
+        current_dim = layer.units
+
+    return nn.Sequential(*net), current_dim
 
 
 class VAE(TensorDictModuleBase):
@@ -57,28 +66,77 @@ class VAE(TensorDictModuleBase):
         # 1. Normalization
         self.norm = NormObsBase(config)
         self.prior_norm = NormObsBase(config) if config.use_learned_prior else None
-
+        self.obs_dim = 1285
+        self.prior_obs_dim = 493
         # ================== A. Posterior Network (Encoder) ==================
         # Takes full state (Self + Task)
-        self.posterior_backbone = build_sequential_layers(config.encoder_layers)
-        self.post_mu = nn.LazyLinear(config.latent_dim)
-        self.post_logvar = nn.LazyLinear(config.latent_dim)
+        self.posterior_backbone, post_out_dim = build_sequential_layers(
+            input_dim=self.obs_dim,
+            layers_config=config.encoder_layers
+        )
+        self.post_mu = nn.Linear(post_out_dim, config.latent_dim)
+        self.post_logvar = nn.Linear(post_out_dim, config.latent_dim)
 
         # ================== B. Prior Network ==================
         # Takes partial state (Self Only)
         if config.use_learned_prior:
-            self.prior_backbone = build_sequential_layers(config.prior_layers)
-            self.prior_mu = nn.LazyLinear(config.latent_dim)
-            self.prior_logvar = nn.LazyLinear(config.latent_dim)
+            self.prior_backbone, prior_out_dim = build_sequential_layers(
+                input_dim=self.prior_obs_dim,
+                layers_config=config.prior_layers
+            )
+            self.prior_mu = nn.Linear(prior_out_dim, config.latent_dim)
+            self.prior_logvar = nn.Linear(prior_out_dim, config.latent_dim)
 
         # ================== C. Decoder Network (Policy) ==================
         # Takes Latent Z -> Actions
-        self.decoder_backbone = build_sequential_layers(config.decoder_layers)
-        self.decoder_head = nn.LazyLinear(config.num_out)
+        self.decoder_backbone, dec_out_dim = build_sequential_layers(
+            input_dim=config.latent_dim,
+            layers_config=config.decoder_layers
+        )
+        self.decoder_head = nn.Linear(dec_out_dim, config.num_out)
 
         self.decoder_activation = None
         if config.decoder_activation:
             self.decoder_activation = get_activation_func(config.decoder_activation)
+        self.init_weights()
+
+    def init_weights(self):
+        """Standard and stable RL weight initialization scheme."""
+
+        # 1. Recursively initialize all Linear layers in the Backbones
+        def _init_backbone(m):
+            if isinstance(m, nn.Linear):
+                # Orthogonal init with gain=sqrt(2) is standard for hidden layers with ReLU/SiLU
+                nn.init.normal_(m.weight.data, 0.0, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        self.posterior_backbone.apply(_init_backbone)
+        self.decoder_backbone.apply(_init_backbone)
+        if self.config.use_learned_prior and hasattr(self, 'prior_backbone'):
+            self.prior_backbone.apply(_init_backbone)
+
+        # 2. Initialize Mu and Action Head with a very small gain
+        # This keeps the initial predicted actions close to 0, preventing chaotic early episodes
+        nn.init.normal_(self.post_mu.weight, 0.0, std=0.02)
+        if self.post_mu.bias is not None:
+            nn.init.zeros_(self.post_mu.bias)
+
+        nn.init.orthogonal_(self.decoder_head.weight, gain=0.01)
+        # nn.init.normal_(self.decoder_head.weight, 0.0, std=0.02)
+        if self.decoder_head.bias is not None:
+            nn.init.zeros_(self.decoder_head.bias)
+
+        # 3. Initialize Logvar (variance), forced to 0 (initial variance = 1.0)
+        # This gives PPO stable and predictable exploration noise at the start
+        nn.init.normal_(self.post_logvar.weight, 0.0, std=0.02)
+        if self.post_logvar.bias is not None:
+            nn.init.zeros_(self.post_logvar.bias)
+
+        if self.config.use_learned_prior and hasattr(self, 'prior_logvar'):
+            nn.init.normal_(self.prior_logvar.weight, 0.0, std=0.02)
+            if self.prior_logvar.bias is not None:
+                nn.init.zeros_(self.prior_logvar.bias)
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         """Reparameterization trick: z = mu + sigma * epsilon"""
@@ -112,10 +170,9 @@ class VAE(TensorDictModuleBase):
         post_logvar = self.post_logvar(post_hidden)
         
         # Clamp logvar to prevent overflow
-        post_logvar = torch.clamp(post_logvar, min=-20, max=10)
+        post_logvar = torch.clamp(post_logvar, min=-5, max=2)
 
         # Sample Z using Posterior distribution
-        # Note: During training, we use the "privileged" posterior z
         z = self.reparameterize(post_mu, post_logvar)
 
         # -----------------------------------------------------------
@@ -138,7 +195,7 @@ class VAE(TensorDictModuleBase):
             prior_logvar = self.prior_logvar(prior_hidden)
             
             # Clamp logvar to prevent overflow
-            prior_logvar = torch.clamp(prior_logvar, min=-20, max=10)
+            prior_logvar = torch.clamp(prior_logvar, min=-5, max=2)
 
             # Write Prior outputs to tensordict
             tensordict[self.prior_mu_key] = prior_mu
