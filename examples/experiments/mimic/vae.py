@@ -142,39 +142,36 @@ def agent_config(
         in_keys=["max_coords_obs", "mimic_target_poses", "previous_actions"],
         mu_key="actor_trunk_out",
         mu_model=VAEConfig(
-            in_keys=["max_coords_obs", "mimic_target_poses"],
+            in_keys=["max_coords_obs", "mimic_target_poses", "previous_actions"],
             prior_in_keys=["max_coords_obs"],
             normalize_obs=True,
             norm_clamp_value=5,
             # 3. Outputs: [Action, Z, Post_Mu, Post_LogVar, Prior_Mu, Prior_LogVar]
             out_keys=[
                 "actor_trunk_out",  # The Action
-                "vae_z",  # The Latent
-                "vae_post_mu",  # Posterior Mu (for KL Loss)
-                "vae_post_logvar",  # Posterior LogVar (for KL Loss)
-                "vae_prior_mu",  # Prior Mu (for KL Loss)
-                "vae_prior_logvar"  # Prior LogVar (for KL Loss)
+                # "vae_z",  # The Latent
+                # "vae_post_mu",  # Posterior Mu (for KL Loss)
+                # "vae_post_logvar",  # Posterior LogVar (for KL Loss)
+                # "vae_prior_mu",  # Prior Mu (for KL Loss)
+                # "vae_prior_logvar"  # Prior LogVar (for KL Loss)
             ],
 
-            use_learned_prior=True,
-            latent_dim=128,
+            use_learned_prior=False,
+            latent_dim=1024,
             num_out=robot_config.number_of_actions,
             decoder_activation="tanh",
             # Architectures
             encoder_layers=[
                 MLPLayerConfig(units=1024, activation="relu"),
-                MLPLayerConfig(units=512, activation="relu"),
-                MLPLayerConfig(units=256, activation="relu")
+                MLPLayerConfig(units=1024, activation="relu"),
             ],
             prior_layers=[
-                MLPLayerConfig(units=512, activation="relu"),
-                MLPLayerConfig(units=256, activation="relu"),
-                MLPLayerConfig(units=128, activation="relu")
+                MLPLayerConfig(units=1024, activation="relu"),
+                MLPLayerConfig(units=1024, activation="relu"),
             ],
             decoder_layers=[
-                MLPLayerConfig(units=512, activation="relu"),
-                MLPLayerConfig(units=256, activation="relu"),
-                MLPLayerConfig(units=128, activation="relu")
+                MLPLayerConfig(units=1024, activation="relu"),
+                MLPLayerConfig(units=1024, activation="relu"),
             ],
         ),
     )

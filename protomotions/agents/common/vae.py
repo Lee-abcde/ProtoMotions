@@ -55,9 +55,9 @@ class VAE(TensorDictModuleBase):
 
         # Map Output Keys for clarity
         self.action_key = self.out_keys[0]
-        self.z_key = self.out_keys[1]
-        self.post_mu_key = self.out_keys[2]
-        self.post_logvar_key = self.out_keys[3]
+        # self.z_key = self.out_keys[1]
+        # self.post_mu_key = self.out_keys[2]
+        # self.post_logvar_key = self.out_keys[3]
 
         if config.use_learned_prior:
             self.prior_mu_key = self.out_keys[4]
@@ -66,7 +66,7 @@ class VAE(TensorDictModuleBase):
         # 1. Normalization
         self.norm = NormObsBase(config)
         self.prior_norm = NormObsBase(config) if config.use_learned_prior else None
-        self.obs_dim = 1285
+        self.obs_dim = 1314
         self.prior_obs_dim = 493
         # ================== A. Posterior Network (Encoder) ==================
         # Takes full state (Self + Task)
@@ -75,7 +75,7 @@ class VAE(TensorDictModuleBase):
             layers_config=config.encoder_layers
         )
         self.post_mu = nn.Linear(post_out_dim, config.latent_dim)
-        self.post_logvar = nn.Linear(post_out_dim, config.latent_dim)
+        # self.post_logvar = nn.Linear(post_out_dim, config.latent_dim)
 
         # ================== B. Prior Network ==================
         # Takes partial state (Self Only)
@@ -98,7 +98,7 @@ class VAE(TensorDictModuleBase):
         self.decoder_activation = None
         if config.decoder_activation:
             self.decoder_activation = get_activation_func(config.decoder_activation)
-        self.init_weights()
+        # self.init_weights()
 
     def init_weights(self):
         """Standard and stable RL weight initialization scheme."""
@@ -166,13 +166,13 @@ class VAE(TensorDictModuleBase):
                 tensordict[f"norm_{self.in_keys[0]}"] = norm_obs
 
         post_mu = self.post_mu(post_hidden)
-        post_logvar = self.post_logvar(post_hidden)
+        # post_logvar = self.post_logvar(post_hidden)
         
         # Clamp logvar to prevent overflow
-        post_logvar = torch.clamp(post_logvar, min=-5, max=2)
+        # post_logvar = torch.clamp(post_logvar, min=-5, max=2)
 
         # Sample Z using Posterior distribution
-        z = self.reparameterize(post_mu, post_logvar)
+        z = post_mu
 
         # -----------------------------------------------------------
         # 2. Process Prior (Used for KL Loss & Inference)
@@ -215,8 +215,8 @@ class VAE(TensorDictModuleBase):
 
         # Write final outputs
         tensordict[self.action_key] = action
-        tensordict[self.z_key] = z
-        tensordict[self.post_mu_key] = post_mu
-        tensordict[self.post_logvar_key] = post_logvar
+        # tensordict[self.z_key] = z
+        # tensordict[self.post_mu_key] = post_mu
+        # tensordict[self.post_logvar_key] = post_logvar
 
         return tensordict

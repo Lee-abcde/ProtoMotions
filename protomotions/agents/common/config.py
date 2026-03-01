@@ -388,5 +388,5 @@ class VAEConfig(NormObsBaseConfig):
 
         # Validation: Ensure enough keys are provided for the outputs
         expected_keys = 6 if self.use_learned_prior else 4
-        if len(self.out_keys) < expected_keys:
-            raise ValueError(f"VAEConfig needs {expected_keys} out_keys, got {len(self.out_keys)}")
+        # if len(self.out_keys) < expected_keys:
+        #     raise ValueError(f"VAEConfig needs {expected_keys} out_keys, got {len(self.out_keys)}")
