@@ -159,11 +159,23 @@ def agent_config(
             use_learned_prior=True,
             latent_dim=128,
             num_out=robot_config.number_of_actions,
-
+            decoder_activation="tanh",
             # Architectures
-            encoder_layers=[MLPLayerConfig(units=512)],  # Posterior
-            prior_layers=[MLPLayerConfig(units=256)],  # Prior
-            decoder_layers=[MLPLayerConfig(units=512)],  # Decoder
+            encoder_layers=[
+                MLPLayerConfig(units=1024, activation="relu"),
+                MLPLayerConfig(units=512, activation="relu"),
+                MLPLayerConfig(units=256, activation="relu")
+            ],
+            prior_layers=[
+                MLPLayerConfig(units=512, activation="relu"),
+                MLPLayerConfig(units=256, activation="relu"),
+                MLPLayerConfig(units=128, activation="relu")
+            ],
+            decoder_layers=[
+                MLPLayerConfig(units=512, activation="relu"),
+                MLPLayerConfig(units=256, activation="relu"),
+                MLPLayerConfig(units=128, activation="relu")
+            ],
         ),
     )
 
