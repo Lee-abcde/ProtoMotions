@@ -122,8 +122,7 @@ class VAE(TensorDictModuleBase):
         if self.post_mu.bias is not None:
             nn.init.zeros_(self.post_mu.bias)
 
-        nn.init.orthogonal_(self.decoder_head.weight, gain=0.01)
-        # nn.init.normal_(self.decoder_head.weight, 0.0, std=0.02)
+        nn.init.normal_(self.decoder_head.weight, 0.0, std=0.02)
         if self.decoder_head.bias is not None:
             nn.init.zeros_(self.decoder_head.bias)
 
