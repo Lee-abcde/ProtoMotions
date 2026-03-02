@@ -199,14 +199,14 @@ class VAE(TensorDictModuleBase):
             prior_hidden = prior_result["output"]
 
             prior_mu = self.prior_mu(prior_hidden)
-            # prior_logvar = self.prior_logvar(prior_hidden)
+            prior_logvar = self.prior_logvar(prior_hidden)
             
             # Clamp logvar to prevent overflow
-            # prior_logvar = torch.clamp(prior_logvar, min=-5, max=2)
+            prior_logvar = torch.clamp(prior_logvar, min=-5, max=2)
 
             # Write Prior outputs to tensordict
             tensordict[self.prior_mu_key] = prior_mu
-            prior_logvar = torch.full_like(prior_mu, -5.0)
+            # prior_logvar = torch.full_like(prior_mu, -5.0)
             tensordict[self.prior_logvar_key] = prior_logvar
 
             # OPTIONAL: Switch to Prior Z during Inference (Evaluation)
