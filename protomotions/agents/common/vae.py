@@ -98,7 +98,7 @@ class VAE(TensorDictModuleBase):
         self.decoder_activation = None
         if config.decoder_activation:
             self.decoder_activation = get_activation_func(config.decoder_activation)
-        # self.init_weights()
+        self.init_weights()
 
     def init_weights(self):
         """Standard and stable RL weight initialization scheme."""
@@ -132,10 +132,15 @@ class VAE(TensorDictModuleBase):
         if self.post_logvar.bias is not None:
             nn.init.zeros_(self.post_logvar.bias)
 
-        if self.config.use_learned_prior and hasattr(self, 'prior_logvar'):
-            nn.init.normal_(self.prior_logvar.weight, 0.0, std=0.02)
-            if self.prior_logvar.bias is not None:
-                nn.init.zeros_(self.prior_logvar.bias)
+        if self.config.use_learned_prior:
+            if hasattr(self, 'prior_mu'):
+                nn.init.normal_(self.prior_mu.weight, 0.0, std=0.02)
+                if self.prior_mu.bias is not None:
+                    nn.init.zeros_(self.prior_mu.bias)
+            if hasattr(self, 'prior_logvar'):
+                nn.init.normal_(self.prior_logvar.weight, 0.0, std=0.02)
+                if self.prior_logvar.bias is not None:
+                    nn.init.zeros_(self.prior_logvar.bias)
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         """Reparameterization trick: z = mu + sigma * epsilon"""
