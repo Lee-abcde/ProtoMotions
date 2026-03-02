@@ -75,7 +75,7 @@ class VAE(TensorDictModuleBase):
             layers_config=config.encoder_layers
         )
         self.post_mu = nn.Linear(post_out_dim, config.latent_dim)
-        # self.post_logvar = nn.Linear(post_out_dim, config.latent_dim)
+        self.post_logvar = nn.Linear(post_out_dim, config.latent_dim)
 
         # ================== B. Prior Network ==================
         # Takes partial state (Self Only)
@@ -166,13 +166,16 @@ class VAE(TensorDictModuleBase):
                 tensordict[f"norm_{self.in_keys[0]}"] = norm_obs
 
         post_mu = self.post_mu(post_hidden)
-        # post_logvar = self.post_logvar(post_hidden)
+        post_logvar = self.post_logvar(post_hidden)
         
         # Clamp logvar to prevent overflow
-        # post_logvar = torch.clamp(post_logvar, min=-5, max=2)
-        post_logvar = torch.full_like(post_mu, -5.0)
-        # Sample Z using Posterior distribution
-        z = post_mu
+        post_logvar = torch.clamp(post_logvar, min=-5, max=2)
+        # post_logvar = torch.full_like(post_mu, -5.0)
+        # Sample Z using Posterior distribution (deterministic mu during eval)
+        if self.training:
+            z = self.reparameterize(post_mu, post_logvar)
+        else:
+            z = post_mu
 
         # -----------------------------------------------------------
         # 2. Process Prior (Used for KL Loss & Inference)

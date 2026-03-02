@@ -156,7 +156,7 @@ def agent_config(
                 "vae_prior_logvar"  # Prior LogVar (for KL Loss)
             ],
 
-            use_learned_prior=True,
+            use_learned_prior=False,
             latent_dim=1024,
             num_out=robot_config.number_of_actions,
             decoder_activation="tanh",
