@@ -85,7 +85,7 @@ class VAE(TensorDictModuleBase):
                 layers_config=config.prior_layers
             )
             self.prior_mu = nn.Linear(prior_out_dim, config.latent_dim)
-            # self.prior_logvar = nn.Linear(prior_out_dim, config.latent_dim)
+            self.prior_logvar = nn.Linear(prior_out_dim, config.latent_dim)
 
         # ================== C. Decoder Network (Policy) ==================
         # Takes Latent Z -> Actions
