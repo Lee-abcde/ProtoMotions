@@ -55,9 +55,9 @@ class VAE(TensorDictModuleBase):
 
         # Map Output Keys for clarity
         self.action_key = self.out_keys[0]
-        # self.z_key = self.out_keys[1]
-        # self.post_mu_key = self.out_keys[2]
-        # self.post_logvar_key = self.out_keys[3]
+        self.z_key = self.out_keys[1]
+        self.post_mu_key = self.out_keys[2]
+        self.post_logvar_key = self.out_keys[3]
 
         if config.use_learned_prior:
             self.prior_mu_key = self.out_keys[4]
@@ -85,7 +85,7 @@ class VAE(TensorDictModuleBase):
                 layers_config=config.prior_layers
             )
             self.prior_mu = nn.Linear(prior_out_dim, config.latent_dim)
-            self.prior_logvar = nn.Linear(prior_out_dim, config.latent_dim)
+            # self.prior_logvar = nn.Linear(prior_out_dim, config.latent_dim)
 
         # ================== C. Decoder Network (Policy) ==================
         # Takes Latent Z -> Actions
@@ -170,7 +170,7 @@ class VAE(TensorDictModuleBase):
         
         # Clamp logvar to prevent overflow
         # post_logvar = torch.clamp(post_logvar, min=-5, max=2)
-
+        post_logvar = torch.full_like(post_mu, -5.0)
         # Sample Z using Posterior distribution
         z = post_mu
 
@@ -191,13 +191,14 @@ class VAE(TensorDictModuleBase):
             prior_hidden = prior_result["output"]
 
             prior_mu = self.prior_mu(prior_hidden)
-            prior_logvar = self.prior_logvar(prior_hidden)
+            # prior_logvar = self.prior_logvar(prior_hidden)
             
             # Clamp logvar to prevent overflow
-            prior_logvar = torch.clamp(prior_logvar, min=-5, max=2)
+            # prior_logvar = torch.clamp(prior_logvar, min=-5, max=2)
 
             # Write Prior outputs to tensordict
             tensordict[self.prior_mu_key] = prior_mu
+            prior_logvar = torch.full_like(prior_mu, -5.0)
             tensordict[self.prior_logvar_key] = prior_logvar
 
             # OPTIONAL: Switch to Prior Z during Inference (Evaluation)
@@ -215,8 +216,8 @@ class VAE(TensorDictModuleBase):
 
         # Write final outputs
         tensordict[self.action_key] = action
-        # tensordict[self.z_key] = z
-        # tensordict[self.post_mu_key] = post_mu
-        # tensordict[self.post_logvar_key] = post_logvar
+        tensordict[self.z_key] = z
+        tensordict[self.post_mu_key] = post_mu
+        tensordict[self.post_logvar_key] = post_logvar
 
         return tensordict

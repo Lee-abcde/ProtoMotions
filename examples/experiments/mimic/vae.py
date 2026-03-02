@@ -149,14 +149,14 @@ def agent_config(
             # 3. Outputs: [Action, Z, Post_Mu, Post_LogVar, Prior_Mu, Prior_LogVar]
             out_keys=[
                 "actor_trunk_out",  # The Action
-                # "vae_z",  # The Latent
-                # "vae_post_mu",  # Posterior Mu (for KL Loss)
-                # "vae_post_logvar",  # Posterior LogVar (for KL Loss)
-                # "vae_prior_mu",  # Prior Mu (for KL Loss)
-                # "vae_prior_logvar"  # Prior LogVar (for KL Loss)
+                "vae_z",  # The Latent
+                "vae_post_mu",  # Posterior Mu (for KL Loss)
+                "vae_post_logvar",  # Posterior LogVar (for KL Loss)
+                "vae_prior_mu",  # Prior Mu (for KL Loss)
+                "vae_prior_logvar"  # Prior LogVar (for KL Loss)
             ],
 
-            use_learned_prior=False,
+            use_learned_prior=True,
             latent_dim=1024,
             num_out=robot_config.number_of_actions,
             decoder_activation="tanh",
