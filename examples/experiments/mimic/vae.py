@@ -157,21 +157,30 @@ def agent_config(
             ],
 
             use_learned_prior=True,
-            latent_dim=1024,
+            latent_dim=128,
             num_out=robot_config.number_of_actions,
-            decoder_activation="tanh",
+            decoder_activation="silu",
             # Architectures
             encoder_layers=[
-                MLPLayerConfig(units=1024, activation="relu"),
-                MLPLayerConfig(units=1024, activation="relu"),
+                MLPLayerConfig(units=1024, activation="silu"),
+                MLPLayerConfig(units=512, activation="silu"),
             ],
             prior_layers=[
-                MLPLayerConfig(units=1024, activation="relu"),
-                MLPLayerConfig(units=1024, activation="relu"),
+                MLPLayerConfig(units=1024, activation="silu"),
+                MLPLayerConfig(units=512, activation="silu"),
             ],
             decoder_layers=[
-                MLPLayerConfig(units=1024, activation="relu"),
-                MLPLayerConfig(units=1024, activation="relu"),
+                MLPLayerConfig(units=512, activation="silu"),
+                MLPLayerConfig(units=1024, activation="silu"),
+            ],
+            # Action MLP: conditions on max_coords_obs + previous_actions
+            action_mlp_in_keys=["max_coords_obs", "previous_actions"],
+            # 493 = max_coords_obs dim; previous_actions dim = number_of_actions
+            action_mlp_extra_dim = 493 + robot_config.number_of_actions,
+            action_mlp_layers=[
+                MLPLayerConfig(units=3096, activation="silu"),
+                MLPLayerConfig(units=2048, activation="silu"),
+                MLPLayerConfig(units=1024, activation="silu"),
             ],
         ),
     )

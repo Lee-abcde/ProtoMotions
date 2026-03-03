@@ -383,6 +383,33 @@ class VAEConfig(NormObsBaseConfig):
     num_out: int = None  # Action Dimension (Required)
     decoder_activation: Optional[str] = "tanh"  # Bound actions to [-1, 1]
 
+    # If False, skip decoder_backbone and feed z directly into the action MLP
+    use_decoder_backbone: bool = field(
+        default=False,
+        metadata={"help": "If False, z is fed directly to action_mlp (no decoder_backbone stage)."}
+    )
+
+    # Keys from tensordict to concatenate with decoder_backbone output before action MLP
+    # e.g. ["max_coords_obs", "previous_actions"]
+    action_mlp_in_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Extra tensordict keys concatenated with decoder output for action MLP."}
+    )
+
+    # Total dimension of all tensors in action_mlp_in_keys (must be set manually)
+    action_mlp_extra_dim: int = field(
+        default=0,
+        metadata={"help": "Sum of dims of tensors listed in action_mlp_in_keys."}
+    )
+
+    # Layers of the action MLP (after concatenation of decoder_backbone output + extra obs)
+    action_mlp_layers: List[MLPLayerConfig] = field(
+        default_factory=lambda: [
+            MLPLayerConfig(units=512, activation="relu"),
+        ],
+        metadata={"help": "Layer config for the action MLP that replaces decoder_head."}
+    )
+
     def __post_init__(self):
         assert self.num_out is not None, "num_out (action dimension) must be provided"
 

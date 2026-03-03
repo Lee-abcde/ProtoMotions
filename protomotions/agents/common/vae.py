@@ -87,17 +87,29 @@ class VAE(TensorDictModuleBase):
             self.prior_mu = nn.Linear(prior_out_dim, config.latent_dim)
             self.prior_logvar = nn.Linear(prior_out_dim, config.latent_dim)
 
-        # ================== C. Decoder Network (Policy) ==================
-        # Takes Latent Z -> Actions
-        self.decoder_backbone, dec_out_dim = build_sequential_layers(
-            input_dim=config.latent_dim,
-            layers_config=config.decoder_layers
-        )
-        self.decoder_head = nn.Linear(dec_out_dim, config.num_out)
+        # ================== C. Decoder Backbone (optional) ==================
+        # When use_decoder_backbone=False, z is fed directly to the action MLP
+        if config.use_decoder_backbone:
+            self.decoder_backbone, dec_out_dim = build_sequential_layers(
+                input_dim=config.latent_dim,
+                layers_config=config.decoder_layers
+            )
+        else:
+            self.decoder_backbone = None
+            dec_out_dim = config.latent_dim
 
-        self.decoder_activation = None
+        # ================== D. Action MLP ==================
+        # Optionally conditions on extra obs (e.g. max_coords_obs, previous_actions)
+        self.action_mlp_in_keys = config.action_mlp_in_keys  # may be empty
+        action_mlp_input_dim = dec_out_dim + config.action_mlp_extra_dim
+        self.action_mlp_backbone, action_mlp_out_dim = build_sequential_layers(
+            input_dim=action_mlp_input_dim,
+            layers_config=config.action_mlp_layers
+        )
+        self.action_mlp_head = nn.Linear(action_mlp_out_dim, config.num_out)
+        self.action_mlp_activation = None
         if config.decoder_activation:
-            self.decoder_activation = get_activation_func(config.decoder_activation)
+            self.action_mlp_activation = get_activation_func(config.decoder_activation)
         self.init_weights()
 
     def init_weights(self):
@@ -112,7 +124,8 @@ class VAE(TensorDictModuleBase):
                     nn.init.zeros_(m.bias)
 
         self.posterior_backbone.apply(_init_backbone)
-        self.decoder_backbone.apply(_init_backbone)
+        if self.decoder_backbone is not None:
+            self.decoder_backbone.apply(_init_backbone)
         if self.config.use_learned_prior and hasattr(self, 'prior_backbone'):
             self.prior_backbone.apply(_init_backbone)
 
@@ -122,9 +135,11 @@ class VAE(TensorDictModuleBase):
         if self.post_mu.bias is not None:
             nn.init.zeros_(self.post_mu.bias)
 
-        nn.init.normal_(self.decoder_head.weight, 0.0, std=0.02)
-        if self.decoder_head.bias is not None:
-            nn.init.zeros_(self.decoder_head.bias)
+        # Action MLP backbone and head
+        self.action_mlp_backbone.apply(_init_backbone)
+        nn.init.normal_(self.action_mlp_head.weight, 0.0, std=0.02)
+        if self.action_mlp_head.bias is not None:
+            nn.init.zeros_(self.action_mlp_head.bias)
 
         # 3. Initialize Logvar (variance), forced to 0 (initial variance = 1.0)
         # This gives PPO stable and predictable exploration noise at the start
@@ -214,13 +229,25 @@ class VAE(TensorDictModuleBase):
             #     z = prior_mu  # Use deterministic prior mean for stable eval
 
         # -----------------------------------------------------------
-        # 3. Decode Action
+        # 3. Decode Action via Action MLP
         # -----------------------------------------------------------
-        decoder_hidden = self.decoder_backbone(z)
-        action = self.decoder_head(decoder_hidden)
+        # Optionally pass z through decoder backbone first
+        if self.decoder_backbone is not None:
+            decoder_hidden = self.decoder_backbone(z)
+        else:
+            decoder_hidden = z
 
-        if self.decoder_activation:
-            action = self.decoder_activation(action)
+        # Concatenate extra conditioning obs if configured
+        if self.action_mlp_in_keys:
+            extra = torch.cat([tensordict[k] for k in self.action_mlp_in_keys], dim=-1)
+            action_mlp_in = torch.cat([decoder_hidden, extra], dim=-1)
+        else:
+            action_mlp_in = decoder_hidden
+
+        action = self.action_mlp_backbone(action_mlp_in)
+        action = self.action_mlp_head(action)
+        if self.action_mlp_activation:
+            action = self.action_mlp_activation(action)
 
         # Write final outputs
         tensordict[self.action_key] = action
