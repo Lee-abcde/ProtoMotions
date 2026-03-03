@@ -417,3 +417,108 @@ class VAEConfig(NormObsBaseConfig):
         expected_keys = 6 if self.use_learned_prior else 4
         # if len(self.out_keys) < expected_keys:
         #     raise ValueError(f"VAEConfig needs {expected_keys} out_keys, got {len(self.out_keys)}")
+
+
+# =============================================================================
+# VQ-VAE Configurations
+# =============================================================================
+
+@dataclass
+class VQVAEConfig(NormObsBaseConfig):
+    """Configuration for VQ-VAE with deterministic quantized latent space.
+
+    Unlike VAE, VQ-VAE maps encoder output to the nearest codebook entry
+    (deterministic), making it fully compatible with PPO's policy ratio.
+
+    Architecture:
+    1. Encoder:  (Self + Task Obs) → continuous z_e → quantize → z_q
+    2. Prior:    (Self Obs)        → logits over codebook entries
+    3. Decoder:  z_q               → Action
+    """
+
+    _target_: str = "protomotions.agents.common.vqvae.VQVAE"
+
+    # ---------------- Data Flow Configuration ----------------
+
+    in_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Input keys for Encoder (Self + Task)."}
+    )
+    prior_in_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Input keys for Prior Network (Self Only)."}
+    )
+    # out_keys order: [action, vq_z, vq_commitment_loss, vq_prior_loss, vq_perplexity, vq_indices]
+    out_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Must contain 6 keys in order: [action, z, commitment_loss, prior_loss, perplexity, indices]."}
+    )
+    module_operations: List[ModuleOperationConfig] = field(
+        default_factory=lambda: [ModuleOperationForwardConfig()],
+    )
+
+    # ---------------- Architecture Configuration ----------------
+
+    latent_dim: int = 128
+
+    # VQ-specific parameters
+    num_embeddings: int = field(
+        default=512,
+        metadata={"help": "Number of codebook entries (K). Controls latent space capacity."}
+    )
+    commitment_cost: float = field(
+        default=0.25,
+        metadata={"help": "Weight for commitment loss (encoder output → codebook)."}
+    )
+    ema_decay: float = field(
+        default=0.99,
+        metadata={"help": "Decay rate for EMA codebook updates. Higher = slower update."}
+    )
+    dead_code_threshold: int = field(
+        default=2,
+        metadata={"help": "Min usage count before a codebook entry is considered dead."}
+    )
+    dead_code_revive_every: int = field(
+        default=100,
+        metadata={"help": "Check and revive dead codes every N forward passes."}
+    )
+
+    use_learned_prior: bool = True
+
+    # Encoder
+    encoder_layers: List[MLPLayerConfig] = field(
+        default_factory=lambda: [
+            MLPLayerConfig(units=1024, activation="silu"),
+            MLPLayerConfig(units=512, activation="silu"),
+        ]
+    )
+    # Prior
+    prior_layers: List[MLPLayerConfig] = field(
+        default_factory=lambda: [
+            MLPLayerConfig(units=1024, activation="silu"),
+            MLPLayerConfig(units=512, activation="silu"),
+        ]
+    )
+    # Decoder backbone (optional)
+    decoder_layers: List[MLPLayerConfig] = field(
+        default_factory=lambda: [
+            MLPLayerConfig(units=512, activation="silu"),
+            MLPLayerConfig(units=1024, activation="silu"),
+        ]
+    )
+
+    num_out: int = None
+    decoder_activation: Optional[str] = "silu"
+    use_decoder_backbone: bool = False
+
+    # Action MLP
+    action_mlp_in_keys: List[str] = field(default_factory=list)
+    action_mlp_extra_dim: int = 0
+    action_mlp_layers: List[MLPLayerConfig] = field(
+        default_factory=lambda: [
+            MLPLayerConfig(units=512, activation="silu"),
+        ],
+    )
+
+    def __post_init__(self):
+        assert self.num_out is not None, "num_out (action dimension) must be provided"
