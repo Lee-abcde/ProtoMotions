@@ -135,12 +135,6 @@ class VAE(TensorDictModuleBase):
         if self.post_mu.bias is not None:
             nn.init.zeros_(self.post_mu.bias)
 
-        # Action MLP backbone and head
-        self.action_mlp_backbone.apply(_init_backbone)
-        nn.init.normal_(self.action_mlp_head.weight, 0.0, std=0.02)
-        if self.action_mlp_head.bias is not None:
-            nn.init.zeros_(self.action_mlp_head.bias)
-
         # 3. Initialize Logvar (variance), forced to 0 (initial variance = 1.0)
         # This gives PPO stable and predictable exploration noise at the start
         nn.init.normal_(self.post_logvar.weight, 0.0, std=0.02)
