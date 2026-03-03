@@ -143,7 +143,7 @@ def agent_config(
         mu_key="actor_trunk_out",
         mu_model=VAEConfig(
             in_keys=["max_coords_obs", "mimic_target_poses", "previous_actions"],
-            prior_in_keys=["max_coords_obs"],
+            prior_in_keys=["max_coords_obs", "previous_actions"],
             normalize_obs=True,
             norm_clamp_value=5,
             # 3. Outputs: [Action, Z, Post_Mu, Post_LogVar, Prior_Mu, Prior_LogVar]

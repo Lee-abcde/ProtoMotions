@@ -67,7 +67,7 @@ class VAE(TensorDictModuleBase):
         self.norm = NormObsBase(config)
         self.prior_norm = NormObsBase(config) if config.use_learned_prior else None
         self.obs_dim = 1314
-        self.prior_obs_dim = 493
+        self.prior_obs_dim = 493 + config.num_out  # max_coords_obs + previous_actions
         # ================== A. Posterior Network (Encoder) ==================
         # Takes full state (Self + Task)
         self.posterior_backbone, post_out_dim = build_sequential_layers(
