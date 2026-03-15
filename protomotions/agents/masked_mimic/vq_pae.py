@@ -409,6 +409,9 @@ class MaskedMimicVQPAEModel(BaseModel):
         tensordict["vq_pae_reconstruction_loss"] = F.mse_loss(
             posterior["reconstruction"], posterior["encoded"], reduction="none"
         ).mean(dim=(1, 2))
+        tensordict["vq_pae_prior_reconstruction_loss"] = F.mse_loss(
+            prior["reconstruction"], prior["encoded"], reduction="none"
+        ).mean(dim=(1, 2))
         tensordict["vq_pae_prior_alignment_loss"] = F.mse_loss(
             prior["center"], posterior["center"].detach(), reduction="none"
         ).mean(dim=-1)
@@ -436,6 +439,10 @@ class MaskedMimicVQPAEModel(BaseModel):
             tensordict["vq_pae_reconstruction_loss"].mean()
             * losses.reconstruction_weight
         )
+        prior_reconstruction = (
+            tensordict["vq_pae_prior_reconstruction_loss"].mean()
+            * losses.reconstruction_weight
+        )
         prior_alignment = (
             tensordict["vq_pae_prior_alignment_loss"].mean()
             * losses.prior_alignment_weight
@@ -452,6 +459,7 @@ class MaskedMimicVQPAEModel(BaseModel):
             commitment
             + prior_commitment
             + reconstruction
+            + prior_reconstruction
             + prior_alignment
             + phase_alignment
             + frequency_alignment
@@ -460,6 +468,7 @@ class MaskedMimicVQPAEModel(BaseModel):
             "masked_mimic/vq_commitment_loss": commitment.detach(),
             "masked_mimic/vq_prior_commitment_loss": prior_commitment.detach(),
             "masked_mimic/vq_reconstruction_loss": reconstruction.detach(),
+            "masked_mimic/vq_prior_reconstruction_loss": prior_reconstruction.detach(),
             "masked_mimic/vq_prior_alignment_loss": prior_alignment.detach(),
             "masked_mimic/vq_phase_alignment_loss": phase_alignment.detach(),
             "masked_mimic/vq_frequency_alignment_loss": frequency_alignment.detach(),
