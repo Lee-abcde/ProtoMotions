@@ -354,7 +354,7 @@ class MaskedMimic(BaseAgent):
         # Behavioral cloning loss
         bc_loss = torch.square(actions - expert_actions).mean()
 
-        extra_loss, extra_log_dict = self.calculate_extra_loss(batch_dict, actions)
+        extra_loss, extra_log_dict = self.calculate_extra_loss(batch_dict, actions, batch_td)
 
         # KL divergence loss (if using VAE)
         if hasattr(self.config.model, "vae"):
@@ -396,7 +396,14 @@ class MaskedMimic(BaseAgent):
 
         return loss, log_dict
 
-    def calculate_extra_loss(self, batch_dict, actions) -> Tuple[Tensor, Dict]:
+    def calculate_extra_loss(
+        self,
+        batch_dict,
+        actions,
+        batch_td: Optional[TensorDict] = None,
+    ) -> Tuple[Tensor, Dict]:
+        if batch_td is not None and hasattr(self.model, "calculate_aux_losses"):
+            return self.model.calculate_aux_losses(batch_td)
         return torch.tensor(0.0, device=self.device), {}
 
     # -----------------------------
