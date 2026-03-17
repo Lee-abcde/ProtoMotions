@@ -215,7 +215,7 @@ class MaskedMimicVQPAEModel(BaseModel):
         )
 
     def _reshape_future(self, tensordict: TensorDict) -> torch.Tensor:
-        return tensordict["mimic_target_poses_norm"].reshape(
+        return tensordict["vq_pae_target_poses_norm"].reshape(
             -1,
             self.config.num_future_steps,
             self.config.future_obs_dim,

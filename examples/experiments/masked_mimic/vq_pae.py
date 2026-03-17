@@ -58,12 +58,13 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
 
     env_cfg = _TRANSFORMER_MODULE.env_config(robot_cfg, args)
     env_cfg.control_components["masked_mimic"].num_future_steps = NUM_FUTURE_STEPS
-    env_cfg.observation_components["mimic_target_poses"] = (
+    env_cfg.observation_components["vq_pae_target_poses"] = (
         mimic_target_poses_max_coords_factory(
             with_velocities=True,
             num_future_steps=NUM_FUTURE_STEPS,
         )
     )
+
     return env_cfg
 
 
@@ -88,12 +89,12 @@ def agent_config(
         in_keys=[
             "max_coords_obs",
             "historical_pose_obs",
-            "mimic_target_poses",
+            "vq_pae_target_poses",
         ],
         out_keys=[
             "max_coords_obs_norm",
             "historical_pose_obs_norm",
-            "mimic_target_poses_norm",
+            "vq_pae_target_poses_norm",
         ],
         models=[
             ObsProcessorConfig(
@@ -111,8 +112,8 @@ def agent_config(
                 module_operations=[ModuleOperationForwardConfig()],
             ),
             ObsProcessorConfig(
-                in_keys=["mimic_target_poses"],
-                out_keys=["mimic_target_poses_norm"],
+                in_keys=["vq_pae_target_poses"],
+                out_keys=["vq_pae_target_poses_norm"],
                 normalize_obs=True,
                 norm_clamp_value=5,
                 module_operations=[ModuleOperationForwardConfig()],
@@ -154,7 +155,7 @@ def agent_config(
         ],
         posterior_in_keys=[
             "max_coords_obs_norm",
-            "mimic_target_poses_norm",
+            "vq_pae_target_poses_norm",
             "historical_pose_obs_norm",
         ],
         preprocessor=preprocessor_config,
