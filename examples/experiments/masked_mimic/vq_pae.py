@@ -25,8 +25,8 @@ import os
 
 from protomotions.robot_configs.base import RobotConfig
 from protomotions.envs.base_env.config import EnvConfig
-from protomotions.agents.masked_mimic.config import (
-    MaskedMimicAgentConfig,
+from protomotions.agents.masked_mimic.config import MaskedMimicAgentConfig
+from protomotions.agents.masked_mimic.vq_pae_config import (
     MaskedMimicVQPAEModelConfig,
     VQPAELossConfig,
 )
@@ -50,8 +50,21 @@ additional_experiment_arguments = _TRANSFORMER_MODULE.additional_experiment_argu
 terrain_config = _TRANSFORMER_MODULE.terrain_config
 scene_lib_config = _TRANSFORMER_MODULE.scene_lib_config
 motion_lib_config = _TRANSFORMER_MODULE.motion_lib_config
-env_config = _TRANSFORMER_MODULE.env_config
 apply_inference_overrides = _TRANSFORMER_MODULE.apply_inference_overrides
+
+
+def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
+    from protomotions.envs.obs import mimic_target_poses_max_coords_factory
+
+    env_cfg = _TRANSFORMER_MODULE.env_config(robot_cfg, args)
+    env_cfg.control_components["masked_mimic"].num_future_steps = NUM_FUTURE_STEPS
+    env_cfg.observation_components["mimic_target_poses"] = (
+        mimic_target_poses_max_coords_factory(
+            with_velocities=True,
+            num_future_steps=NUM_FUTURE_STEPS,
+        )
+    )
+    return env_cfg
 
 
 def agent_config(
@@ -68,24 +81,17 @@ def agent_config(
     from protomotions.agents.evaluators.config import MimicEvaluatorConfig
 
     num_bodies = len(robot_config.kinematic_info.body_names)
-    num_conditionable_bodies = len(robot_config.trackable_bodies_subset)
     current_obs_dim = 1 + (num_bodies - 1) * 3 + num_bodies * 6 + num_bodies * 3 + num_bodies * 3
     historical_obs_dim = current_obs_dim + 1
-    future_sparse_obs_dim = num_conditionable_bodies * 24
-    future_mask_dim = num_conditionable_bodies * 2
-    privileged_future_obs_dim = num_bodies * (3 + 3 + 6 + 6 + 3 + 3)
+    future_obs_dim = num_bodies * (3 + 3 + 6 + 6 + 3 + 3)
     preprocessor_config = ModuleContainerConfig(
         in_keys=[
             "max_coords_obs",
-            "masked_mimic_target_poses",
-            "masked_mimic_target_times",
             "historical_pose_obs",
             "mimic_target_poses",
         ],
         out_keys=[
             "max_coords_obs_norm",
-            "masked_mimic_target_poses_norm",
-            "masked_mimic_target_times_norm",
             "historical_pose_obs_norm",
             "mimic_target_poses_norm",
         ],
@@ -93,20 +99,6 @@ def agent_config(
             ObsProcessorConfig(
                 in_keys=["max_coords_obs"],
                 out_keys=["max_coords_obs_norm"],
-                normalize_obs=True,
-                norm_clamp_value=5,
-                module_operations=[ModuleOperationForwardConfig()],
-            ),
-            ObsProcessorConfig(
-                in_keys=["masked_mimic_target_poses"],
-                out_keys=["masked_mimic_target_poses_norm"],
-                normalize_obs=True,
-                norm_clamp_value=5,
-                module_operations=[ModuleOperationForwardConfig()],
-            ),
-            ObsProcessorConfig(
-                in_keys=["masked_mimic_target_times"],
-                out_keys=["masked_mimic_target_times_norm"],
                 normalize_obs=True,
                 norm_clamp_value=5,
                 module_operations=[ModuleOperationForwardConfig()],
@@ -158,32 +150,21 @@ def agent_config(
     model_config = MaskedMimicVQPAEModelConfig(
         prior_in_keys=[
             "max_coords_obs_norm",
-            "masked_mimic_target_poses_norm",
-            "masked_mimic_target_masks",
-            "masked_mimic_target_times_norm",
-            "masked_mimic_target_poses_masks",
             "historical_pose_obs_norm",
         ],
         posterior_in_keys=[
             "max_coords_obs_norm",
             "mimic_target_poses_norm",
-            "masked_mimic_target_poses_norm",
-            "masked_mimic_target_masks",
-            "masked_mimic_target_times_norm",
-            "masked_mimic_target_poses_masks",
             "historical_pose_obs_norm",
         ],
         preprocessor=preprocessor_config,
         trunk=trunk_config,
         num_future_steps=NUM_FUTURE_STEPS,
         num_historical_conditioned_steps=NUM_HISTORICAL_CONDITIONED_STEPS,
-        privileged_future_steps=1,
+        time_step=4.0 / 60.0,
         current_obs_dim=current_obs_dim,
         historical_obs_dim=historical_obs_dim,
-        future_sparse_obs_dim=future_sparse_obs_dim,
-        future_mask_dim=future_mask_dim,
-        future_time_dim=1,
-        privileged_future_obs_dim=privileged_future_obs_dim,
+        future_obs_dim=future_obs_dim,
         latent_channels=256,
         intermediate_channels=256,
         phase_state_dim=256,

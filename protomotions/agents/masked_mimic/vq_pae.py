@@ -40,7 +40,9 @@ from protomotions.agents.common.vae import build_sequential_layers
 from protomotions.utils.hydra_replacement import get_class
 
 if TYPE_CHECKING:
-    from protomotions.agents.masked_mimic.config import MaskedMimicVQPAEModelConfig
+    from protomotions.agents.masked_mimic.vq_pae_config import (
+        MaskedMimicVQPAEModelConfig,
+    )
 
 
 def _conv_stack(
@@ -98,19 +100,8 @@ class MaskedMimicVQPAEModel(BaseModel):
         self.history_projector = nn.Linear(
             self.config.historical_obs_dim, self.config.latent_channels
         )
-        self.sparse_future_projector = nn.Linear(
-            self.config.future_sparse_obs_dim
-            + self.config.future_mask_dim
-            + self.config.future_time_dim,
-            self.config.latent_channels,
-        )
-        self.privileged_future_projector = nn.Linear(
-            self.config.privileged_future_obs_dim, self.config.latent_channels
-        )
-        self.posterior_future_fuser = nn.Sequential(
-            nn.Linear(self.config.latent_channels * 2, self.config.latent_channels),
-            nn.GELU(),
-            nn.Linear(self.config.latent_channels, self.config.latent_channels),
+        self.future_projector = nn.Linear(
+            self.config.future_obs_dim, self.config.latent_channels
         )
 
         self.posterior_encoder = _conv_stack(
@@ -181,19 +172,31 @@ class MaskedMimicVQPAEModel(BaseModel):
         )
 
         self.register_buffer("two_pi", torch.tensor(2.0 * math.pi, dtype=torch.float32))
-        prior_seq_len = (
-            self.config.num_historical_conditioned_steps
-            + 1
-            + self.config.num_future_steps
+        prior_seq_len = self.config.num_historical_conditioned_steps + 1
+        posterior_seq_len = prior_seq_len + self.config.num_future_steps
+        history_offsets = (
+            torch.arange(
+                -self.config.num_historical_conditioned_steps,
+                1,
+                dtype=torch.float32,
+            )
+            * self.config.time_step
         )
-        posterior_seq_len = prior_seq_len
+        future_offsets = (
+            torch.arange(
+                1,
+                self.config.num_future_steps + 1,
+                dtype=torch.float32,
+            )
+            * self.config.time_step
+        )
         self.register_buffer(
             "prior_args",
-            torch.linspace(-0.5, 0.5, prior_seq_len, dtype=torch.float32),
+            history_offsets,
         )
         self.register_buffer(
             "posterior_args",
-            torch.linspace(-0.5, 0.5, posterior_seq_len, dtype=torch.float32),
+            torch.cat([history_offsets, future_offsets], dim=0),
         )
         self.register_buffer(
             "prior_freqs",
@@ -204,18 +207,6 @@ class MaskedMimicVQPAEModel(BaseModel):
             torch.fft.rfftfreq(posterior_seq_len, d=1.0)[1:] * posterior_seq_len,
         )
 
-    def _reshape_sparse_future(self, tensordict: TensorDict) -> torch.Tensor:
-        sparse_future = tensordict["masked_mimic_target_poses_norm"].reshape(
-            -1, self.config.num_future_steps, self.config.future_sparse_obs_dim
-        )
-        future_masks = tensordict["masked_mimic_target_masks"].reshape(
-            -1, self.config.num_future_steps, self.config.future_mask_dim
-        )
-        future_times = tensordict["masked_mimic_target_times_norm"].reshape(
-            -1, self.config.num_future_steps, self.config.future_time_dim
-        )
-        return torch.cat([sparse_future, future_masks, future_times], dim=-1)
-
     def _reshape_history(self, tensordict: TensorDict) -> torch.Tensor:
         return tensordict["historical_pose_obs_norm"].reshape(
             -1,
@@ -223,34 +214,22 @@ class MaskedMimicVQPAEModel(BaseModel):
             self.config.historical_obs_dim,
         )
 
-    def _reshape_privileged_future(self, tensordict: TensorDict) -> torch.Tensor:
+    def _reshape_future(self, tensordict: TensorDict) -> torch.Tensor:
         return tensordict["mimic_target_poses_norm"].reshape(
             -1,
-            self.config.privileged_future_steps,
-            self.config.privileged_future_obs_dim,
+            self.config.num_future_steps,
+            self.config.future_obs_dim,
         )
 
     def _build_prior_sequence(self, tensordict: TensorDict) -> torch.Tensor:
         history = self.history_projector(self._reshape_history(tensordict))
         current = self.current_projector(tensordict["max_coords_obs_norm"]).unsqueeze(1)
-        sparse_future = self.sparse_future_projector(self._reshape_sparse_future(tensordict))
-        return torch.cat([history, current, sparse_future], dim=1)
+        return torch.cat([history, current], dim=1)
 
     def _build_posterior_sequence(self, tensordict: TensorDict) -> torch.Tensor:
         prior_sequence = self._build_prior_sequence(tensordict)
-        privileged_future = self.privileged_future_projector(
-            self._reshape_privileged_future(tensordict)
-        )
-        history_len = self.config.num_historical_conditioned_steps + 1
-        future_tokens = prior_sequence[:, history_len:].clone()
-        num_fused_steps = min(self.config.privileged_future_steps, future_tokens.shape[1])
-        if num_fused_steps > 0:
-            fused = torch.cat(
-                [future_tokens[:, :num_fused_steps], privileged_future[:, :num_fused_steps]],
-                dim=-1,
-            )
-            future_tokens[:, :num_fused_steps] = self.posterior_future_fuser(fused)
-        return torch.cat([prior_sequence[:, :history_len], future_tokens], dim=1)
+        future = self.future_projector(self._reshape_future(tensordict))
+        return torch.cat([prior_sequence, future], dim=1)
 
     def fft_with_nn(
         self,
@@ -343,7 +322,7 @@ class MaskedMimicVQPAEModel(BaseModel):
         )
         manifold, _ = self.get_phase_manifold(quantized_state, angles)
         reconstruction = reconstruction_head(manifold)
-        center_idx = manifold.shape[-1] // 2
+        center_idx = self.config.num_historical_conditioned_steps
 
         return {
             "encoded": encoded,
