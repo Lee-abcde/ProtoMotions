@@ -104,6 +104,10 @@ class FeedForwardModelConfig(BaseModelConfig):
         default_factory=ModuleContainerConfig,
         metadata={"help": "Main trunk network for forward pass."}
     )
+    optimizer: OptimizerConfig = field(
+        default_factory=lambda: OptimizerConfig(lr=2e-5),
+        metadata={"help": "Optimizer settings for model training."}
+    )
 
 
 @dataclass
