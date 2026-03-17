@@ -29,8 +29,11 @@ from protomotions.robot_configs.base import RobotConfig
 from protomotions.simulator.base_simulator.config import SimulatorConfig
 from protomotions.envs.base_env.config import EnvConfig
 from protomotions.agents.masked_mimic.config import (
-    FeedForwardModelConfig,
+    KLDScheduleConfig,
     MaskedMimicAgentConfig,
+    MaskedMimicModelConfig,
+    VaeConfig,
+    VaeNoiseType,
 )
 
 
@@ -145,16 +148,82 @@ def agent_config(
     )
     from protomotions.agents.evaluators.config import MimicEvaluatorConfig
 
-    trunk_config = ModuleContainerConfig(
+    vae_latent_dim = 64
+
+    encoder_config = ModuleContainerConfig(
         in_keys=["max_coords_obs", "mimic_target_poses", "previous_actions"],
+        out_keys=["encoder_mu", "encoder_logvar"],
+        models=[
+            MLPWithConcatConfig(
+                in_keys=["max_coords_obs", "mimic_target_poses", "previous_actions"],
+                out_keys=["encoder_trunk_out"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                num_out=512,
+                layers=[MLPLayerConfig(units=1024, activation="relu") for _ in range(4)],
+                output_activation="relu",
+            ),
+            MLPWithConcatConfig(
+                in_keys=["encoder_trunk_out"],
+                out_keys=["encoder_mu"],
+                num_out=vae_latent_dim,
+                layers=[
+                    MLPLayerConfig(units=256, activation="relu"),
+                    MLPLayerConfig(units=128, activation="relu"),
+                ],
+            ),
+            MLPWithConcatConfig(
+                in_keys=["encoder_trunk_out"],
+                out_keys=["encoder_logvar"],
+                num_out=vae_latent_dim,
+                layers=[
+                    MLPLayerConfig(units=256, activation="relu"),
+                    MLPLayerConfig(units=128, activation="relu"),
+                ],
+            ),
+        ],
+    )
+
+    prior_config = ModuleContainerConfig(
+        in_keys=["max_coords_obs", "previous_actions"],
+        out_keys=["prior_mu", "prior_logvar"],
+        models=[
+            MLPWithConcatConfig(
+                in_keys=["max_coords_obs", "previous_actions"],
+                out_keys=["prior_trunk_out"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                num_out=512,
+                layers=[MLPLayerConfig(units=1024, activation="relu") for _ in range(4)],
+                output_activation="relu",
+            ),
+            MLPWithConcatConfig(
+                in_keys=["prior_trunk_out"],
+                out_keys=["prior_mu"],
+                num_out=vae_latent_dim,
+                layers=[
+                    MLPLayerConfig(units=256, activation="relu"),
+                    MLPLayerConfig(units=128, activation="relu"),
+                ],
+            ),
+            MLPWithConcatConfig(
+                in_keys=["prior_trunk_out"],
+                out_keys=["prior_logvar"],
+                num_out=vae_latent_dim,
+                layers=[
+                    MLPLayerConfig(units=256, activation="relu"),
+                    MLPLayerConfig(units=128, activation="relu"),
+                ],
+            ),
+        ],
+    )
+
+    trunk_config = ModuleContainerConfig(
+        in_keys=["max_coords_obs", "previous_actions", "vae_latent"],
         out_keys=["actor_trunk_out"],
         models=[
             MLPWithConcatConfig(
-                in_keys=[
-                    "max_coords_obs",
-                    "mimic_target_poses",
-                    "previous_actions",
-                ],
+                in_keys=["max_coords_obs", "previous_actions", "vae_latent"],
                 out_keys=["actor_trunk_out"],
                 normalize_obs=True,
                 norm_clamp_value=5,
@@ -165,8 +234,15 @@ def agent_config(
         ],
     )
 
-    model_config = FeedForwardModelConfig(
+    model_config = MaskedMimicModelConfig(
+        encoder=encoder_config,
+        prior=prior_config,
         trunk=trunk_config,
+        vae=VaeConfig(
+            vae_latent_dim=vae_latent_dim,
+            vae_noise_type=VaeNoiseType.NORMAL,
+            kld_schedule=KLDScheduleConfig(start_epoch=500, end_epoch=2000),
+        ),
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
 
