@@ -32,7 +32,6 @@ class VQPAELossConfig:
 
     commitment_weight: float = 1.0
     prior_commitment_weight: float = 0.25
-    reconstruction_weight: float = 1.0
     prior_alignment_weight: float = 1.0
     phase_alignment_weight: float = 0.1
     frequency_alignment_weight: float = 0.1

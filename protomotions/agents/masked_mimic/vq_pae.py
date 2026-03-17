@@ -164,13 +164,6 @@ class MaskedMimicVQPAEModel(BaseModel):
                 "phase_state_dim must be divisible by n_timing_phases * 2 for the complex manifold basis"
             )
 
-        self.posterior_reconstruction_head = nn.Conv1d(
-            self.manifold_channels, self.config.latent_channels, kernel_size=1
-        )
-        self.prior_reconstruction_head = nn.Conv1d(
-            self.manifold_channels, self.config.latent_channels, kernel_size=1
-        )
-
         self.register_buffer("two_pi", torch.tensor(2.0 * math.pi, dtype=torch.float32))
         prior_seq_len = self.config.num_historical_conditioned_steps + 1
         posterior_seq_len = prior_seq_len + self.config.num_future_steps
@@ -274,6 +267,20 @@ class MaskedMimicVQPAEModel(BaseModel):
         manifold = manifold.reshape(manifold.shape[0], -1, manifold.shape[-1])
         return manifold, basis
 
+    def _decode_manifold_at_args(
+        self,
+        quantized_state: torch.Tensor,
+        frequency: torch.Tensor,
+        phase: torch.Tensor,
+        time_args: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode manifold features at arbitrary time arguments."""
+        angles = self.two_pi * (
+            frequency.unsqueeze(-1) * time_args.view(1, 1, -1) + phase.unsqueeze(-1)
+        )
+        manifold, _ = self.get_phase_manifold(quantized_state, angles)
+        return manifold
+
     def _quantize(
         self, state: torch.Tensor, update_codebook: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -304,7 +311,6 @@ class MaskedMimicVQPAEModel(BaseModel):
         state_head: nn.Module,
         args: torch.Tensor,
         freqs: torch.Tensor,
-        reconstruction_head: nn.Module,
         update_codebook: bool,
     ) -> Dict[str, torch.Tensor]:
         encoded = encoder(sequence.transpose(1, 2))
@@ -317,12 +323,26 @@ class MaskedMimicVQPAEModel(BaseModel):
         quantized_state, commitment_loss, indices, perplexity = self._quantize(
             state, update_codebook=update_codebook
         )
-        angles = self.two_pi * (
-            frequency.unsqueeze(-1) * args.view(1, 1, -1) + phase.unsqueeze(-1)
+        manifold = self._decode_manifold_at_args(
+            quantized_state=quantized_state,
+            frequency=frequency,
+            phase=phase,
+            time_args=args,
         )
-        manifold, _ = self.get_phase_manifold(quantized_state, angles)
-        reconstruction = reconstruction_head(manifold)
         center_idx = self.config.num_historical_conditioned_steps
+        current_arg = args[center_idx]
+        # Args are defined with the center at current frame (t=0). Query t+dt explicitly.
+        next_arg = current_arg + self.config.time_step
+        next_step_manifold = self._decode_manifold_at_args(
+            quantized_state=quantized_state,
+            frequency=frequency,
+            phase=phase,
+            time_args=next_arg.unsqueeze(0),
+        )
+        if torch.abs(current_arg) > 1e-6:
+            raise ValueError(
+                f"Expected center arg to be current frame (0), got {float(current_arg)}"
+            )
 
         return {
             "encoded": encoded,
@@ -336,8 +356,8 @@ class MaskedMimicVQPAEModel(BaseModel):
             "indices": indices,
             "perplexity": perplexity,
             "manifold": manifold,
-            "reconstruction": reconstruction,
             "center": manifold[:, :, center_idx],
+            "next_step": next_step_manifold[:, :, 0],
         }
 
     def forward(self, tensordict: TensorDict) -> TensorDict:
@@ -354,7 +374,6 @@ class MaskedMimicVQPAEModel(BaseModel):
             state_head=self.posterior_state_head,
             args=self.posterior_args,
             freqs=self.posterior_freqs,
-            reconstruction_head=self.posterior_reconstruction_head,
             update_codebook=True,
         )
 
@@ -371,28 +390,22 @@ class MaskedMimicVQPAEModel(BaseModel):
             state_head=self.prior_state_head,
             args=self.prior_args,
             freqs=self.prior_freqs,
-            reconstruction_head=self.prior_reconstruction_head,
             update_codebook=False,
         )
 
-        tensordict["vae_latent"] = prior["center"]
+        # Use one-step-ahead manifold embedding for action conditioning.
+        tensordict["vae_latent"] = prior["next_step"]
         tensordict = self._trunk(tensordict)
         tensordict["action"] = tensordict[self._trunk.out_keys[0]]
 
-        tensordict["vae_latent"] = posterior["center"]
+        tensordict["vae_latent"] = posterior["next_step"]
         tensordict = self._trunk(tensordict)
         tensordict["privileged_action"] = tensordict[self._trunk.out_keys[0]]
 
         tensordict["vq_pae_commitment_loss"] = posterior["commitment_loss"]
         tensordict["vq_pae_prior_commitment_loss"] = prior["commitment_loss"]
-        tensordict["vq_pae_reconstruction_loss"] = F.mse_loss(
-            posterior["reconstruction"], posterior["encoded"], reduction="none"
-        ).mean(dim=(1, 2))
-        tensordict["vq_pae_prior_reconstruction_loss"] = F.mse_loss(
-            prior["reconstruction"], prior["encoded"], reduction="none"
-        ).mean(dim=(1, 2))
         tensordict["vq_pae_prior_alignment_loss"] = F.mse_loss(
-            prior["center"], posterior["center"].detach(), reduction="none"
+            prior["next_step"], posterior["next_step"].detach(), reduction="none"
         ).mean(dim=-1)
         tensordict["vq_pae_phase_alignment_loss"] = F.mse_loss(
             prior["phase"], posterior["phase"].detach(), reduction="none"
@@ -414,14 +427,6 @@ class MaskedMimicVQPAEModel(BaseModel):
             tensordict["vq_pae_prior_commitment_loss"].mean()
             * losses.prior_commitment_weight
         )
-        reconstruction = (
-            tensordict["vq_pae_reconstruction_loss"].mean()
-            * losses.reconstruction_weight
-        )
-        prior_reconstruction = (
-            tensordict["vq_pae_prior_reconstruction_loss"].mean()
-            * losses.reconstruction_weight
-        )
         prior_alignment = (
             tensordict["vq_pae_prior_alignment_loss"].mean()
             * losses.prior_alignment_weight
@@ -437,8 +442,6 @@ class MaskedMimicVQPAEModel(BaseModel):
         total = (
             commitment
             + prior_commitment
-            + reconstruction
-            + prior_reconstruction
             + prior_alignment
             + phase_alignment
             + frequency_alignment
@@ -446,8 +449,6 @@ class MaskedMimicVQPAEModel(BaseModel):
         return total, {
             "masked_mimic/vq_commitment_loss": commitment.detach(),
             "masked_mimic/vq_prior_commitment_loss": prior_commitment.detach(),
-            "masked_mimic/vq_reconstruction_loss": reconstruction.detach(),
-            "masked_mimic/vq_prior_reconstruction_loss": prior_reconstruction.detach(),
             "masked_mimic/vq_prior_alignment_loss": prior_alignment.detach(),
             "masked_mimic/vq_phase_alignment_loss": phase_alignment.detach(),
             "masked_mimic/vq_frequency_alignment_loss": frequency_alignment.detach(),

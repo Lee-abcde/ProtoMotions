@@ -184,7 +184,6 @@ def agent_config(
         losses=VQPAELossConfig(
             commitment_weight=1.0,
             prior_commitment_weight=0.25,
-            reconstruction_weight=1.0,
             prior_alignment_weight=1.0,
             phase_alignment_weight=0.1,
             frequency_alignment_weight=0.1,
