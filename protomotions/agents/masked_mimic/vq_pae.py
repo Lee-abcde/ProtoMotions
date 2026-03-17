@@ -64,6 +64,14 @@ def _conv_stack(
     return nn.Sequential(*layers)
 
 
+def _freq_mlp(in_length: int) -> nn.Sequential:
+    return nn.Sequential(
+        nn.Linear(in_length, max(16, in_length // 2)),
+        nn.GELU(),
+        nn.Linear(max(16, in_length // 2), 1),
+    )
+
+
 class MaskedMimicVQPAEModel(BaseModel):
     """MaskedMimic model with a shared VQ codebook and phase manifold."""
 
@@ -191,14 +199,8 @@ class MaskedMimicVQPAEModel(BaseModel):
             "posterior_args",
             torch.cat([history_offsets, future_offsets], dim=0),
         )
-        self.register_buffer(
-            "prior_freqs",
-            torch.fft.rfftfreq(prior_seq_len, d=1.0)[1:] * prior_seq_len,
-        )
-        self.register_buffer(
-            "posterior_freqs",
-            torch.fft.rfftfreq(posterior_seq_len, d=1.0)[1:] * posterior_seq_len,
-        )
+        self.prior_frequency_head = _freq_mlp(prior_seq_len - 1)
+        self.posterior_frequency_head = _freq_mlp(posterior_seq_len - 1)
 
     def _reshape_history(self, tensordict: TensorDict) -> torch.Tensor:
         return tensordict["historical_pose_obs_norm"].reshape(
@@ -223,23 +225,6 @@ class MaskedMimicVQPAEModel(BaseModel):
         prior_sequence = self._build_prior_sequence(tensordict)
         future = self.future_projector(self._reshape_future(tensordict))
         return torch.cat([prior_sequence, future], dim=1)
-
-    def fft_with_nn(
-        self,
-        signal: torch.Tensor,
-        freqs: torch.Tensor,
-        time_range: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        rfft = torch.fft.rfft(signal, dim=2)
-        magnitudes = rfft.abs()
-        spectrum = magnitudes[:, :, 1:]
-        power = spectrum.square()
-
-        power_sum = power.sum(dim=2).clamp_min(1e-8)
-        freq = (freqs.view(1, 1, -1) * power).sum(dim=2) / power_sum
-        amp = 2.0 * torch.sqrt(power_sum) / float(time_range)
-        offset = rfft.real[:, :, 0] / float(time_range)
-        return freq, amp, offset
 
     def analytical_phase(
         self,
@@ -307,15 +292,25 @@ class MaskedMimicVQPAEModel(BaseModel):
         sequence: torch.Tensor,
         encoder: nn.Module,
         phase_conv: nn.Module,
+        frequency_head: nn.Module,
         state_backbone: nn.Module,
         state_head: nn.Module,
         args: torch.Tensor,
-        freqs: torch.Tensor,
         update_codebook: bool,
     ) -> Dict[str, torch.Tensor]:
         encoded = encoder(sequence.transpose(1, 2))
         latent_1d = phase_conv(encoded)
-        frequency, amplitude, offset = self.fft_with_nn(latent_1d, freqs, encoded.shape[-1])
+        if latent_1d.shape[2] < 2:
+            raise ValueError(
+                f"Need sequence length >= 2 for d1-based frequency prediction, got {latent_1d.shape[2]}"
+            )
+
+        # Predict frequency from the full first-order delta sequence so each branch uses
+        # all valid temporal-change information available in its window.
+        d1 = latent_1d[:, :, 1:] - latent_1d[:, :, :-1]
+        d1_per_second = d1 / self.config.time_step
+        frequency = F.softplus(frequency_head(d1_per_second).squeeze(-1)) + 1e-4
+        offset = latent_1d.mean(dim=2)
         phase = self.analytical_phase(latent_1d, frequency, offset, args)
 
         pooled = encoded.mean(dim=-1)
@@ -347,7 +342,6 @@ class MaskedMimicVQPAEModel(BaseModel):
         return {
             "encoded": encoded,
             "frequency": frequency,
-            "amplitude": amplitude,
             "offset": offset,
             "phase": phase,
             "state": state,
@@ -370,10 +364,10 @@ class MaskedMimicVQPAEModel(BaseModel):
             sequence=posterior_sequence,
             encoder=self.posterior_encoder,
             phase_conv=self.posterior_phase_conv,
+            frequency_head=self.posterior_frequency_head,
             state_backbone=self.posterior_state_backbone,
             state_head=self.posterior_state_head,
             args=self.posterior_args,
-            freqs=self.posterior_freqs,
             update_codebook=True,
         )
 
@@ -386,10 +380,10 @@ class MaskedMimicVQPAEModel(BaseModel):
             sequence=prior_sequence,
             encoder=self.prior_encoder,
             phase_conv=self.prior_phase_conv,
+            frequency_head=self.prior_frequency_head,
             state_backbone=self.prior_state_backbone,
             state_head=self.prior_state_head,
             args=self.prior_args,
-            freqs=self.prior_freqs,
             update_codebook=False,
         )
 
