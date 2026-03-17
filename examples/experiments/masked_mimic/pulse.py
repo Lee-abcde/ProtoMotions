@@ -235,6 +235,7 @@ def agent_config(
     )
 
     model_config = MaskedMimicModelConfig(
+        _target_="protomotions.agents.masked_mimic.model.DetachedEncoderKLMaskedMimicModel",
         encoder=encoder_config,
         prior=prior_config,
         trunk=trunk_config,
