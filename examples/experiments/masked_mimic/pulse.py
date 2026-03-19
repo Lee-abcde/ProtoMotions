@@ -13,32 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""MaskedMimic MLP experiment.
 
-This variant keeps the masked-mimic training/evaluation path and expert
-distillation setup, but uses a simple feedforward student conditioned on the
-same three observation groups as the mimic MLP expert:
-    - max_coords_obs
-    - mimic_target_poses
-    - previous_actions
-"""
 
 import argparse
 
 from protomotions.robot_configs.base import RobotConfig
 from protomotions.simulator.base_simulator.config import SimulatorConfig
 from protomotions.envs.base_env.config import EnvConfig
-from protomotions.agents.masked_mimic.config import (
+from protomotions.agents.distill.config import (
     KLDScheduleConfig,
-    MaskedMimicAgentConfig,
-    MaskedMimicModelConfig,
+    DistillAgentConfig,
+    DistillModelConfig,
     VaeConfig,
     VaeNoiseType,
 )
 
 
 def additional_experiment_arguments(parser: argparse.ArgumentParser):
-    """Add MaskedMimic-specific CLI arguments."""
     parser.add_argument(
         "--expert-model-path",
         type=str,
@@ -70,11 +61,10 @@ def motion_lib_config(args: argparse.Namespace):
 
 
 def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
-    """Build masked-mimic environment configuration."""
     from protomotions.envs.motion_manager.config import MimicMotionManagerConfig
     from protomotions.envs.rewards import gt_rew_factory, gr_rew_factory
     from protomotions.envs.terminations import tracking_error_factory
-    from protomotions.envs.control.masked_mimic_control import MaskedMimicControlConfig
+    from protomotions.envs.control.mimic_control import MimicControlConfig
     from protomotions.envs.obs import (
         max_coords_obs_factory,
         mimic_target_poses_max_coords_factory,
@@ -82,16 +72,9 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     )
 
     control_components = {
-        "masked_mimic": MaskedMimicControlConfig(
-            num_masked_future_steps=1,
-            num_future_steps=1,
+        "mimic": MimicControlConfig(
             bootstrap_on_episode_end=True,
-            time_alpha=2.0,
-            time_beta=5.0,
-            repeat_mask_probability=0.8,
-            force_max_conditioned_bodies_prob=0.1,
-            force_small_num_conditioned_bodies_prob=0.1,
-            visible_target_pose_prob=0.8,
+            num_future_steps=1,
         ),
     }
 
@@ -106,7 +89,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
 
     expert_model_path = getattr(args, "expert_model_path", None)
     if expert_model_path:
-        from protomotions.agents.masked_mimic.utils import (
+        from protomotions.agents.distill.utils import (
             get_expert_observation_components,
             load_expert_configs,
         )
@@ -139,7 +122,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
 
 def agent_config(
     robot_config: RobotConfig, env_config: EnvConfig, args: argparse.Namespace
-) -> MaskedMimicAgentConfig:
+) -> DistillAgentConfig:
     from protomotions.agents.base_agent.config import OptimizerConfig
     from protomotions.agents.common.config import (
         MLPWithConcatConfig,
@@ -234,8 +217,8 @@ def agent_config(
         ],
     )
 
-    model_config = MaskedMimicModelConfig(
-        _target_="protomotions.agents.masked_mimic.model.DetachedEncoderKLMaskedMimicModel",
+    model_config = DistillModelConfig(
+        _target_="protomotions.agents.distill.model.DetachedEncoderKLDistillModel",
         encoder=encoder_config,
         prior=prior_config,
         trunk=trunk_config,
@@ -248,7 +231,7 @@ def agent_config(
     )
 
     expert_model_path = getattr(args, "expert_model_path", None)
-    return MaskedMimicAgentConfig(
+    return DistillAgentConfig(
         model=model_config,
         batch_size=args.batch_size,
         training_max_steps=args.training_max_steps,
@@ -265,7 +248,7 @@ def apply_inference_overrides(
     robot_cfg: RobotConfig,
     simulator_cfg: SimulatorConfig,
     env_cfg: EnvConfig,
-    agent_cfg: MaskedMimicAgentConfig,
+    agent_cfg: DistillAgentConfig,
     terrain_cfg,
     motion_lib_cfg,
     scene_lib_cfg,
@@ -298,7 +281,7 @@ def apply_inference_overrides(
                 hasattr(env_cfg, "observation_components")
                 and env_cfg.observation_components is not None
             ):
-                from protomotions.agents.masked_mimic.utils import (
+                from protomotions.agents.distill.utils import (
                     get_expert_observation_keys,
                     load_expert_configs,
                 )
