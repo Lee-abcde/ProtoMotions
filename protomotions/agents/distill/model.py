@@ -182,59 +182,37 @@ class DistillModel(BaseModel):
         return list(set(self._prior.in_keys + ["vae_noise"] + trunk_in_keys_without_latents))
 
     def kl_loss(self, tensordict: TensorDict):
-        """Compute KL divergence between encoder and prior.
-
-        Args:
-            tensordict: TensorDict containing prior and encoder outputs.
-
-        Returns:
-            KL divergence tensor.
-        """
-        return 0.5 * (
-            tensordict["prior_logvar"]
-            - tensordict["encoder_logvar"]
-            + torch.exp(tensordict["encoder_logvar"])
-            / torch.exp(tensordict["prior_logvar"])
-            + tensordict["encoder_mu"] ** 2 / torch.exp(tensordict["prior_logvar"])
-            - 1
-        )
-
-
-class DetachedKLDistillModel(DistillModel):
-    """MaskedMimic model variant with detached prior statistics in KL."""
-
-    def kl_loss(self, tensordict: TensorDict):
-        prior_logvar = tensordict["prior_logvar"].detach()
-        prior_var = torch.exp(prior_logvar)
+        encoder_mu = tensordict["encoder_mu"]
         encoder_logvar = tensordict["encoder_logvar"]
         encoder_var = torch.exp(encoder_logvar)
 
-        # Prior distribution acts as a fixed teacher target for encoder distillation.
+        prior_mu = tensordict["prior_mu"]
+        prior_logvar = tensordict["prior_logvar"]
+        prior_var = torch.exp(prior_logvar)
+
         return 0.5 * (
-            prior_logvar
-            - encoder_logvar
-            + encoder_var / prior_var
-            + tensordict["encoder_mu"] ** 2 / prior_var
-            - 1
+                prior_logvar
+                - encoder_logvar
+                + encoder_var / prior_var
+                + (encoder_mu - prior_mu) ** 2 / prior_var
+                - 1
         )
 
 
 class DetachedEncoderKLDistillModel(DistillModel):
-    """MaskedMimic variant where KL treats encoder stats as fixed teacher."""
-
     def kl_loss(self, tensordict: TensorDict):
+        encoder_mu = tensordict["encoder_mu"].detach()
         encoder_logvar = tensordict["encoder_logvar"].detach()
         encoder_var = torch.exp(encoder_logvar)
-        encoder_mu_sq = tensordict["encoder_mu"].detach() ** 2
 
+        prior_mu = tensordict["prior_mu"]
         prior_logvar = tensordict["prior_logvar"]
         prior_var = torch.exp(prior_logvar)
 
-        # KL gradients update prior-side parameters while keeping encoder KL target fixed.
         return 0.5 * (
             prior_logvar
             - encoder_logvar
             + encoder_var / prior_var
-            + encoder_mu_sq / prior_var
+            + (encoder_mu - prior_mu) ** 2 / prior_var
             - 1
         )
