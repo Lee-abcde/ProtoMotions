@@ -88,6 +88,18 @@ class VaeConfig:
         default=VaeNoiseType.NORMAL,
         metadata={"help": "Type of noise for latent sampling: normal, uniform, or zeros."}
     )
+    prior_regu_weight: float = field(
+        default=0.0,
+        metadata={"help": "Overall weight for prior/encoder latent statistic regularization.", "min": 0.0}
+    )
+    prior_mean_regu_coeff: float = field(
+        default=0.001,
+        metadata={"help": "Coefficient applied to latent mean magnitude regularization.", "min": 0.0}
+    )
+    prior_logvar_regu_coeff: float = field(
+        default=0.001,
+        metadata={"help": "Coefficient applied to latent log-variance magnitude regularization.", "min": 0.0}
+    )
 
 
 @dataclass

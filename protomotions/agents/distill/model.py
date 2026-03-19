@@ -20,7 +20,7 @@ from protomotions.agents.common.common import ModuleContainer
 from protomotions.agents.base_agent.model import BaseModel
 
 # Import for type annotations - using TYPE_CHECKING to avoid circular imports
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, Tuple
 
 if TYPE_CHECKING:
     from protomotions.agents.distill.config import DistillModelConfig
@@ -197,6 +197,34 @@ class DistillModel(BaseModel):
                 + (encoder_mu - prior_mu) ** 2 / prior_var
                 - 1
         )
+
+    def calculate_aux_losses(
+        self, tensordict: TensorDict
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        vae_config = getattr(self.config, "vae", None)
+        if vae_config is None or vae_config.prior_regu_weight <= 0:
+            return torch.tensor(0.0, device=tensordict.device), {}
+
+        prior_mu = tensordict["prior_mu"]
+        encoder_mu = tensordict["encoder_mu"]
+        prior_logvar = tensordict["prior_logvar"]
+        encoder_logvar = tensordict["encoder_logvar"]
+
+        mean_regu = (
+            (prior_mu.square().mean() + encoder_mu.square().mean())
+            * vae_config.prior_mean_regu_coeff
+        )
+        logvar_regu = (
+            (prior_logvar.square().mean() + encoder_logvar.square().mean())
+            * vae_config.prior_logvar_regu_coeff
+        )
+        total = (mean_regu + logvar_regu) * vae_config.prior_regu_weight
+
+        return total, {
+            "distill/prior_mean_regu": mean_regu.detach(),
+            "distill/prior_logvar_regu": logvar_regu.detach(),
+            "distill/prior_regu_loss": total.detach(),
+        }
 
 
 class DetachedEncoderKLDistillModel(DistillModel):

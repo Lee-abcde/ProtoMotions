@@ -218,14 +218,16 @@ def agent_config(
     )
 
     model_config = DistillModelConfig(
-        _target_="protomotions.agents.distill.model.DetachedEncoderKLDistillModel",
         encoder=encoder_config,
         prior=prior_config,
         trunk=trunk_config,
         vae=VaeConfig(
             vae_latent_dim=vae_latent_dim,
             vae_noise_type=VaeNoiseType.NORMAL,
-            kld_schedule=KLDScheduleConfig(start_epoch=500, end_epoch=2000),
+            prior_regu_weight=0.005,
+            prior_mean_regu_coeff=0.001,
+            prior_logvar_regu_coeff=0.001,
+            kld_schedule=KLDScheduleConfig(start_epoch=2500, end_epoch=5000, init_kld_coeff=0.001, end_kld_coeff=0.01),
         ),
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
