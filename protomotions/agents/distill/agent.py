@@ -263,7 +263,8 @@ class DistillAgent(BaseAgent):
         # Store expert action
         self.experience_buffer.update_data("expert_actions", step, expert_action)
 
-        return action
+        output_td["action"] = action
+        return output_td
 
     def perform_optimization_step(self, batch_dict, batch_idx) -> Dict:
         # Update model
