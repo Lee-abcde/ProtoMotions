@@ -129,7 +129,7 @@ def agent_config(
         MLPLayerConfig,
         ModuleContainerConfig,
     )
-    from protomotions.agents.evaluators.config import MimicEvaluatorConfig
+    from protomotions.agents.evaluators.config import DistillEvaluatorConfig
 
     vae_latent_dim = 64
 
@@ -239,7 +239,7 @@ def agent_config(
         training_max_steps=args.training_max_steps,
         gradient_clip_val=50.0,
         num_mini_epochs=6,
-        evaluator=MimicEvaluatorConfig(
+        evaluator=DistillEvaluatorConfig(
             eval_metric_keys=["gt_err", "gr_err", "gr_err_degrees", "gt_rew", "gr_rew"],
         ),
         expert_model_path=expert_model_path,

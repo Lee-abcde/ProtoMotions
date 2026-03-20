@@ -85,3 +85,14 @@ class MimicEvaluatorConfig(EvaluatorConfig):
             "max": 1.0,
         }
     )
+
+from typing import List
+@dataclass
+class DistillEvaluatorConfig(MimicEvaluatorConfig):
+    """Configuration for distillation evaluator with privileged-action testing."""
+
+    _target_: str = "protomotions.agents.evaluators.distill_evaluator.DistillEvaluator"
+    eval_metric_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Subset of collected metrics to summarize in evaluation logs."}
+    )
