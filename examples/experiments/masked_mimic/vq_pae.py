@@ -25,9 +25,9 @@ import os
 
 from protomotions.robot_configs.base import RobotConfig
 from protomotions.envs.base_env.config import EnvConfig
-from protomotions.agents.masked_mimic.config import MaskedMimicAgentConfig
-from protomotions.agents.masked_mimic.vq_pae_config import (
-    MaskedMimicVQPAEModelConfig,
+from protomotions.agents.distill.config import DistillAgentConfig
+from protomotions.agents.distill.vq_pae_config import (
+    DistillVQPAEModelConfig,
     VQPAELossConfig,
 )
 
@@ -70,7 +70,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
 
 def agent_config(
     robot_config: RobotConfig, env_config: EnvConfig, args: argparse.Namespace
-) -> MaskedMimicAgentConfig:
+) -> DistillAgentConfig:
     from protomotions.agents.base_agent.config import OptimizerConfig
     from protomotions.agents.common.config import (
         MLPWithConcatConfig,
@@ -79,7 +79,7 @@ def agent_config(
         ObsProcessorConfig,
         ModuleOperationForwardConfig,
     )
-    from protomotions.agents.evaluators.config import MimicEvaluatorConfig
+    from protomotions.agents.evaluators.config import DistillEvaluatorConfig
 
     num_bodies = len(robot_config.kinematic_info.body_names)
     current_obs_dim = 1 + (num_bodies - 1) * 3 + num_bodies * 6 + num_bodies * 3 + num_bodies * 3
@@ -148,7 +148,7 @@ def agent_config(
         ],
     )
 
-    model_config = MaskedMimicVQPAEModelConfig(
+    model_config = DistillVQPAEModelConfig(
         prior_in_keys=[
             "max_coords_obs_norm",
             "historical_pose_obs_norm",
@@ -191,12 +191,12 @@ def agent_config(
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
 
-    evaluator_config = MimicEvaluatorConfig(
+    evaluator_config = DistillEvaluatorConfig(
         eval_metric_keys=["gt_err", "gr_err", "gr_err_degrees", "gt_rew", "gr_rew"],
     )
 
     expert_model_path = getattr(args, "expert_model_path", None)
-    return MaskedMimicAgentConfig(
+    return DistillAgentConfig(
         model=model_config,
         batch_size=args.batch_size,
         training_max_steps=args.training_max_steps,
