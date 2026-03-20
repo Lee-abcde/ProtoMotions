@@ -62,19 +62,20 @@ def motion_lib_config(args: argparse.Namespace):
 
 def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     from protomotions.envs.motion_manager.config import MimicMotionManagerConfig
-    from protomotions.envs.rewards import gt_rew_factory, gr_rew_factory
-    from protomotions.envs.terminations import tracking_error_factory
-    from protomotions.envs.control.mimic_control import MimicControlConfig
-    from protomotions.envs.obs import (
+    from protomotions.envs.component_factories import (
+        gt_rew_factory,
+        gr_rew_factory,
         max_coords_obs_factory,
         mimic_target_poses_max_coords_factory,
         previous_actions_factory,
+        tracking_error_term_factory,
     )
+    from protomotions.envs.control.mimic_control import MimicControlConfig
 
     control_components = {
         "mimic": MimicControlConfig(
             bootstrap_on_episode_end=True,
-            num_future_steps=1,
+            future_steps=1,
         ),
     }
 
@@ -83,7 +84,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         "previous_actions": previous_actions_factory(),
         "mimic_target_poses": mimic_target_poses_max_coords_factory(
             with_velocities=True,
-            num_future_steps=1,
+            future_steps=1,
         ),
     }
 
@@ -104,10 +105,11 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
 
     return EnvConfig(
         max_episode_length=1000,
+        num_state_history_steps=1,
         control_components=control_components,
         observation_components=observation_components,
         termination_components={
-            "tracking_error": tracking_error_factory(threshold=0.25),
+            "tracking_error": tracking_error_term_factory(threshold=0.25),
         },
         reward_components={
             "gt_rew": gt_rew_factory(weight=0.5, coefficient=-100.0),

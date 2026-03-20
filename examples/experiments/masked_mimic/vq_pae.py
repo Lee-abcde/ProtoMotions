@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""MaskedMimic VQ-PAE experiment.
+"""VQ-PAE experiment.
 
 Reuses the standard transformer MaskedMimic environment setup, but swaps the
 latent Gaussian prior/posterior with a phase-aware vector-quantized manifold.
@@ -54,18 +54,116 @@ apply_inference_overrides = _TRANSFORMER_MODULE.apply_inference_overrides
 
 
 def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
-    from protomotions.envs.obs import mimic_target_poses_max_coords_factory
-
-    env_cfg = _TRANSFORMER_MODULE.env_config(robot_cfg, args)
-    env_cfg.control_components["masked_mimic"].num_future_steps = NUM_FUTURE_STEPS
-    env_cfg.observation_components["vq_pae_target_poses"] = (
-        mimic_target_poses_max_coords_factory(
-            with_velocities=True,
-            num_future_steps=NUM_FUTURE_STEPS,
-        )
+    import torch
+    from protomotions.envs.motion_manager.config import MimicMotionManagerConfig
+    from protomotions.envs.context_views import EnvContext
+    from protomotions.envs.mdp_component import MdpComponent
+    from protomotions.envs.control.mimic_control import MimicControlConfig
+    from protomotions.envs.component_factories import (
+        max_coords_obs_factory,
+        previous_actions_factory,
+        mimic_target_poses_max_coords_factory,
+        mimic_tracking_rewards_factory,
+        action_smoothness_factory,
+        tracking_error_term_factory,
     )
+    from protomotions.envs.obs import compute_historical_poses_with_time
+    from protomotions.envs.action import make_pd_action_config
 
-    return env_cfg
+    total_stored_historical_steps = _TRANSFORMER_MODULE.TOTAL_STORED_HISTORICAL_STEPS
+
+    control_components = {
+        "mimic": MimicControlConfig(
+            bootstrap_on_episode_end=True,
+            future_steps=NUM_FUTURE_STEPS,
+        ),
+    }
+
+    observation_components = {
+        "max_coords_obs": max_coords_obs_factory(
+            local_obs=True,
+            root_height_obs=True,
+            observe_contacts=False,
+        ),
+        "previous_actions": previous_actions_factory(history_steps=1),
+        "mimic_target_poses": mimic_target_poses_max_coords_factory(
+            with_velocities=True,
+            future_steps=1,
+        ),
+        "vq_pae_target_poses": mimic_target_poses_max_coords_factory(
+            with_velocities=True,
+            future_steps=NUM_FUTURE_STEPS,
+        ),
+        "historical_pose_obs": MdpComponent(
+            compute_func=compute_historical_poses_with_time,
+            dynamic_vars={
+                "historical_rigid_body_pos": EnvContext.historical.rigid_body_pos,
+                "historical_rigid_body_rot": EnvContext.historical.rigid_body_rot,
+                "historical_rigid_body_vel": EnvContext.historical.rigid_body_vel,
+                "historical_rigid_body_ang_vel": EnvContext.historical.rigid_body_ang_vel,
+                "historical_ground_heights": EnvContext.historical.ground_heights,
+                "historical_body_contacts": EnvContext.historical.body_contacts,
+                "dt": EnvContext.dt,
+            },
+            static_params={
+                "history_steps": total_stored_historical_steps,
+                "local_obs": True,
+                "root_height_obs": True,
+                "w_last": True,
+            },
+        ),
+    }
+
+    expert_model_path = getattr(args, "expert_model_path", None)
+    if expert_model_path:
+        from protomotions.agents.distill.utils import (
+            get_expert_observation_components,
+            load_expert_configs,
+        )
+
+        expert_configs = load_expert_configs(expert_model_path)
+        expert_env_config = expert_configs["env"]
+        expert_agent_config = expert_configs["agent"]
+
+        expert_history_steps = getattr(expert_env_config, "num_state_history_steps", 0)
+        assert total_stored_historical_steps >= expert_history_steps, (
+            f"Insufficient history: current={total_stored_historical_steps}, "
+            f"expert requires={expert_history_steps}"
+        )
+
+        expert_obs_components = get_expert_observation_components(
+            expert_env_config,
+            expert_agent_config,
+            existing_obs_keys=list(observation_components.keys()),
+        )
+
+        observation_components.update(expert_obs_components)
+
+    reward_components = {
+        **mimic_tracking_rewards_factory(
+            gt_weight=0.5,
+            gr_weight=0.3,
+            gt_coef=-100.0,
+            gr_coef=-5.0,
+        ),
+        "action_smoothness": action_smoothness_factory(weight=-0.02),
+    }
+
+    return EnvConfig(
+        max_episode_length=1000,
+        num_state_history_steps=total_stored_historical_steps,
+        control_components=control_components,
+        observation_components=observation_components,
+        termination_components={
+            "tracking_error": tracking_error_term_factory(threshold=0.25),
+        },
+        reward_components=reward_components,
+        action_config=make_pd_action_config(robot_cfg),
+        motion_manager=MimicMotionManagerConfig(
+            init_start_prob=0.2,
+            resample_on_reset=True,
+        ),
+    )
 
 
 def agent_config(
