@@ -28,10 +28,6 @@ from protomotions.agents.base_agent.config import (
     BaseModelConfig,
 )
 from dataclasses import dataclass, field
-from protomotions.agents.masked_mimic.vq_pae_config import (
-    MaskedMimicVQPAEModelConfig,
-    VQPAELossConfig,
-)
 
 
 @dataclass
@@ -104,10 +100,6 @@ class FeedForwardModelConfig(BaseModelConfig):
         default_factory=ModuleContainerConfig,
         metadata={"help": "Main trunk network for forward pass."}
     )
-    optimizer: OptimizerConfig = field(
-        default_factory=lambda: OptimizerConfig(lr=2e-5),
-        metadata={"help": "Optimizer settings for model training."}
-    )
 
 
 @dataclass
@@ -146,11 +138,7 @@ class MaskedMimicAgentConfig(BaseAgentConfig):
 
     _target_: str = "protomotions.agents.masked_mimic.agent.MaskedMimic"
 
-    model: Union[
-        MaskedMimicModelConfig,
-        FeedForwardModelConfig,
-        MaskedMimicVQPAEModelConfig,
-    ] = field(
+    model: Union[MaskedMimicModelConfig, FeedForwardModelConfig] = field(
         default_factory=MaskedMimicModelConfig,
         metadata={"help": "Model configuration (VAE or FeedForward variant)."}
     )

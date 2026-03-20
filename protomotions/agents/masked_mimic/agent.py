@@ -97,13 +97,10 @@ class MaskedMimic(BaseAgent):
     model: MaskedMimicModel
     config: MaskedMimicAgentConfig
 
-    def _uses_vae(self) -> bool:
-        return hasattr(self.config.model, "vae") and self.config.model.vae is not None
-
     def setup(self):
         # Initialize VAE noise for each environment.
         # Create vae_noise tensor before super().setup() to ensure it can be used to initialize the lazy linear layers in the model.
-        if self._uses_vae():
+        if self.config.model.vae is not None:
             self.vae_noise = torch.zeros(
                 self.num_envs,
                 self.config.model.vae.vae_latent_dim,
@@ -262,13 +259,13 @@ class MaskedMimic(BaseAgent):
         dones, terminated, extras = super().post_env_step_modifications(
             dones, terminated, extras
         )
-        if self._uses_vae():
+        if self.model.config.vae is not None:
             self.reset_vae_noise(dones.nonzero(as_tuple=False).squeeze(-1))
         return dones, terminated, extras
 
     def add_agent_info_to_obs(self, obs):
         """Add agent-specific observations to the environment observations."""
-        if self._uses_vae():
+        if self.config.model.vae is not None:
             obs["vae_noise"] = self.vae_noise.clone()
         return obs
 
@@ -357,10 +354,10 @@ class MaskedMimic(BaseAgent):
         # Behavioral cloning loss
         bc_loss = torch.square(actions - expert_actions).mean()
 
-        extra_loss, extra_log_dict = self.calculate_extra_loss(batch_dict, actions, batch_td)
+        extra_loss, extra_log_dict = self.calculate_extra_loss(batch_dict, actions)
 
         # KL divergence loss (if using VAE)
-        if self._uses_vae():
+        if hasattr(self.config.model, "vae"):
             vae_kld_schedule = self.config.model.vae.kld_schedule
 
             if vae_kld_schedule is not None:
@@ -386,7 +383,7 @@ class MaskedMimic(BaseAgent):
             "masked_mimic/extra_loss": extra_loss.detach(),
             "losses/masked_mimic_loss": loss.detach(),
         }
-        if self._uses_vae():
+        if hasattr(self.config.model, "vae"):
             log_dict["masked_mimic/vae_kld_loss"] = (
                 vae_kld_loss.detach()
                 if isinstance(vae_kld_loss, torch.Tensor)
@@ -399,14 +396,7 @@ class MaskedMimic(BaseAgent):
 
         return loss, log_dict
 
-    def calculate_extra_loss(
-        self,
-        batch_dict,
-        actions,
-        batch_td: Optional[TensorDict] = None,
-    ) -> Tuple[Tensor, Dict]:
-        if batch_td is not None and hasattr(self.model, "calculate_aux_losses"):
-            return self.model.calculate_aux_losses(batch_td)
+    def calculate_extra_loss(self, batch_dict, actions) -> Tuple[Tensor, Dict]:
         return torch.tensor(0.0, device=self.device), {}
 
     # -----------------------------
