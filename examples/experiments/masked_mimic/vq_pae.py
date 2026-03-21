@@ -178,6 +178,11 @@ def agent_config(
         ModuleOperationForwardConfig,
     )
     from protomotions.agents.evaluators.config import DistillEvaluatorConfig
+    from protomotions.envs.component_factories import (
+        gt_error_factory,
+        gr_error_factory,
+        max_joint_error_factory,
+    )
 
     num_bodies = len(robot_config.kinematic_info.body_names)
     current_obs_dim = 1 + (num_bodies - 1) * 3 + num_bodies * 6 + num_bodies * 3 + num_bodies * 3
@@ -290,7 +295,11 @@ def agent_config(
     )
 
     evaluator_config = DistillEvaluatorConfig(
-        eval_metric_keys=["gt_err", "gr_err", "gr_err_degrees", "gt_rew", "gr_rew"],
+        evaluation_components={
+            "gt_error": gt_error_factory(threshold=0.25),
+            "gr_error": gr_error_factory(),
+            "max_joint_error": max_joint_error_factory(),
+        },
     )
 
     expert_model_path = getattr(args, "expert_model_path", None)

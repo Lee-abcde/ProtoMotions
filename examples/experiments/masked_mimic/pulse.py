@@ -81,9 +81,10 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
 
     observation_components = {
         "max_coords_obs": max_coords_obs_factory(),
-        "previous_actions": previous_actions_factory(),
+        "previous_actions": previous_actions_factory(history_steps=1),
         "mimic_target_poses": mimic_target_poses_max_coords_factory(
             with_velocities=True,
+            with_relative=True,
             future_steps=1,
         ),
     }
@@ -132,6 +133,11 @@ def agent_config(
         ModuleContainerConfig,
     )
     from protomotions.agents.evaluators.config import DistillEvaluatorConfig
+    from protomotions.envs.component_factories import (
+        gt_error_factory,
+        gr_error_factory,
+        max_joint_error_factory,
+    )
 
     vae_latent_dim = 64
 
@@ -242,7 +248,11 @@ def agent_config(
         gradient_clip_val=50.0,
         num_mini_epochs=6,
         evaluator=DistillEvaluatorConfig(
-            eval_metric_keys=["gt_err", "gr_err", "gr_err_degrees", "gt_rew", "gr_rew"],
+            evaluation_components={
+                "gt_error": gt_error_factory(threshold=0.25),
+                "gr_error": gr_error_factory(),
+                "max_joint_error": max_joint_error_factory(),
+            },
         ),
         expert_model_path=expert_model_path,
     )
