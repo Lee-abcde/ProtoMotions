@@ -24,6 +24,17 @@ class DistillEvaluator(MimicEvaluator):
             out_keys = getattr(self.agent.model.module, "out_keys", None)
         return out_keys is not None and "privileged_action" in out_keys
 
+    def _get_interaction_action_key(self) -> str:
+        """Action head used for the interactive inference loop."""
+        if self.config.use_privileged_action_for_interaction:
+            if not self._supports_privileged_action():
+                raise RuntimeError(
+                    "Distill evaluator requested privileged_action for interaction, "
+                    "but the model does not expose that output."
+                )
+            return "privileged_action"
+        return "action"
+
     def _select_actions(self, model_outs: Dict[str, Tensor], action_key: str) -> Tensor:
         """Select either the standard evaluation action or the privileged one."""
         if action_key == "privileged_action" and "privileged_action" in model_outs:
@@ -188,7 +199,7 @@ class DistillEvaluator(MimicEvaluator):
                     max=self.config.max_eval_steps
                 ),
             )
-            self.evaluate_episode(env_ids, max_len)
+            self.evaluate_episode(env_ids, max_len, action_key="action")
             if self._privileged_eval_state is not None:
                 normal_state = self._capture_active_eval_state()
                 self._restore_active_eval_state(self._privileged_eval_state)
@@ -211,6 +222,45 @@ class DistillEvaluator(MimicEvaluator):
                 to_log["eval/privileged_prior_gap"] = privileged_success_rate - success_rate
 
         return to_log, success_rate
+
+    def simple_test_policy(self, collect_metrics: bool = False) -> None:
+        """Interactive policy loop using the configured main action head."""
+        self.agent.eval()
+        done_indices = None
+        step = 0
+        action_key = self._get_interaction_action_key()
+
+        metric_sums: Dict[str, float] = {}
+        metric_counts: Dict[str, int] = {}
+
+        print("Evaluating policy... (Ctrl+C to stop)")
+        try:
+            while True:
+                obs, _ = self.env.reset(done_indices)
+                obs = self.agent.add_agent_info_to_obs(obs)
+                obs_td = self.agent.obs_dict_to_tensordict(obs)
+
+                model_outs = self.agent.model(obs_td)
+                actions = self._select_actions(model_outs, action_key)
+
+                obs, rewards, dones, terminated, extras = self.env.step(actions)
+                obs = self.agent.add_agent_info_to_obs(obs)
+
+                if collect_metrics and "eval_values" in extras:
+                    for k, v in extras["eval_values"].items():
+                        val = v.mean().item()
+                        metric_sums[k] = metric_sums.get(k, 0.0) + val
+                        metric_counts[k] = metric_counts.get(k, 0) + 1
+
+                done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
+                step += 1
+        except KeyboardInterrupt:
+            print(f"\nStopped after {step} steps.")
+            if collect_metrics and metric_counts:
+                print("Average metrics:")
+                for k in sorted(metric_counts.keys()):
+                    avg = metric_sums[k] / metric_counts[k]
+                    print(f"  {k}: {avg:.4f}")
 
     def cleanup_after_evaluation(self) -> None:
         """Clear privileged evaluator state after cleanup."""

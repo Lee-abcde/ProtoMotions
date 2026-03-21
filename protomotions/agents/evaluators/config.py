@@ -92,6 +92,15 @@ class DistillEvaluatorConfig(MimicEvaluatorConfig):
     """Configuration for distillation evaluator with privileged-action testing."""
 
     _target_: str = "protomotions.agents.evaluators.distill_evaluator.DistillEvaluator"
+    use_privileged_action_for_interaction: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "If True, the interactive inference loop uses "
+                "privileged_action instead of the prior action."
+            )
+        }
+    )
     eval_metric_keys: List[str] = field(
         default_factory=list,
         metadata={"help": "Subset of collected metrics to summarize in evaluation logs."}
