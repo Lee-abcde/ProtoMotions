@@ -110,27 +110,11 @@ class DistillGeometricModel(BaseModel):
             self.config.future_obs_dim,
         )
 
-    def _decode_theta(self, theta: torch.Tensor) -> torch.Tensor:
-        if theta.ndim == 1:
-            cos_theta = torch.cos(theta).view(1, -1, 1)
-            sin_theta = torch.sin(theta).view(1, -1, 1)
-            return (
-                self.primitive_u.unsqueeze(1) * cos_theta
-                + self.primitive_v.unsqueeze(1) * sin_theta
-            )
-
-        cos_theta = torch.cos(theta).unsqueeze(1).unsqueeze(-1)
-        sin_theta = torch.sin(theta).unsqueeze(1).unsqueeze(-1)
-        return (
-            self.primitive_u.unsqueeze(0).unsqueeze(2) * cos_theta
-            + self.primitive_v.unsqueeze(0).unsqueeze(2) * sin_theta
-        )
-
-    def _candidate_from_dt(self, delta_t: torch.Tensor) -> torch.Tensor:
-        angles = self.candidate_theta.unsqueeze(0) + (
-            self.two_pi * self.candidate_direction * self.candidate_frequency
-        ).unsqueeze(0) * delta_t.unsqueeze(-1)
-        return self._decode_theta(angles)
+    @staticmethod
+    def _decode_from_basis(
+        u: torch.Tensor, v: torch.Tensor, cos_angle: torch.Tensor, sin_angle: torch.Tensor
+    ) -> torch.Tensor:
+        return u * cos_angle.unsqueeze(-1) + v * sin_angle.unsqueeze(-1)
 
     def _history_delta_times(self, history_dt: torch.Tensor) -> torch.Tensor:
         # Historical observations encode buffer offsets; shift them by one step so
@@ -145,53 +129,165 @@ class DistillGeometricModel(BaseModel):
         prev_delta_t: torch.Tensor,
         next_delta_t: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        candidate_prev = self._candidate_from_dt(prev_delta_t)
-        candidate_cur = self._candidate_from_dt(torch.zeros_like(prev_delta_t))
-        candidate_next = self._candidate_from_dt(next_delta_t)
-        candidate_next_step = self._candidate_from_dt(next_delta_t * 2.0)
+        batch_size = z_prev.shape[0]
+        device = z_prev.device
+        latent_dim = z_prev.shape[-1]
+        num_codes = self.config.num_embeddings
+        num_candidates = self.candidate_theta.shape[0]
 
-        error = (candidate_prev - z_prev[:, None, None, :]).pow(2).mean(dim=-1)
-        error = error + (candidate_cur - z_cur[:, None, None, :]).pow(2).mean(dim=-1)
-        error = error + (candidate_next - z_next[:, None, None, :]).pow(2).mean(dim=-1)
-
-        best_error, best_candidate_idx = error.min(dim=-1)
-
-        gather_idx = best_candidate_idx.unsqueeze(-1).unsqueeze(-1).expand(
-            -1, -1, 1, self.config.latent_dim
+        global_best_error = torch.full(
+            (batch_size,), float("inf"), device=device, dtype=z_prev.dtype
         )
-        best_current = torch.gather(
-            candidate_cur,
-            dim=2,
-            index=gather_idx,
-        ).squeeze(2)
-        best_next_step = torch.gather(
-            candidate_next_step,
-            dim=2,
-            index=gather_idx,
-        ).squeeze(2)
-        best_matched_next = torch.gather(
-            candidate_next,
-            dim=2,
-            index=gather_idx,
-        ).squeeze(2)
+        global_best_code_idx = torch.zeros(batch_size, device=device, dtype=torch.long)
+        selected_prev = torch.zeros_like(z_prev)
+        selected_current = torch.zeros_like(z_cur)
+        selected_matched_next = torch.zeros_like(z_next)
+        selected_next = torch.zeros_like(z_next)
 
-        best_code_error, best_code_idx = best_error.min(dim=-1)
-        code_gather_idx = best_code_idx.unsqueeze(-1).unsqueeze(-1).expand(
-            -1, 1, self.config.latent_dim
-        )
-        selected_current = torch.gather(best_current, dim=1, index=code_gather_idx).squeeze(1)
-        selected_matched_next = torch.gather(
-            best_matched_next, dim=1, index=code_gather_idx
-        ).squeeze(1)
-        selected_next = torch.gather(best_next_step, dim=1, index=code_gather_idx).squeeze(1)
-        selected_prev = torch.gather(
-            torch.gather(candidate_prev, dim=2, index=gather_idx).squeeze(2),
-            dim=1,
-            index=code_gather_idx,
-        ).squeeze(1)
+        prev_norm = z_prev.pow(2).sum(dim=-1, keepdim=True)
+        cur_norm = z_cur.pow(2).sum(dim=-1, keepdim=True)
+        next_norm = z_next.pow(2).sum(dim=-1, keepdim=True)
+
+        for code_start in range(0, num_codes, self.config.code_chunk_size):
+            code_end = min(code_start + self.config.code_chunk_size, num_codes)
+            u_chunk = self.primitive_u[code_start:code_end]
+            v_chunk = self.primitive_v[code_start:code_end]
+
+            uu = u_chunk.pow(2).sum(dim=-1)
+            vv = v_chunk.pow(2).sum(dim=-1)
+            uv = (u_chunk * v_chunk).sum(dim=-1)
+
+            prev_u = z_prev @ u_chunk.t()
+            prev_v = z_prev @ v_chunk.t()
+            cur_u = z_cur @ u_chunk.t()
+            cur_v = z_cur @ v_chunk.t()
+            next_u = z_next @ u_chunk.t()
+            next_v = z_next @ v_chunk.t()
+
+            chunk_best_error = torch.full(
+                (batch_size, code_end - code_start),
+                float("inf"),
+                device=device,
+                dtype=z_prev.dtype,
+            )
+            chunk_best_candidate_idx = torch.zeros(
+                (batch_size, code_end - code_start), device=device, dtype=torch.long
+            )
+
+            for cand_start in range(0, num_candidates, self.config.candidate_chunk_size):
+                cand_end = min(
+                    cand_start + self.config.candidate_chunk_size, num_candidates
+                )
+                theta = self.candidate_theta[cand_start:cand_end]
+                angular_speed = (
+                    self.two_pi
+                    * self.candidate_direction[cand_start:cand_end]
+                    * self.candidate_frequency[cand_start:cand_end]
+                )
+
+                prev_angles = theta.unsqueeze(0) + prev_delta_t.unsqueeze(-1) * angular_speed.unsqueeze(0)
+                cur_angles = theta.unsqueeze(0)
+                next_angles = theta.unsqueeze(0) + next_delta_t.unsqueeze(-1) * angular_speed.unsqueeze(0)
+
+                prev_cos = torch.cos(prev_angles)
+                prev_sin = torch.sin(prev_angles)
+                cur_cos = torch.cos(cur_angles)
+                cur_sin = torch.sin(cur_angles)
+                next_cos = torch.cos(next_angles)
+                next_sin = torch.sin(next_angles)
+
+                prev_norm_hat = (
+                    uu.unsqueeze(0).unsqueeze(-1) * prev_cos.square().unsqueeze(1)
+                    + vv.unsqueeze(0).unsqueeze(-1) * prev_sin.square().unsqueeze(1)
+                    + 2.0 * uv.unsqueeze(0).unsqueeze(-1) * (prev_cos * prev_sin).unsqueeze(1)
+                )
+                cur_norm_hat = (
+                    uu.unsqueeze(0).unsqueeze(-1) * cur_cos.square().unsqueeze(1)
+                    + vv.unsqueeze(0).unsqueeze(-1) * cur_sin.square().unsqueeze(1)
+                    + 2.0 * uv.unsqueeze(0).unsqueeze(-1) * (cur_cos * cur_sin).unsqueeze(1)
+                )
+                next_norm_hat = (
+                    uu.unsqueeze(0).unsqueeze(-1) * next_cos.square().unsqueeze(1)
+                    + vv.unsqueeze(0).unsqueeze(-1) * next_sin.square().unsqueeze(1)
+                    + 2.0 * uv.unsqueeze(0).unsqueeze(-1) * (next_cos * next_sin).unsqueeze(1)
+                )
+
+                prev_dot = (
+                    prev_u.unsqueeze(-1) * prev_cos.unsqueeze(1)
+                    + prev_v.unsqueeze(-1) * prev_sin.unsqueeze(1)
+                )
+                cur_dot = (
+                    cur_u.unsqueeze(-1) * cur_cos.unsqueeze(1)
+                    + cur_v.unsqueeze(-1) * cur_sin.unsqueeze(1)
+                )
+                next_dot = (
+                    next_u.unsqueeze(-1) * next_cos.unsqueeze(1)
+                    + next_v.unsqueeze(-1) * next_sin.unsqueeze(1)
+                )
+
+                error = (
+                    prev_norm.unsqueeze(1) + prev_norm_hat - 2.0 * prev_dot
+                    + cur_norm.unsqueeze(1) + cur_norm_hat - 2.0 * cur_dot
+                    + next_norm.unsqueeze(1) + next_norm_hat - 2.0 * next_dot
+                ) / latent_dim
+
+                local_best_error, local_best_idx = error.min(dim=-1)
+                update_mask = local_best_error < chunk_best_error
+                chunk_best_error = torch.where(update_mask, local_best_error, chunk_best_error)
+                chunk_best_candidate_idx = torch.where(
+                    update_mask,
+                    local_best_idx + cand_start,
+                    chunk_best_candidate_idx,
+                )
+
+            code_rel_idx = chunk_best_error.argmin(dim=-1)
+            code_abs_idx = code_rel_idx + code_start
+            chunk_error = chunk_best_error.gather(1, code_rel_idx.unsqueeze(-1)).squeeze(-1)
+            chunk_candidate_idx = chunk_best_candidate_idx.gather(
+                1, code_rel_idx.unsqueeze(-1)
+            ).squeeze(-1)
+
+            u_selected = u_chunk[code_rel_idx]
+            v_selected = v_chunk[code_rel_idx]
+            theta_selected = self.candidate_theta[chunk_candidate_idx]
+            angular_selected = (
+                self.two_pi
+                * self.candidate_direction[chunk_candidate_idx]
+                * self.candidate_frequency[chunk_candidate_idx]
+            )
+
+            prev_angle = theta_selected + angular_selected * prev_delta_t
+            cur_angle = theta_selected
+            next_angle = theta_selected + angular_selected * next_delta_t
+            next_step_angle = theta_selected + angular_selected * (2.0 * next_delta_t)
+
+            chunk_prev = self._decode_from_basis(
+                u_selected, v_selected, torch.cos(prev_angle), torch.sin(prev_angle)
+            )
+            chunk_current = self._decode_from_basis(
+                u_selected, v_selected, torch.cos(cur_angle), torch.sin(cur_angle)
+            )
+            chunk_matched_next = self._decode_from_basis(
+                u_selected, v_selected, torch.cos(next_angle), torch.sin(next_angle)
+            )
+            chunk_next = self._decode_from_basis(
+                u_selected, v_selected, torch.cos(next_step_angle), torch.sin(next_step_angle)
+            )
+
+            update_mask = chunk_error < global_best_error
+            global_best_error = torch.where(update_mask, chunk_error, global_best_error)
+            global_best_code_idx = torch.where(update_mask, code_abs_idx, global_best_code_idx)
+            selected_prev = torch.where(update_mask.unsqueeze(-1), chunk_prev, selected_prev)
+            selected_current = torch.where(
+                update_mask.unsqueeze(-1), chunk_current, selected_current
+            )
+            selected_matched_next = torch.where(
+                update_mask.unsqueeze(-1), chunk_matched_next, selected_matched_next
+            )
+            selected_next = torch.where(update_mask.unsqueeze(-1), chunk_next, selected_next)
 
         hard_codes = F.one_hot(
-            best_code_idx, num_classes=self.config.num_embeddings
+            global_best_code_idx, num_classes=self.config.num_embeddings
         ).float()
         avg_probs = hard_codes.mean(dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
@@ -209,9 +305,8 @@ class DistillGeometricModel(BaseModel):
         )
 
         return {
-            "best_error": best_error,
-            "best_code_idx": best_code_idx,
-            "match_error": best_code_error,
+            "best_code_idx": global_best_code_idx,
+            "match_error": global_best_error,
             "codebook_loss": codebook_loss,
             "commitment_loss": commitment_loss,
             "current_latent": selected_current,

@@ -183,6 +183,9 @@ def agent_config(
     )
 
     num_bodies = len(robot_config.kinematic_info.body_names)
+    simulator_name = getattr(args, "simulator", "isaacgym")
+    sim_params = getattr(robot_config.simulation_params, simulator_name)
+    env_time_step = sim_params.decimation * (1.0 / sim_params.fps)
     current_obs_dim = 1 + (num_bodies - 1) * 3 + num_bodies * 6 + num_bodies * 3 + num_bodies * 3
     historical_obs_dim = current_obs_dim + 1
     future_obs_dim = num_bodies * (3 + 3 + 6 + 6 + 3 + 3)
@@ -272,7 +275,7 @@ def agent_config(
         theta_grid_size=24,
         frequency_grid_size=16,
         frequency_max=3.0,
-        time_step=4.0 / 60.0,
+        time_step=env_time_step,
         commitment_beta=0.25,
         losses=GeometricLossConfig(
             codebook_weight=1.0,

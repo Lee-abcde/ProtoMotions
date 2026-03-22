@@ -67,8 +67,10 @@ class DistillGeometricModelConfig(BaseModelConfig):
     theta_grid_size: int = 24
     frequency_grid_size: int = 16
     frequency_max: float = 3.0
-    time_step: float = 4.0 / 60.0
+    time_step: float = 0.02
     commitment_beta: float = 0.25
+    code_chunk_size: int = 128
+    candidate_chunk_size: int = 768
 
     losses: GeometricLossConfig = field(default_factory=GeometricLossConfig)
     optimizer: OptimizerConfig = field(
