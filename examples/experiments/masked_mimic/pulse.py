@@ -235,6 +235,7 @@ def agent_config(
     )
 
     model_config = DistillModelConfig(
+        _target_="protomotions.agents.distill.model.DetachedEncoderKLDistillModel",
         encoder=encoder_config,
         prior=prior_config,
         trunk=trunk_config,
