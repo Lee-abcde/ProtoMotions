@@ -27,6 +27,10 @@ from protomotions.agents.distill.vq_pae_config import (
     DistillVQPAEModelConfig,
     VQPAELossConfig,
 )
+from protomotions.agents.distill.geometric_config import (
+    DistillGeometricModelConfig,
+    GeometricLossConfig,
+)
 
 
 @dataclass
@@ -157,6 +161,7 @@ class DistillAgentConfig(BaseAgentConfig):
         DistillModelConfig,
         FeedForwardModelConfig,
         DistillVQPAEModelConfig,
+        DistillGeometricModelConfig,
     ] = field(
         default_factory=DistillModelConfig,
         metadata={"help": "Model configuration (VAE or FeedForward variant)."}
