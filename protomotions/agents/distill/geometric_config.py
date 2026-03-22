@@ -69,7 +69,7 @@ class DistillGeometricModelConfig(BaseModelConfig):
     frequency_max: float = 3.0
     time_step: float = 0.02
     commitment_beta: float = 0.25
-    code_chunk_size: int = 128
+    code_chunk_size: int = 64
     candidate_chunk_size: int = 768
 
     losses: GeometricLossConfig = field(default_factory=GeometricLossConfig)
