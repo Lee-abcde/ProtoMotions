@@ -137,6 +137,17 @@ class DistillEvaluator(MimicEvaluator):
 
         return to_log, success_rate
 
+    def _save_privileged_failed_motions(self, failed_motions: list, epoch: int) -> None:
+        """Save failed motions from the privileged-action pass."""
+        filename = (
+            f"failed_motions_epoch_{epoch}_rank_{self.fabric.global_rank}.txt"
+        )
+        self._save_list_to_file(
+            failed_motions,
+            filename,
+            subdirectory="privileged_failed_motions",
+        )
+
     def initialize_eval(self) -> Dict[str, MotionMetrics]:
         """Initialize normal and privileged evaluation state."""
         metrics = super().initialize_eval()
@@ -212,6 +223,15 @@ class DistillEvaluator(MimicEvaluator):
         to_log, success_rate = super().process_eval_results()
 
         if self._privileged_eval_state is not None:
+            privileged_failed_motions = (
+                torch.nonzero(self._privileged_eval_state["motion_failed"])
+                .flatten()
+                .tolist()
+            )
+            self._save_privileged_failed_motions(
+                privileged_failed_motions,
+                self.agent.current_epoch,
+            )
             privileged_log, privileged_success_rate = self._summarize_eval_state(
                 self._privileged_eval_state,
                 prefix="privileged_eval",
