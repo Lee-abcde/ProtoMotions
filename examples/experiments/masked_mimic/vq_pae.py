@@ -50,9 +50,6 @@ additional_experiment_arguments = _TRANSFORMER_MODULE.additional_experiment_argu
 terrain_config = _TRANSFORMER_MODULE.terrain_config
 scene_lib_config = _TRANSFORMER_MODULE.scene_lib_config
 motion_lib_config = _TRANSFORMER_MODULE.motion_lib_config
-apply_inference_overrides = _TRANSFORMER_MODULE.apply_inference_overrides
-
-
 def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     import torch
     from protomotions.envs.motion_manager.config import MimicMotionManagerConfig
@@ -312,3 +309,54 @@ def agent_config(
         evaluator=evaluator_config,
         expert_model_path=expert_model_path,
     )
+
+
+def apply_inference_overrides(
+    robot_cfg: RobotConfig,
+    simulator_cfg,
+    env_cfg: EnvConfig,
+    agent_cfg: DistillAgentConfig,
+    terrain_cfg,
+    motion_lib_cfg,
+    scene_lib_cfg,
+    args: argparse.Namespace,
+):
+    """Apply distill inference overrides without dropping the distill evaluator."""
+    from protomotions.utils.config_utils import import_experiment_relative_eval_overrides
+
+    apply_inference_overrides_fn = import_experiment_relative_eval_overrides(
+        "../mimic/mlp.py"
+    )
+    apply_inference_overrides_fn(
+        robot_cfg,
+        simulator_cfg,
+        env_cfg,
+        agent_cfg,
+        terrain_cfg,
+        motion_lib_cfg,
+        scene_lib_cfg,
+        args,
+    )
+
+    if agent_cfg is not None and hasattr(agent_cfg, "expert_model_path"):
+        expert_model_path = agent_cfg.expert_model_path
+
+        if expert_model_path is not None and env_cfg is not None:
+            if (
+                hasattr(env_cfg, "observation_components")
+                and env_cfg.observation_components is not None
+            ):
+                from protomotions.agents.distill.utils import (
+                    get_expert_observation_keys,
+                    load_expert_configs,
+                )
+
+                expert_configs = load_expert_configs(expert_model_path)
+                expert_obs_keys = get_expert_observation_keys(
+                    expert_configs["env"], expert_configs["agent"]
+                )
+                for key in expert_obs_keys:
+                    if key in env_cfg.observation_components:
+                        del env_cfg.observation_components[key]
+
+        agent_cfg.expert_model_path = None
