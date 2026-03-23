@@ -69,6 +69,9 @@ class DistillGeometricModelConfig(BaseModelConfig):
     frequency_max: float = 3.0
     time_step: float = 0.02
     commitment_beta: float = 0.25
+    ema_decay: float = 0.99
+    dead_code_threshold: int = 2
+    dead_code_revive_every: int = 100
     code_chunk_size: int = 64
     candidate_chunk_size: int = 768
 

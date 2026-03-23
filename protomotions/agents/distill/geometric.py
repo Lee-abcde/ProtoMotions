@@ -74,6 +74,8 @@ class DistillGeometricModel(BaseModel):
         self.primitive_v = nn.Parameter(
             torch.randn(self.config.num_embeddings, self.config.latent_dim) * scale
         )
+        self.register_buffer("_usage_count", torch.zeros(self.config.num_embeddings))
+        self._forward_count = 0
 
         theta_grid = torch.linspace(
             -math.pi, math.pi, self.config.theta_grid_size, dtype=torch.float32
@@ -121,6 +123,98 @@ class DistillGeometricModel(BaseModel):
         # the most recent history frame corresponds to t - dt instead of t.
         return -(history_dt + self.config.time_step)
 
+    def _revive_dead_codes(self, replacement_latents: torch.Tensor):
+        if replacement_latents.shape[0] == 0:
+            return
+        dead_mask = self._usage_count < self.config.dead_code_threshold
+        dead_indices = dead_mask.nonzero(as_tuple=True)[0]
+        if dead_indices.numel() == 0:
+            self._usage_count.zero_()
+            return
+
+        replace_count = min(dead_indices.numel(), replacement_latents.shape[0])
+        random_indices = torch.randperm(
+            replacement_latents.shape[0], device=replacement_latents.device
+        )[:replace_count]
+        chosen_dead = dead_indices[:replace_count]
+        seeds = replacement_latents[random_indices].detach()
+        self.primitive_u.data[chosen_dead] = seeds
+        self.primitive_v.data[chosen_dead] = 0.0
+        self._usage_count[chosen_dead] = 1.0
+        self._usage_count.zero_()
+
+    def _ema_update_codebook(
+        self,
+        code_indices: torch.Tensor,
+        z_prev: torch.Tensor,
+        z_cur: torch.Tensor,
+        z_next: torch.Tensor,
+        prev_angle: torch.Tensor,
+        cur_angle: torch.Tensor,
+        next_angle: torch.Tensor,
+    ):
+        if code_indices.numel() == 0:
+            return
+
+        with torch.no_grad():
+            one_hot = F.one_hot(
+                code_indices, num_classes=self.config.num_embeddings
+            ).float()
+            self._usage_count.add_(one_hot.sum(dim=0))
+
+            unique_codes = torch.unique(code_indices)
+            for code_idx in unique_codes.tolist():
+                mask = code_indices == code_idx
+                if not torch.any(mask):
+                    continue
+
+                c_prev = torch.cos(prev_angle[mask])
+                s_prev = torch.sin(prev_angle[mask])
+                c_cur = torch.cos(cur_angle[mask])
+                s_cur = torch.sin(cur_angle[mask])
+                c_next = torch.cos(next_angle[mask])
+                s_next = torch.sin(next_angle[mask])
+
+                a11 = (
+                    c_prev.square().sum()
+                    + c_cur.square().sum()
+                    + c_next.square().sum()
+                )
+                a22 = (
+                    s_prev.square().sum()
+                    + s_cur.square().sum()
+                    + s_next.square().sum()
+                )
+                a12 = (
+                    (c_prev * s_prev).sum()
+                    + (c_cur * s_cur).sum()
+                    + (c_next * s_next).sum()
+                )
+
+                det = a11 * a22 - a12 * a12
+                if torch.abs(det) < 1e-6:
+                    continue
+
+                b1 = (
+                    c_prev.unsqueeze(-1) * z_prev[mask]
+                    + c_cur.unsqueeze(-1) * z_cur[mask]
+                    + c_next.unsqueeze(-1) * z_next[mask]
+                ).sum(dim=0)
+                b2 = (
+                    s_prev.unsqueeze(-1) * z_prev[mask]
+                    + s_cur.unsqueeze(-1) * z_cur[mask]
+                    + s_next.unsqueeze(-1) * z_next[mask]
+                ).sum(dim=0)
+
+                target_u = (a22 * b1 - a12 * b2) / det
+                target_v = (-a12 * b1 + a11 * b2) / det
+                self.primitive_u.data[code_idx].mul_(self.config.ema_decay).add_(
+                    target_u, alpha=1.0 - self.config.ema_decay
+                )
+                self.primitive_v.data[code_idx].mul_(self.config.ema_decay).add_(
+                    target_v, alpha=1.0 - self.config.ema_decay
+                )
+
     def _match_triplet(
         self,
         z_prev: torch.Tensor,
@@ -139,6 +233,9 @@ class DistillGeometricModel(BaseModel):
             (batch_size,), float("inf"), device=device, dtype=z_prev.dtype
         )
         global_best_code_idx = torch.zeros(batch_size, device=device, dtype=torch.long)
+        global_best_candidate_idx = torch.zeros(
+            batch_size, device=device, dtype=torch.long
+        )
         selected_prev = torch.zeros_like(z_prev)
         selected_current = torch.zeros_like(z_cur)
         selected_matched_next = torch.zeros_like(z_next)
@@ -277,6 +374,9 @@ class DistillGeometricModel(BaseModel):
             update_mask = chunk_error < global_best_error
             global_best_error = torch.where(update_mask, chunk_error, global_best_error)
             global_best_code_idx = torch.where(update_mask, code_abs_idx, global_best_code_idx)
+            global_best_candidate_idx = torch.where(
+                update_mask, chunk_candidate_idx, global_best_candidate_idx
+            )
             selected_prev = torch.where(update_mask.unsqueeze(-1), chunk_prev, selected_prev)
             selected_current = torch.where(
                 update_mask.unsqueeze(-1), chunk_current, selected_current
@@ -306,6 +406,7 @@ class DistillGeometricModel(BaseModel):
 
         return {
             "best_code_idx": global_best_code_idx,
+            "best_candidate_idx": global_best_candidate_idx,
             "match_error": global_best_error,
             "codebook_loss": codebook_loss,
             "commitment_loss": commitment_loss,
@@ -350,13 +451,41 @@ class DistillGeometricModel(BaseModel):
             next_delta_t=torch.full_like(history_delta_t[:, 0], self.config.time_step),
         )
 
+        posterior_latent_st = z_future + (
+            posterior["matched_next_latent"] - z_future
+        ).detach()
+
         tensordict["vae_latent"] = prior["next_latent"]
         tensordict = self._trunk(tensordict)
         tensordict["action"] = tensordict[self._trunk.out_keys[0]]
 
-        tensordict["vae_latent"] = posterior["matched_next_latent"]
+        tensordict["vae_latent"] = posterior_latent_st
         tensordict = self._trunk(tensordict)
         tensordict["privileged_action"] = tensordict[self._trunk.out_keys[0]]
+
+        if self.training:
+            best_candidate_idx = posterior["best_candidate_idx"]
+            theta_selected = self.candidate_theta[best_candidate_idx]
+            angular_selected = (
+                self.two_pi
+                * self.candidate_direction[best_candidate_idx]
+                * self.candidate_frequency[best_candidate_idx]
+            )
+            prev_angle = theta_selected + angular_selected * history_delta_t[:, 0]
+            cur_angle = theta_selected
+            next_angle = theta_selected + angular_selected * self.config.time_step
+            self._ema_update_codebook(
+                posterior["best_code_idx"],
+                z_hist_prev1.detach(),
+                z_cur.detach(),
+                z_future.detach(),
+                prev_angle.detach(),
+                cur_angle.detach(),
+                next_angle.detach(),
+            )
+            self._forward_count += 1
+            if self._forward_count % self.config.dead_code_revive_every == 0:
+                self._revive_dead_codes(z_future.detach())
 
         tensordict["geometric_match_error"] = posterior["match_error"]
         tensordict["geometric_codebook_loss"] = posterior["codebook_loss"]
