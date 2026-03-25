@@ -72,7 +72,7 @@ class DistillLatentVelocityModel(BaseModel):
         current_latent = self.state_encoder(current_obs)
         next_latent_target = self.state_encoder(future_obs)
         target_velocity = next_latent_target - current_latent
-        predicted_velocity = self.velocity_estimator(mimic_target)
+        predicted_velocity = torch.tanh(self.velocity_estimator(mimic_target))
 
         tensordict["vae_latent"] = predicted_velocity
         tensordict = self._trunk(tensordict)
@@ -88,9 +88,11 @@ class DistillLatentVelocityModel(BaseModel):
         tensordict["latent_next_alignment_loss"] = F.mse_loss(
             predicted_next_latent, next_latent_target.detach(), reduction="none"
         ).mean(dim=-1)
-        tensordict["latent_target_consistency_loss"] = (
-            next_latent_target.square().mean(dim=-1)
-        )
+        tensordict["latent_norm_regularization_loss"] = (
+            current_latent.square().mean(dim=-1)
+            + next_latent_target.square().mean(dim=-1)
+            + predicted_velocity.square().mean(dim=-1)
+        ) / 3.0
         tensordict["latent_current"] = current_latent
         tensordict["latent_next_target"] = next_latent_target
         tensordict["latent_predicted_velocity"] = predicted_velocity
@@ -108,15 +110,21 @@ class DistillLatentVelocityModel(BaseModel):
         next_latent_loss = (
             tensordict["latent_next_alignment_loss"].mean() * losses.next_latent_weight
         )
-        target_consistency = (
-            tensordict["latent_target_consistency_loss"].mean()
-            * losses.target_consistency_weight
+        latent_norm_regularization = (
+            tensordict["latent_norm_regularization_loss"].mean()
+            * losses.latent_norm_weight
         )
-        total = velocity_loss + next_latent_loss + target_consistency
+        total = (
+            velocity_loss
+            + next_latent_loss
+            + latent_norm_regularization
+        )
         return total, {
             "distill/latent_velocity_loss": velocity_loss.detach(),
             "distill/latent_next_alignment_loss": next_latent_loss.detach(),
-            "distill/latent_target_consistency_loss": target_consistency.detach(),
+            "distill/latent_norm_regularization_loss": latent_norm_regularization.detach(),
+            "distill/latent_current_norm": tensordict["latent_current"].norm(dim=-1).mean().detach(),
+            "distill/latent_next_target_norm": tensordict["latent_next_target"].norm(dim=-1).mean().detach(),
             "distill/latent_predicted_velocity_norm": tensordict[
                 "latent_predicted_velocity"
             ].norm(dim=-1).mean().detach(),

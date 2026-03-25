@@ -11,7 +11,7 @@ class LatentVelocityLossConfig:
 
     velocity_weight: float = 1.0
     next_latent_weight: float = 1.0
-    target_consistency_weight: float = 0.1
+    latent_norm_weight: float = 0.0
 
 
 @dataclass

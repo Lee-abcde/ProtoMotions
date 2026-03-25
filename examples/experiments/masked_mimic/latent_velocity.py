@@ -226,9 +226,9 @@ def agent_config(
             MLPLayerConfig(units=256, activation="silu"),
         ],
         losses=LatentVelocityLossConfig(
-            velocity_weight=0.0,
+            velocity_weight=1e-4,
             next_latent_weight=0.0,
-            target_consistency_weight=0.0,
+            latent_norm_weight=1e-6,
         ),
         optimizer=OptimizerConfig(lr=2e-5),
     )
