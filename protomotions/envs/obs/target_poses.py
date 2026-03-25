@@ -25,6 +25,7 @@ import torch
 from torch import Tensor
 
 from protomotions.utils import rotations
+from protomotions.envs.obs.humanoid import compute_humanoid_max_coords_observations
 from protomotions.envs.obs.utils import select_step_indices
 
 
@@ -693,6 +694,54 @@ def build_sparse_target_poses(
         ).view(num_envs, -1)
 
     return obs
+
+
+def build_mimic_future_max_coords_observations(
+    mimic_ref_pos: Tensor,
+    mimic_ref_rot: Tensor,
+    mimic_ref_vel: Tensor,
+    mimic_ref_ang_vel: Tensor,
+    local_obs: bool,
+    root_height_obs: bool,
+    w_last: bool,
+    future_steps: Union[int, List[int]] = 1,
+):
+    """Convert one future reference state into the same max_coords observation space."""
+    if future_steps is not None:
+        mimic_ref_pos = select_step_indices(mimic_ref_pos, future_steps)
+        mimic_ref_rot = select_step_indices(mimic_ref_rot, future_steps)
+        mimic_ref_vel = select_step_indices(mimic_ref_vel, future_steps)
+        mimic_ref_ang_vel = select_step_indices(mimic_ref_ang_vel, future_steps)
+
+    if mimic_ref_pos.shape[1] != 1:
+        raise ValueError(
+            "build_mimic_future_max_coords_observations expects exactly one future step"
+        )
+
+    ref_pos = mimic_ref_pos[:, 0]
+    ref_rot = mimic_ref_rot[:, 0]
+    ref_vel = mimic_ref_vel[:, 0]
+    ref_ang_vel = mimic_ref_ang_vel[:, 0]
+
+    num_envs = ref_pos.shape[0]
+    num_bodies = ref_pos.shape[1]
+    ground_height = torch.zeros(num_envs, 1, device=ref_pos.device, dtype=ref_pos.dtype)
+    body_contacts = torch.zeros(
+        num_envs, num_bodies, device=ref_pos.device, dtype=torch.bool
+    )
+
+    return compute_humanoid_max_coords_observations(
+        body_pos=ref_pos,
+        body_rot=ref_rot,
+        body_vel=ref_vel,
+        body_ang_vel=ref_ang_vel,
+        ground_height=ground_height,
+        body_contacts=body_contacts,
+        local_obs=local_obs,
+        root_height_obs=root_height_obs,
+        observe_contacts=False,
+        w_last=w_last,
+    )
 
 
 # =============================================================================

@@ -300,6 +300,31 @@ def mimic_target_poses_max_coords_factory(
     )
 
 
+def mimic_future_max_coords_obs_factory(
+    future_steps: Optional[Union[int, List[int]]] = 1,
+    local_obs: bool = True,
+    root_height_obs: bool = True,
+) -> MdpComponent:
+    """Factory for future reference states in the max_coords_obs observation space."""
+    from protomotions.envs.obs import build_mimic_future_max_coords_observations
+
+    return MdpComponent(
+        compute_func=build_mimic_future_max_coords_observations,
+        dynamic_vars={
+            "mimic_ref_pos": EnvContext.mimic.future_pos,
+            "mimic_ref_rot": EnvContext.mimic.future_rot,
+            "mimic_ref_vel": EnvContext.mimic.future_vel,
+            "mimic_ref_ang_vel": EnvContext.mimic.future_ang_vel,
+        },
+        static_params={
+            "future_steps": future_steps,
+            "local_obs": local_obs,
+            "root_height_obs": root_height_obs,
+            "w_last": True,
+        },
+    )
+
+
 def mimic_target_poses_future_rel_factory(
     use_noisy: bool = False,
     future_steps: Optional[int] = None,
@@ -1271,6 +1296,7 @@ __all__ = [
     "historical_reduced_coords_obs",
     "previous_actions",
     "mimic_target_poses_max_coords",
+    "mimic_future_max_coords_obs",
     "mimic_target_poses_future_rel",
     "mimic_target_poses_reduced_coords",
     "mimic_deploy_target_poses",

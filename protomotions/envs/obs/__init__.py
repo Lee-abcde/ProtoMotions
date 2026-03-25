@@ -53,6 +53,7 @@ from protomotions.envs.obs.humanoid_historical import (
 from protomotions.envs.obs.target_poses import (
     build_max_coords_target_poses_future_rel,
     build_max_coords_target_poses,
+    build_mimic_future_max_coords_observations,
     build_reduced_coords_target_poses,
     build_deploy_target_poses,
     build_sparse_target_poses,
@@ -108,6 +109,7 @@ __all__ = [
     # Target pose building compute kernels
     "build_max_coords_target_poses_future_rel",
     "build_max_coords_target_poses",
+    "build_mimic_future_max_coords_observations",
     "build_reduced_coords_target_poses",
     "build_deploy_target_poses",
     "build_sparse_target_poses",
