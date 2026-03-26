@@ -67,6 +67,7 @@ class DistillVQPAEModelConfig(BaseModelConfig):
     current_obs_dim: int = 493
     historical_obs_dim: int = 494
     future_obs_dim: int = 792
+    input_projector: bool = True
 
     latent_channels: int = 256
     intermediate_channels: int = 256

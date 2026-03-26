@@ -706,35 +706,45 @@ def build_mimic_future_max_coords_observations(
     w_last: bool,
     future_steps: Union[int, List[int]] = 1,
 ):
-    """Convert one future reference state into the same max_coords observation space."""
+    """Convert future reference states into flattened max_coords observations.
+
+    Supports both single-step and multi-step inputs. For a single selected future
+    step it returns one max_coords observation per environment. For multiple
+    selected steps it flattens the per-step observations into
+    ``[envs, selected_steps * obs_dim]``.
+    """
     if future_steps is not None:
         mimic_ref_pos = select_step_indices(mimic_ref_pos, future_steps)
         mimic_ref_rot = select_step_indices(mimic_ref_rot, future_steps)
         mimic_ref_vel = select_step_indices(mimic_ref_vel, future_steps)
         mimic_ref_ang_vel = select_step_indices(mimic_ref_ang_vel, future_steps)
 
-    if mimic_ref_pos.shape[1] != 1:
-        raise ValueError(
-            "build_mimic_future_max_coords_observations expects exactly one future step"
-        )
-
-    ref_pos = mimic_ref_pos[:, 0]
-    ref_rot = mimic_ref_rot[:, 0]
-    ref_vel = mimic_ref_vel[:, 0]
-    ref_ang_vel = mimic_ref_ang_vel[:, 0]
-
-    num_envs = ref_pos.shape[0]
-    num_bodies = ref_pos.shape[1]
-    ground_height = torch.zeros(num_envs, 1, device=ref_pos.device, dtype=ref_pos.dtype)
-    body_contacts = torch.zeros(
-        num_envs, num_bodies, device=ref_pos.device, dtype=torch.bool
+    num_envs, num_future_steps, num_bodies = mimic_ref_pos.shape[:3]
+    flat_ref_pos = mimic_ref_pos.reshape(num_envs * num_future_steps, num_bodies, 3)
+    flat_ref_rot = mimic_ref_rot.reshape(num_envs * num_future_steps, num_bodies, 4)
+    flat_ref_vel = mimic_ref_vel.reshape(num_envs * num_future_steps, num_bodies, 3)
+    flat_ref_ang_vel = mimic_ref_ang_vel.reshape(
+        num_envs * num_future_steps, num_bodies, 3
     )
 
-    return compute_humanoid_max_coords_observations(
-        body_pos=ref_pos,
-        body_rot=ref_rot,
-        body_vel=ref_vel,
-        body_ang_vel=ref_ang_vel,
+    ground_height = torch.zeros(
+        num_envs * num_future_steps,
+        1,
+        device=flat_ref_pos.device,
+        dtype=flat_ref_pos.dtype,
+    )
+    body_contacts = torch.zeros(
+        num_envs * num_future_steps,
+        num_bodies,
+        device=flat_ref_pos.device,
+        dtype=torch.bool,
+    )
+
+    obs = compute_humanoid_max_coords_observations(
+        body_pos=flat_ref_pos,
+        body_rot=flat_ref_rot,
+        body_vel=flat_ref_vel,
+        body_ang_vel=flat_ref_ang_vel,
         ground_height=ground_height,
         body_contacts=body_contacts,
         local_obs=local_obs,
@@ -742,7 +752,7 @@ def build_mimic_future_max_coords_observations(
         observe_contacts=False,
         w_last=w_last,
     )
-
+    return obs.reshape(num_envs, -1)
 
 # =============================================================================
 # Individual Component Build Functions (for modular factories)

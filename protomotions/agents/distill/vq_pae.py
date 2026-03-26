@@ -93,15 +93,30 @@ class DistillVQPAEModel(BaseModel):
         )
         self.out_keys = ["action", "privileged_action"]
 
-        self.current_projector = nn.Linear(
-            self.config.current_obs_dim, self.config.latent_channels
-        )
-        self.history_projector = nn.Linear(
-            self.config.historical_obs_dim, self.config.latent_channels
-        )
-        self.future_projector = nn.Linear(
-            self.config.future_obs_dim, self.config.latent_channels
-        )
+        if self.config.input_projector:
+            self.current_projector = nn.Linear(
+                self.config.current_obs_dim, self.config.latent_channels
+            )
+            self.history_projector = nn.Linear(
+                self.config.historical_obs_dim, self.config.latent_channels
+            )
+            self.future_projector = nn.Linear(
+                self.config.future_obs_dim, self.config.latent_channels
+            )
+        else:
+            if not (
+                self.config.current_obs_dim
+                == self.config.historical_obs_dim
+                == self.config.future_obs_dim
+                == self.config.latent_channels
+            ):
+                raise ValueError(
+                    "input_projector=False requires current_obs_dim, "
+                    "historical_obs_dim, future_obs_dim, and latent_channels to match"
+                )
+            self.current_projector = nn.Identity()
+            self.history_projector = nn.Identity()
+            self.future_projector = nn.Identity()
 
         self.posterior_encoder = _conv_stack(
             in_channels=self.config.latent_channels,
