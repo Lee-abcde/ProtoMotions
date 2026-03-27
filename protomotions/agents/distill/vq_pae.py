@@ -207,6 +207,24 @@ class DistillVQPAEModel(BaseModel):
         )
         self.prior_frequency_head = _freq_mlp(prior_seq_len - 1)
         self.posterior_frequency_head = _freq_mlp(posterior_seq_len - 1)
+        self.reconstruction_head: nn.Module | None = None
+        if self.config.losses.reconstruction_weight > 0.0:
+            if not (
+                self.config.current_obs_dim
+                == self.config.historical_obs_dim
+                == self.config.future_obs_dim
+            ):
+                raise ValueError(
+                    "reconstruction_weight > 0 requires current, historical, and future "
+                    "observation dimensions to match for full-window reconstruction"
+                )
+            self.reconstruction_head = _conv_stack(
+                in_channels=self.config.n_timing_phases * self.manifold_channels,
+                hidden_channels=self.config.intermediate_channels,
+                out_channels=self.config.current_obs_dim,
+                num_layers=self.config.phase_encoder_layers,
+                kernel_size=self.config.phase_kernel_size,
+            )
 
     def _reshape_history(self, tensordict: TensorDict) -> torch.Tensor:
         return tensordict["historical_pose_obs_norm"].reshape(
@@ -231,6 +249,12 @@ class DistillVQPAEModel(BaseModel):
         prior_sequence = self._build_prior_sequence(tensordict)
         future = self.future_projector(self._reshape_future(tensordict))
         return torch.cat([prior_sequence, future], dim=1)
+
+    def _build_posterior_reconstruction_target(self, tensordict: TensorDict) -> torch.Tensor:
+        history = self._reshape_history(tensordict)
+        current = tensordict["max_coords_obs_norm"].unsqueeze(1)
+        future = self._reshape_future(tensordict)
+        return torch.cat([history, current, future], dim=1)
 
     def analytical_phase(
         self,
@@ -417,6 +441,15 @@ class DistillVQPAEModel(BaseModel):
             tensordict.batch_size[0]
         )
         tensordict["vq_pae_indices"] = posterior["indices"]
+        if self.reconstruction_head is not None:
+            reconstructed_window = self.reconstruction_head(posterior["manifold"]).transpose(1, 2)
+            target_window = self._build_posterior_reconstruction_target(tensordict)
+            tensordict["vq_pae_reconstructed_future"] = reconstructed_window
+            tensordict["vq_pae_reconstruction_loss"] = F.mse_loss(
+                reconstructed_window,
+                target_window.detach(),
+                reduction="none",
+            ).mean(dim=(1, 2))
 
         return tensordict
 
@@ -439,14 +472,24 @@ class DistillVQPAEModel(BaseModel):
             tensordict["vq_pae_frequency_alignment_loss"].mean()
             * losses.frequency_alignment_weight
         )
+        reconstruction = torch.tensor(0.0, device=commitment.device)
+        if (
+            losses.reconstruction_weight > 0.0
+            and "vq_pae_reconstruction_loss" in tensordict.keys()
+        ):
+            reconstruction = (
+                tensordict["vq_pae_reconstruction_loss"].mean()
+                * losses.reconstruction_weight
+            )
         total = (
             commitment
             + prior_commitment
             + prior_alignment
             + phase_alignment
             + frequency_alignment
+            + reconstruction
         )
-        return total, {
+        log_dict = {
             "distill/vq_commitment_loss": commitment.detach(),
             "distill/vq_prior_commitment_loss": prior_commitment.detach(),
             "distill/vq_prior_alignment_loss": prior_alignment.detach(),
@@ -454,6 +497,9 @@ class DistillVQPAEModel(BaseModel):
             "distill/vq_frequency_alignment_loss": frequency_alignment.detach(),
             "distill/vq_perplexity": tensordict["vq_pae_perplexity"].mean().detach(),
         }
+        if losses.reconstruction_weight > 0.0:
+            log_dict["distill/vq_reconstruction_loss"] = reconstruction.detach()
+        return total, log_dict
 
     def get_inference_in_keys(self) -> list:
         trunk_in_keys_without_latent = [

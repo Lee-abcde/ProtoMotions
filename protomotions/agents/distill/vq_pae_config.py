@@ -30,6 +30,7 @@ class VQPAELossConfig:
     prior_alignment_weight: float = 1.0
     phase_alignment_weight: float = 0.1
     frequency_alignment_weight: float = 0.1
+    reconstruction_weight: float = 0.0
 
 
 @dataclass
