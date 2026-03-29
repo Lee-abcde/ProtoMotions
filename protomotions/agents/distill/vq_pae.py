@@ -296,6 +296,32 @@ class DistillVQPAEModel(BaseModel):
         manifold, _ = self.get_phase_manifold(quantized_state, angles)
         return manifold
 
+    def _decode_next_step(
+        self,
+        branch: Dict[str, torch.Tensor],
+        args: torch.Tensor,
+        speed_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        center_idx = self.config.num_historical_conditioned_steps
+        current_arg = args[center_idx]
+        if torch.abs(current_arg) > 1e-6:
+            raise ValueError(
+                f"Expected center arg to be current frame (0), got {float(current_arg)}"
+            )
+
+        frequency = branch["frequency"]
+        if speed_scale is not None:
+            frequency = frequency * speed_scale.unsqueeze(-1).to(frequency)
+
+        next_arg = current_arg + self.config.time_step
+        next_step_manifold = self._decode_manifold_at_args(
+            quantized_state=branch["quantized_state"],
+            frequency=frequency,
+            phase=branch["phase"],
+            time_args=next_arg.unsqueeze(0),
+        )
+        return next_step_manifold[:, :, 0]
+
     def _quantize(
         self, state: torch.Tensor, update_codebook: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -354,20 +380,6 @@ class DistillVQPAEModel(BaseModel):
             phase=phase,
             time_args=args,
         )
-        center_idx = self.config.num_historical_conditioned_steps
-        current_arg = args[center_idx]
-        # Args are defined with the center at current frame (t=0). Query t+dt explicitly.
-        next_arg = current_arg + self.config.time_step
-        next_step_manifold = self._decode_manifold_at_args(
-            quantized_state=quantized_state,
-            frequency=frequency,
-            phase=phase,
-            time_args=next_arg.unsqueeze(0),
-        )
-        if torch.abs(current_arg) > 1e-6:
-            raise ValueError(
-                f"Expected center arg to be current frame (0), got {float(current_arg)}"
-            )
 
         return {
             "encoded": encoded,
@@ -380,12 +392,24 @@ class DistillVQPAEModel(BaseModel):
             "indices": indices,
             "perplexity": perplexity,
             "manifold": manifold,
-            "center": manifold[:, :, center_idx],
-            "next_step": next_step_manifold[:, :, 0],
+            "center": manifold[:, :, self.config.num_historical_conditioned_steps],
+            "next_step": self._decode_next_step(
+                branch={
+                    "frequency": frequency,
+                    "phase": phase,
+                    "quantized_state": quantized_state,
+                },
+                args=args,
+            ),
         }
 
     def forward(self, tensordict: TensorDict) -> TensorDict:
         tensordict = self._preprocessor(tensordict)
+        external_actor_latent = tensordict.get("vq_external_vae_latent", None)
+        external_privileged_latent = tensordict.get(
+            "vq_external_privileged_vae_latent", None
+        )
+        speed_scale = tensordict.get("vq_speed_scale", None)
 
         prior_sequence = self._build_prior_sequence(tensordict)
         posterior_sequence = self._build_posterior_sequence(tensordict)
@@ -417,12 +441,30 @@ class DistillVQPAEModel(BaseModel):
             update_codebook=False,
         )
 
+        actor_latent = prior["next_step"]
+        privileged_latent = posterior["next_step"]
+        if speed_scale is not None:
+            actor_latent = self._decode_next_step(
+                branch=prior,
+                args=self.prior_args,
+                speed_scale=speed_scale,
+            )
+            privileged_latent = self._decode_next_step(
+                branch=posterior,
+                args=self.posterior_args,
+                speed_scale=speed_scale,
+            )
+        if external_actor_latent is not None:
+            actor_latent = external_actor_latent
+        if external_privileged_latent is not None:
+            privileged_latent = external_privileged_latent
+
         # Use one-step-ahead manifold embedding for action conditioning.
-        tensordict["vae_latent"] = prior["next_step"]
+        tensordict["vae_latent"] = actor_latent
         tensordict = self._trunk(tensordict)
         tensordict["action"] = tensordict[self._trunk.out_keys[0]]
 
-        tensordict["vae_latent"] = posterior["next_step"]
+        tensordict["vae_latent"] = privileged_latent
         tensordict = self._trunk(tensordict)
         tensordict["privileged_action"] = tensordict[self._trunk.out_keys[0]]
 
@@ -441,6 +483,11 @@ class DistillVQPAEModel(BaseModel):
             tensordict.batch_size[0]
         )
         tensordict["vq_pae_indices"] = posterior["indices"]
+        tensordict["vq_pae_phase"] = posterior["phase"]
+        tensordict["vq_pae_frequency"] = posterior["frequency"]
+        tensordict["vq_pae_actor_latent"] = actor_latent
+        tensordict["vq_pae_prior_next_step"] = prior["next_step"]
+        tensordict["vq_pae_privileged_latent"] = privileged_latent
         if self.reconstruction_head is not None:
             reconstructed_window = self.reconstruction_head(posterior["manifold"]).transpose(1, 2)
             target_window = self._build_posterior_reconstruction_target(tensordict)

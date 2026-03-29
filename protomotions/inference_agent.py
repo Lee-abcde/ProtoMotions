@@ -115,6 +115,18 @@ def create_parser():
         default=[],
         help="Config overrides in format key=value (e.g., env.max_episode_length=5000 simulator.headless=True)",
     )
+    parser.add_argument(
+        "--vq-speed-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor applied to VQ-PAE phase advance during interactive inference.",
+    )
+    parser.add_argument(
+        "--vq-latent-loop-frames",
+        type=int,
+        default=0,
+        help="Capture this many VQ-PAE actor latents at runtime, then loop them with time warping.",
+    )
 
     return parser
 
@@ -359,6 +371,9 @@ def main():
     agent: BaseAgent = AgentClass(
         config=agent_config, env=env, fabric=fabric, **agent_kwargs
     )
+    if hasattr(agent, "evaluator") and agent.evaluator is not None:
+        setattr(agent.evaluator, "vq_speed_scale", args.vq_speed_scale)
+        setattr(agent.evaluator, "vq_latent_loop_frames", args.vq_latent_loop_frames)
 
     agent.setup()
     agent.load(args.checkpoint, load_env=False)
