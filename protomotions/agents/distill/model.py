@@ -104,6 +104,11 @@ class DistillModel(BaseModel):
         Returns:
             TensorDict with action and all VAE outputs.
         """
+        external_actor_latent = tensordict.get("distill_external_vae_latent", None)
+        external_privileged_latent = tensordict.get(
+            "distill_external_privileged_vae_latent", None
+        )
+
         # Compute prior outputs
         tensordict = self._prior(tensordict)
         prior_mu = tensordict[self._prior.out_keys[0]]
@@ -115,6 +120,8 @@ class DistillModel(BaseModel):
         z = self.reparameterization(
             prior_mu, std, vae_noise
         )  # z is the latent code for the action
+        if external_actor_latent is not None:
+            z = external_actor_latent
         tensordict["vae_latent"] = z
 
         # Compute non-privileged action (prior path)
@@ -133,12 +140,16 @@ class DistillModel(BaseModel):
         # Combine privileged mu and logvar to get privileged z
         privileged_std = torch.exp(0.5 * privileged_logvar)
         privileged_z = self.reparameterization(privileged_mu, privileged_std, vae_noise)
+        if external_privileged_latent is not None:
+            privileged_z = external_privileged_latent
 
         # Compute privileged action (prior + encoder path)
         tensordict["vae_latent"] = privileged_z
         tensordict = self._trunk(tensordict)
         privileged_action = tensordict[self._trunk.out_keys[0]]
 
+        tensordict["distill_actor_latent"] = z
+        tensordict["distill_privileged_latent"] = privileged_z
         tensordict["action"] = action
         tensordict["privileged_action"] = privileged_action
         return tensordict

@@ -8,6 +8,8 @@ from protomotions.agents.evaluators.mimic_evaluator import (
 )
 from protomotions.agents.evaluators.metrics import MotionMetrics
 from protomotions.agents.evaluators.config import DistillEvaluatorConfig
+from protomotions.agents.distill.model import DistillModel
+from protomotions.agents.distill.vq_pae import DistillVQPAEModel
 from protomotions.utils import rotations
 
 
@@ -348,9 +350,8 @@ class DistillEvaluator(MimicEvaluator):
         step = 0
         action_key = self._get_interaction_action_key()
         model_module = self.agent.model.module if hasattr(self.agent.model, "module") else self.agent.model
-        is_vq_pae_model = hasattr(model_module, "posterior_phase_conv") and hasattr(
-            model_module, "quantizer"
-        )
+        is_vq_pae_model = isinstance(model_module, DistillVQPAEModel)
+        is_distill_vae_model = isinstance(model_module, DistillModel)
         latent_key = None
         actor_external_key = None
         privileged_external_key = None
@@ -362,6 +363,14 @@ class DistillEvaluator(MimicEvaluator):
             )
             actor_external_key = "vq_external_vae_latent"
             privileged_external_key = "vq_external_privileged_vae_latent"
+        elif is_distill_vae_model:
+            latent_key = (
+                "distill_privileged_latent"
+                if action_key == "privileged_action"
+                else "distill_actor_latent"
+            )
+            actor_external_key = "distill_external_vae_latent"
+            privileged_external_key = "distill_external_privileged_vae_latent"
         motion_manager = getattr(self.env, "motion_manager", None)
         motion_lib = getattr(self, "motion_lib", None)
         latent_loop_frames = int(getattr(self, "vq_latent_loop_frames", 0))
@@ -389,7 +398,7 @@ class DistillEvaluator(MimicEvaluator):
                 configured_speed_scale = getattr(self, "vq_speed_scale", 1.0)
                 is_loop_playback_active = self._vq_latent_loop_phase is not None
                 use_stored_vq_playback = (
-                    is_vq_pae_model
+                    (is_vq_pae_model or is_distill_vae_model)
                     and is_loop_playback_active
                     and action_key == "privileged_action"
                 )
@@ -449,12 +458,12 @@ class DistillEvaluator(MimicEvaluator):
                     )
                 actor_latent = model_outs.get(latent_key, None) if latent_key is not None else None
                 is_capture_mode = (
-                    is_vq_pae_model
+                    (is_vq_pae_model or is_distill_vae_model)
                     and latent_loop_frames > 0
                     and self._vq_latent_loop_phase is None
                     and capture_step < latent_loop_frames
                 )
-                capture_root = is_capture_mode
+                capture_root = is_capture_mode and is_vq_pae_model
                 capture_latent = (
                     is_capture_mode
                     and action_key == "privileged_action"
