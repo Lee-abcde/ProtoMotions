@@ -60,7 +60,8 @@ class MimicMotionManager(MotionManager):
             Boolean tensor indicating which motion tracks are done (True) or still playing (False)
         """
         end_times = self.motion_lib.motion_lengths[self.motion_ids]
-        done_clip = (self.motion_times + self.env_dt) >= end_times
+        speed_scale = float(getattr(self, "speed_scale", self.config.speed_scale))
+        done_clip = (self.motion_times + self.env_dt * speed_scale) >= end_times
         if env_ids is not None:
             done_clip = done_clip[env_ids]
         return done_clip
@@ -71,7 +72,8 @@ class MimicMotionManager(MotionManager):
         Called after each physics simulation step to update the current time
         in each motion track.
         """
-        self.motion_times += self.env_dt
+        speed_scale = float(getattr(self, "speed_scale", self.config.speed_scale))
+        self.motion_times += self.env_dt * speed_scale
 
     def sample_motions(
         self, env_ids: torch.Tensor, new_motion_ids: Optional[torch.Tensor] = None

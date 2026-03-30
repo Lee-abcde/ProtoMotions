@@ -80,3 +80,8 @@ class MimicMotionManagerConfig(MotionManagerConfig):
         default=True,
         metadata={"help": "Whether to resample motion on environment reset."}
     )
+
+    speed_scale: float = field(
+        default=1.0,
+        metadata={"help": "Playback speed multiplier for reference motion time."}
+    )
