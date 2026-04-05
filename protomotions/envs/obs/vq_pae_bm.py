@@ -6,6 +6,7 @@ from typing import List
 import torch
 
 from protomotions.utils import rotations
+from protomotions.envs.obs.humanoid import root_projected_gravity
 
 
 def build_reduced_core_obs(
@@ -27,11 +28,7 @@ def build_reduced_core_obs(
 def build_projected_gravity_obs(
     anchor_rot: torch.Tensor, w_last: bool = True
 ) -> torch.Tensor:
-    gravity_vec_w = torch.tensor(
-        [0.0, 0.0, -1.0], device=anchor_rot.device, dtype=anchor_rot.dtype
-    )
-    gravity_vec_w = gravity_vec_w.view(1, 3).repeat(anchor_rot.shape[0], 1)
-    return rotations.quat_rotate_inverse(anchor_rot, gravity_vec_w, w_last)
+    return root_projected_gravity(anchor_rot, w_last)
 
 
 def build_reduced_future_core_target_poses(

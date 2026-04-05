@@ -153,7 +153,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 "current_state_anchor_rot": EnvContext.noisy.anchor_rot,
                 "mimic_ref_anchor_rot": EnvContext.mimic.future_anchor_rot,
             },
-            static_params={"future_steps": 1, "w_last": True},
+            static_params={"future_steps": BM_TEACHER_FUTURE_STEPS, "w_last": True},
         ),
         "historical_pose_obs": MdpComponent(
             compute_func=build_historical_reduced_core_obs,
@@ -572,7 +572,7 @@ def apply_inference_overrides(
             "current_state_anchor_rot": EnvContext.current.anchor_rot,
             "mimic_ref_anchor_rot": EnvContext.mimic.future_anchor_rot,
         },
-        static_params={"future_steps": 1, "w_last": True},
+        static_params={"future_steps": BM_TEACHER_FUTURE_STEPS, "w_last": True},
     )
     env_cfg.observation_components["historical_pose_obs"] = MdpComponent(
         compute_func=build_historical_reduced_core_obs,
