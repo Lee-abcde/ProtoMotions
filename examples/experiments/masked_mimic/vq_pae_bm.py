@@ -355,6 +355,7 @@ def agent_config(
     )
     trunk_config = ModuleContainerConfig(
         in_keys=[
+            "encoder_current_obs",
             "historical_previous_processed_actions",
             "trunk_proj_gravity_norm",
             "trunk_target_relative_rot_norm",
@@ -362,6 +363,13 @@ def agent_config(
         ],
         out_keys=["actor_trunk_out"],
         models=[
+            ObsProcessorConfig(
+                in_keys=["encoder_current_obs"],
+                out_keys=["encoder_current_obs_norm"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                module_operations=[ModuleOperationForwardConfig()],
+            ),
             ObsProcessorConfig(
                 in_keys=["historical_previous_processed_actions"],
                 out_keys=["historical_previous_processed_actions_norm"],
@@ -371,6 +379,7 @@ def agent_config(
             ),
             MLPWithConcatConfig(
                 in_keys=[
+                    "encoder_current_obs_norm",
                     "historical_previous_processed_actions_norm",
                     "trunk_proj_gravity_norm",
                     "trunk_target_relative_rot_norm",
