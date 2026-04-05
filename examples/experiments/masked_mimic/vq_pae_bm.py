@@ -279,8 +279,14 @@ def agent_config(
         ObsProcessorConfig,
         ModuleOperationForwardConfig,
     )
-    from protomotions.agents.evaluators.config import DistillEvaluatorConfig
+    from protomotions.agents.evaluators.config import (
+        DistillEvaluatorConfig,
+        MotionWeightsRulesConfig,
+    )
     from protomotions.envs.component_factories import (
+        anchor_ori_metric_factory,
+        relative_body_pos_metric_factory,
+        anchor_height_error_metric_factory,
         gt_error_factory,
         gr_error_factory,
         max_joint_error_factory,
@@ -424,11 +430,21 @@ def agent_config(
     )
 
     evaluator_config = DistillEvaluatorConfig(
+        use_privileged_success_for_motion_weights=True,
         evaluation_components={
-            "gt_error": gt_error_factory(threshold=0.25),
+            "anchor_ori": anchor_ori_metric_factory(),
+            "relative_body_pos": relative_body_pos_metric_factory(),
+            "anchor_height_error": anchor_height_error_metric_factory(
+                threshold=0.25
+            ),
+            "gt_error": gt_error_factory(),
             "gr_error": gr_error_factory(),
             "max_joint_error": max_joint_error_factory(),
         },
+        motion_weights_rules=MotionWeightsRulesConfig(
+            motion_weights_update_success_discount=0.999,
+            motion_weights_update_failure_discount=0,
+        ),
     )
 
     return DistillAgentConfig(

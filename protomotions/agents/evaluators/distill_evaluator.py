@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor
 from typing import Dict, Optional, Tuple, Any
+import math
 
 from protomotions.agents.evaluators.mimic_evaluator import (
     MimicEvaluator,
@@ -201,6 +202,42 @@ class DistillEvaluator(MimicEvaluator):
             filename,
             subdirectory="privileged_failed_motions",
         )
+
+    def _update_motion_sampling_weights(self) -> None:
+        """Optionally update sampling weights from privileged-action evaluation failures."""
+        if (
+            self.config.use_privileged_success_for_motion_weights
+            and self._privileged_eval_state is not None
+        ):
+            motion_failed = self._privileged_eval_state["motion_failed"]
+            if motion_failed is None:
+                return
+
+            failed_motions = torch.nonzero(motion_failed).flatten().tolist()
+            success_motions = torch.nonzero(~motion_failed).flatten().tolist()
+
+            self._save_privileged_failed_motions(
+                failed_motions, self.agent.current_epoch
+            )
+
+            success_discount = math.pow(
+                self.config.motion_weights_rules.motion_weights_update_success_discount,
+                self.config.eval_metrics_every,
+            )
+            failure_discount = math.pow(
+                self.config.motion_weights_rules.motion_weights_update_failure_discount,
+                self.config.eval_metrics_every,
+            )
+            new_weights = self.env.motion_manager.motion_weights.clone()
+            new_weights[success_motions] *= success_discount
+            if failure_discount != 0:
+                new_weights[failed_motions] /= failure_discount
+            else:
+                new_weights[failed_motions] = 1.0
+            self.env.motion_manager.update_sampling_weights(new_weights)
+            return
+
+        super()._update_motion_sampling_weights()
 
     def initialize_eval(self) -> Dict[str, MotionMetrics]:
         """Initialize normal and privileged evaluation state."""

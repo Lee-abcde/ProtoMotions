@@ -92,6 +92,15 @@ class DistillEvaluatorConfig(MimicEvaluatorConfig):
     """Configuration for distillation evaluator with privileged-action testing."""
 
     _target_: str = "protomotions.agents.evaluators.distill_evaluator.DistillEvaluator"
+    use_privileged_success_for_motion_weights: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "If True, motion sampling weights are updated using the "
+                "privileged_action evaluation failures instead of the prior/action failures."
+            )
+        }
+    )
     use_privileged_action_for_interaction: bool = field(
         default=False,
         metadata={
