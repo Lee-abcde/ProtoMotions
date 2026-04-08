@@ -127,6 +127,12 @@ def create_parser():
         default=0,
         help="Capture this many VQ-PAE actor latents at runtime, then loop them with time warping.",
     )
+    parser.add_argument(
+        "--repeat-eval",
+        type=int,
+        default=1,
+        help="Repeat full evaluation this many times and report per-run plus averaged metrics.",
+    )
 
     return parser
 
@@ -151,12 +157,40 @@ from protomotions.utils.hydra_replacement import get_class  # noqa: E402
 from protomotions.utils.fabric_config import FabricConfig  # noqa: E402
 from lightning.fabric import Fabric  # noqa: E402
 from dataclasses import asdict  # noqa: E402
-from protomotions.utils.config_utils import clean_dict_for_storage  # noqa: E402
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
 
 log = logging.getLogger(__name__)
+
+
+def _print_evaluation_results(
+    evaluation_log: dict, evaluated_score: float | None, run_idx: int | None = None
+) -> None:
+    title = "EVALUATION RESULTS"
+    if run_idx is not None:
+        title = f"EVALUATION RESULTS (run {run_idx})"
+
+    print("\n" + "=" * 60)
+    print(title)
+    print("=" * 60)
+    for key, value in sorted(evaluation_log.items()):
+        print(f"  {key}: {value:.6f}")
+    print("=" * 60)
+    if evaluated_score is not None:
+        print(f"  Overall Score: {evaluated_score:.6f}")
+    print("=" * 60 + "\n")
+
+
+def _average_evaluation_logs(evaluation_runs: list[dict]) -> dict:
+    if not evaluation_runs:
+        return {}
+
+    averaged = {}
+    keys = sorted(evaluation_runs[0].keys())
+    for key in keys:
+        averaged[key] = sum(run[key] for run in evaluation_runs) / len(evaluation_runs)
+    return averaged
 
 
 # def tmp_enable_domain_randomization(robot_cfg, simulator_cfg, env_cfg):
@@ -306,7 +340,9 @@ def main():
         simulator_extra_params["simulation_app"] = app_launcher.app
 
     # Convert friction for simulator compatibility
-    from protomotions.simulator.base_simulator.utils import convert_friction_for_simulator
+    from protomotions.simulator.base_simulator.utils import (
+        convert_friction_for_simulator,
+    )
 
     terrain_config, simulator_config = convert_friction_for_simulator(
         terrain_config, simulator_config
@@ -380,19 +416,28 @@ def main():
 
     try:
         if args.full_eval:
-            agent.evaluator.eval_count = 0
-            evaluation_log, evaluated_score = agent.evaluator.evaluate()
-            
-            # Print evaluation metrics
-            print("\n" + "=" * 60)
-            print("EVALUATION RESULTS")
-            print("=" * 60)
-            for key, value in sorted(evaluation_log.items()):
-                print(f"  {key}: {value:.6f}")
-            print("=" * 60)
-            if evaluated_score is not None:
-                print(f"  Overall Score: {evaluated_score:.6f}")
-            print("=" * 60 + "\n")
+            evaluation_runs = []
+            evaluated_scores = []
+
+            for run_idx in range(1, args.repeat_eval + 1):
+                agent.evaluator.eval_count = 0
+                evaluation_log, evaluated_score = agent.evaluator.evaluate()
+                evaluation_runs.append(evaluation_log)
+                if evaluated_score is not None:
+                    evaluated_scores.append(evaluated_score)
+
+                if args.repeat_eval > 1:
+                    _print_evaluation_results(
+                        evaluation_log, evaluated_score, run_idx=run_idx
+                    )
+
+            averaged_log = _average_evaluation_logs(evaluation_runs)
+            averaged_score = (
+                sum(evaluated_scores) / len(evaluated_scores)
+                if evaluated_scores
+                else None
+            )
+            _print_evaluation_results(averaged_log, averaged_score)
         else:
             agent.evaluator.simple_test_policy(collect_metrics=True)
     finally:
