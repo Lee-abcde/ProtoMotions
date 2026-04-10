@@ -155,11 +155,117 @@ from deployment.state_utils import (
     compute_anchor_rot_np,
     compute_yaw_offset_np,
     apply_heading_offset_np,
+    _quat_mul_np,
 )
 from deployment.motion_utils import MotionPlayer
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
+
+
+def _noise_to_vec(noise_scale, dim: int) -> np.ndarray:
+    """Convert scalar/list noise config to a NumPy vector."""
+    if noise_scale is None:
+        return np.zeros(dim, dtype=np.float32)
+    if isinstance(noise_scale, (int, float)):
+        return np.full(dim, float(noise_scale), dtype=np.float32)
+    arr = np.asarray(noise_scale, dtype=np.float32)
+    if arr.size == 1:
+        return np.full(dim, float(arr.item()), dtype=np.float32)
+    if arr.size != dim:
+        raise ValueError(f"Expected noise dim {dim}, got {arr.size}")
+    return arr
+
+
+def _quat_from_euler_xyz_np(euler_xyz: np.ndarray) -> np.ndarray:
+    """Build an xyzw quaternion from XYZ Euler angles."""
+    roll, pitch, yaw = euler_xyz.astype(np.float32)
+    cr = np.cos(roll * 0.5)
+    sr = np.sin(roll * 0.5)
+    cp = np.cos(pitch * 0.5)
+    sp = np.sin(pitch * 0.5)
+    cy = np.cos(yaw * 0.5)
+    sy = np.sin(yaw * 0.5)
+    return np.array(
+        [
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+            cr * cp * cy + sr * sp * sy,
+        ],
+        dtype=np.float32,
+    )
+
+
+def _apply_reset_noise_np(frame0: dict, noise_cfg: dict | None) -> dict:
+    """Apply ProtoMotions-style reset noise to a first-frame motion state."""
+    if not noise_cfg:
+        return frame0
+
+    noisy = {k: np.array(v, copy=True) for k, v in frame0.items()}
+    rng = np.random.default_rng()
+
+    noisy["dof_pos"] += rng.uniform(
+        -_noise_to_vec(noise_cfg.get("dof_pos_noise"), noisy["dof_pos"].shape[0]),
+        _noise_to_vec(noise_cfg.get("dof_pos_noise"), noisy["dof_pos"].shape[0]),
+    ).astype(np.float32)
+    noisy["dof_vel"] += rng.uniform(
+        -_noise_to_vec(noise_cfg.get("dof_vel_noise"), noisy["dof_vel"].shape[0]),
+        _noise_to_vec(noise_cfg.get("dof_vel_noise"), noisy["dof_vel"].shape[0]),
+    ).astype(np.float32)
+
+    noisy["body_pos"][0] += rng.uniform(
+        -_noise_to_vec(noise_cfg.get("root_pos_noise"), 3),
+        _noise_to_vec(noise_cfg.get("root_pos_noise"), 3),
+    ).astype(np.float32)
+    noisy["body_vel"][0] += rng.uniform(
+        -_noise_to_vec(noise_cfg.get("root_vel_noise"), 3),
+        _noise_to_vec(noise_cfg.get("root_vel_noise"), 3),
+    ).astype(np.float32)
+    noisy["body_ang_vel"][0] += rng.uniform(
+        -_noise_to_vec(noise_cfg.get("root_ang_vel_noise"), 3),
+        _noise_to_vec(noise_cfg.get("root_ang_vel_noise"), 3),
+    ).astype(np.float32)
+
+    rot_noise = rng.uniform(
+        -_noise_to_vec(noise_cfg.get("root_rot_noise"), 3),
+        _noise_to_vec(noise_cfg.get("root_rot_noise"), 3),
+    ).astype(np.float32)
+    noise_quat = _quat_from_euler_xyz_np(rot_noise)
+    noisy["body_rot"][0] = _quat_mul_np(noise_quat, noisy["body_rot"][0])
+
+    return noisy
+
+
+def _load_reset_noise_from_checkpoint(meta: dict) -> dict | None:
+    """Load robot.reset_noise from the source checkpoint recorded in the ONNX YAML."""
+    checkpoint = meta.get("metadata", {}).get("checkpoint")
+    if not checkpoint:
+        return None
+
+    import torch
+
+    resolved_path = Path(checkpoint).parent / "resolved_configs_inference.pt"
+    if not resolved_path.exists():
+        resolved_path = Path(checkpoint).parent / "resolved_configs.pt"
+    if not resolved_path.exists():
+        log.warning(f"Could not find resolved configs next to checkpoint: {checkpoint}")
+        return None
+
+    resolved = torch.load(resolved_path, map_location="cpu", weights_only=False)
+    robot_cfg = resolved.get("robot")
+    reset_noise = getattr(robot_cfg, "reset_noise", None)
+    if reset_noise is None:
+        return None
+
+    return {
+        "dof_pos_noise": getattr(reset_noise, "dof_pos_noise", 0.0),
+        "dof_vel_noise": getattr(reset_noise, "dof_vel_noise", 0.0),
+        "root_pos_noise": getattr(reset_noise, "root_pos_noise", 0.0),
+        "root_rot_noise": getattr(reset_noise, "root_rot_noise", 0.0),
+        "root_vel_noise": getattr(reset_noise, "root_vel_noise", 0.0),
+        "root_ang_vel_noise": getattr(reset_noise, "root_ang_vel_noise", 0.0),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -370,9 +476,16 @@ def read_robot_state(data, anchor_body_index: int, root_body_index: int = 0):
     }
 
 
-def set_initial_pose(model, data, motion_player: MotionPlayer) -> None:
+def set_initial_pose(
+    model,
+    data,
+    motion_player: MotionPlayer,
+    zero_init_vel: bool = True,
+    reset_noise_cfg: dict | None = None,
+) -> None:
     """Initialise the robot at the first frame of the motion."""
     frame0 = motion_player.get_state_at_frame(0)
+    frame0 = _apply_reset_noise_np(frame0, reset_noise_cfg)
 
     # Root position/orientation from first body (pelvis)
     root_pos  = frame0["body_pos"][0]       # [3]
@@ -384,11 +497,20 @@ def set_initial_pose(model, data, motion_player: MotionPlayer) -> None:
     data.qpos[3:7] = root_quat[[3, 0, 1, 2]]  # xyzw -> wxyz
     data.qpos[7:]  = frame0["dof_pos"]
 
-    data.qvel[:] = 0.0
+    if zero_init_vel:
+        data.qvel[:] = 0.0
+    else:
+        # Match the reference motion's first-frame velocities as closely as possible.
+        # MuJoCo free-joint qvel layout is [root_lin_vel(3), root_ang_vel_local(3), dof_vel...].
+        data.qvel[0:3] = frame0["body_vel"][0]
+        data.qvel[3:6] = frame0["body_ang_vel"][0]
+        data.qvel[6:] = frame0["dof_vel"]
     mujoco.mj_forward(model, data)
     log.info(
         f"  Initial pose set: root_pos={root_pos.round(3).tolist()}, "
-        f"dof_pos[:5]={frame0['dof_pos'][:5].round(3).tolist()}"
+        f"dof_pos[:5]={frame0['dof_pos'][:5].round(3).tolist()}, "
+        f"zero_init_vel={zero_init_vel}, "
+        f"reset_noise={'on' if reset_noise_cfg else 'off'}"
     )
 
 
@@ -462,6 +584,8 @@ def run(
     render: bool = False,
     realtime: bool = True,
     action_ema_alpha: float | None = None,
+    zero_init_vel: bool = True,
+    use_checkpoint_reset_noise: bool = False,
 ) -> None:
     """Run the tracker policy in a MuJoCo simulation loop.
 
@@ -502,6 +626,11 @@ def run(
     motion_meta = meta["motion"]
     control     = meta["control"]
     runtime     = meta["_runtime"]
+    reset_noise_cfg = (
+        _load_reset_noise_from_checkpoint(meta) if use_checkpoint_reset_noise else None
+    )
+    if reset_noise_cfg is not None:
+        log.info(f"Reset noise loaded from checkpoint metadata: {reset_noise_cfg}")
 
     anchor_body_index = robot_meta["anchor_body_index"]
     root_body_index   = robot_meta["root_body_index"]
@@ -665,7 +794,13 @@ def run(
     while loop_idx < num_loops:
         loop_label = f"{loop_idx + 1}/{num_loops}" if num_loops < 1_000_000 else f"{loop_idx + 1}"
         log.info(f"\n--- Loop {loop_label} ---")
-        set_initial_pose(model, data, player)
+        set_initial_pose(
+            model,
+            data,
+            player,
+            zero_init_vel=zero_init_vel,
+            reset_noise_cfg=reset_noise_cfg,
+        )
         prev_pd = None
         prev_prev_pd = None
         ema_prev_targets = None
@@ -855,6 +990,18 @@ def _parse_args():
             "(control.action_ema_alpha). 1.0 = no filtering, lower = more smoothing."
         ),
     )
+    p.add_argument(
+        "--stop-zero-velo-init",
+        action="store_true",
+        default=False,
+        help="Use the first motion-frame velocities instead of the default zero qvel initialisation.",
+    )
+    p.add_argument(
+        "--use-checkpoint-reset-noise",
+        action="store_true",
+        default=False,
+        help="Apply reset noise from the source checkpoint's robot.reset_noise config.",
+    )
     return p.parse_args()
 
 
@@ -870,6 +1017,8 @@ if __name__ == "__main__":
         render=args.render,
         realtime=not args.no_realtime,
         action_ema_alpha=args.action_ema_alpha,
+        zero_init_vel=not args.stop_zero_velo_init,
+        use_checkpoint_reset_noise=args.use_checkpoint_reset_noise,
     )
     # Force clean exit — avoids GLXBadContext segfault from MuJoCo's
     # atexit GL context teardown on some Linux drivers.
