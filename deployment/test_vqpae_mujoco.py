@@ -153,6 +153,7 @@ def build_onnx_inputs(
 def run(
     onnx_path: str,
     motion_file: str,
+    motion_index: int = 0,
     cache_motion: bool = False,
     num_loops: int = 1,
     render: bool = False,
@@ -213,7 +214,7 @@ def run(
     log.info(f"ONNX inputs:  {actual_in_names}")
     log.info(f"ONNX outputs: {actual_out_names}")
 
-    player = MotionPlayer(motion_file, control_dt=control_dt)
+    player = MotionPlayer(motion_file, motion_index=motion_index, control_dt=control_dt)
     if cache_motion:
         motion_p = Path(motion_file)
         cache_p = motion_p.parent / (motion_p.stem + ".50fps.pt")
@@ -394,6 +395,12 @@ def _parse_args():
         help="Path to motion .pt file (raw ProtoMotions or pre-cached)",
     )
     p.add_argument(
+        "--motion-index",
+        type=int,
+        default=0,
+        help="Motion index to load when --motion points to a packaged multi-motion .pt library.",
+    )
+    p.add_argument(
         "--cache-motion",
         action="store_true",
         default=False,
@@ -439,6 +446,7 @@ if __name__ == "__main__":
     run(
         onnx_path=args.onnx,
         motion_file=args.motion,
+        motion_index=args.motion_index,
         cache_motion=args.cache_motion,
         num_loops=num_loops,
         render=args.render,
