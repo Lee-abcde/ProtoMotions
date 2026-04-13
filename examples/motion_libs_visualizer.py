@@ -94,6 +94,12 @@ parser.add_argument(
     default=[0.0, 0.0],
     help="Target x,y position to move all motions to (default: 0.0 0.0)",
 )
+parser.add_argument(
+    "--start-motion-idx",
+    type=int,
+    default=0,
+    help="Motion index to start playback from (default: 0)",
+)
 args = parser.parse_args()
 
 # Import simulator before torch - isaacgym/isaaclab must be imported before torch
@@ -321,6 +327,7 @@ class MotionVisualizerSmoothness:
     def __init__(
         self,
         motion_files: List[str],
+        start_motion_idx: int = 0,
         robot_name: str = "g1",
         simulator_type: str = "isaacgym",
         headless: bool = False,
@@ -334,6 +341,7 @@ class MotionVisualizerSmoothness:
         self.motion_files = [Path(f) for f in motion_files]
         self.robot_name = robot_name
         self.robot_spec = ROBOT_SPECS[robot_name]
+        self.start_motion_idx = start_motion_idx
         self.num_envs = len(motion_files)
         self.simulator_type = simulator_type
         self.headless = headless
@@ -362,10 +370,15 @@ class MotionVisualizerSmoothness:
             motion_lib.translate_all_motions_to_origin(target_xy)
 
         # Motion playback state
-        self.current_motion_idx = 0
-        self.current_frame = 0
         # Use the first motion lib to determine total motions and current motion length
         self.total_motions = self.motion_libs[0].num_motions()
+        if not 0 <= self.start_motion_idx < self.total_motions:
+            raise ValueError(
+                f"start motion index {self.start_motion_idx} is out of range "
+                f"[0, {self.total_motions - 1}]"
+            )
+        self.current_motion_idx = self.start_motion_idx
+        self.current_frame = 0
         self.current_motion_length = (
             self.motion_libs[0]
             .get_motion_num_frames(None)[self.current_motion_idx]
@@ -954,6 +967,7 @@ def main():
 
     visualizer = MotionVisualizerSmoothness(
         motion_files=args.motion_files,
+        start_motion_idx=args.start_motion_idx,
         robot_name=args.robot,
         simulator_type=args.simulator,
         headless=args.headless,
