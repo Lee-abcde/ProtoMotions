@@ -680,9 +680,15 @@ def main():
     from protomotions.utils.fabric_config import FabricConfig
     from lightning.fabric import Fabric
 
+    fabric_strategy = (
+        "auto"
+        if args.ngpu == 1 and args.nodes == 1
+        else {"_target_": "lightning.fabric.strategies.DDPStrategy"}
+    )
     fabric_config = FabricConfig(
         devices=args.ngpu,
         num_nodes=args.nodes,
+        strategy=fabric_strategy,
         loggers=loggers,
         callbacks=callbacks,
     )
