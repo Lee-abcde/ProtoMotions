@@ -493,9 +493,19 @@ class PPO(BaseAgent):
         extra_loss = torch.tensor(0.0, device=self.device)
         log_dict = {}
 
+        if hasattr(self.actor.mu, "calculate_aux_losses"):
+            aux_loss, aux_log_dict = self.actor.mu.calculate_aux_losses(batch_td)
+            extra_loss = extra_loss + aux_loss
+            log_dict.update(aux_log_dict)
+
         # --- L2C2 ---
         if self.config.l2c2.enabled:
             mu_noisy = batch_td["mean_action"]
+            is_vq_pae_actor = (
+                self.actor.mu.__class__.__module__
+                == "protomotions.agents.distill.vq_pae"
+                and self.actor.mu.__class__.__name__ == "DistillVQPAEModel"
+            )
 
             # Build clean TensorDict and accumulate input perturbation
             input_ss = torch.tensor(0.0, device=self.device)
@@ -511,11 +521,25 @@ class PPO(BaseAgent):
                 else:
                     clean_td_dict[key] = batch_td[key]
             clean_td = TensorDict(clean_td_dict, batch_size=mu_noisy.shape[0])
+            if is_vq_pae_actor:
+                clean_td["vq_pae_update_codebook"] = torch.zeros(
+                    mu_noisy.shape[0], dtype=torch.bool, device=self.device
+                )
 
             input_dist = (input_ss / input_n).detach()
 
-            clean_td = self.actor(clean_td)
-            mu_clean = clean_td["mean_action"]
+            if is_vq_pae_actor:
+                mu_was_training = self.actor.mu.training
+                self.actor.mu.eval()
+                try:
+                    clean_td = self.actor.mu(clean_td)
+                finally:
+                    if mu_was_training:
+                        self.actor.mu.train()
+                mu_clean = clean_td[self.config.model.actor.mu_key]
+            else:
+                clean_td = self.actor(clean_td)
+                mu_clean = clean_td["mean_action"]
 
             output_dist = (mu_noisy - mu_clean).pow(2).mean()
             l2c2_loss = output_dist / (input_dist + 1e-8)

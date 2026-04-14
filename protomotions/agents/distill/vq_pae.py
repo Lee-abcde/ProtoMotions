@@ -410,6 +410,9 @@ class DistillVQPAEModel(BaseModel):
             "vq_external_privileged_vae_latent", None
         )
         speed_scale = tensordict.get("vq_speed_scale", None)
+        update_codebook = tensordict.get("vq_pae_update_codebook", self.training)
+        if torch.is_tensor(update_codebook):
+            update_codebook = bool(update_codebook.any().item())
 
         prior_sequence = self._build_prior_sequence(tensordict)
         posterior_sequence = self._build_posterior_sequence(tensordict)
@@ -422,10 +425,10 @@ class DistillVQPAEModel(BaseModel):
             state_backbone=self.posterior_state_backbone,
             state_head=self.posterior_state_head,
             args=self.posterior_args,
-            update_codebook=True,
+            update_codebook=update_codebook,
         )
 
-        if self.training:
+        if self.training and update_codebook:
             self._forward_count += 1
             if self._forward_count % self.config.dead_code_revive_every == 0:
                 self.quantizer.revive_dead_codes(posterior["state"].detach())
