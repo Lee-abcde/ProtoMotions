@@ -27,6 +27,10 @@ from protomotions.agents.distill.vq_pae_config import (
     DistillVQPAEModelConfig,
     VQPAELossConfig,
 )
+from protomotions.agents.distill.pae_config import (
+    DistillPAEModelConfig,
+    PAELossConfig,
+)
 from protomotions.agents.distill.geometric_config import (
     DistillGeometricModelConfig,
     GeometricLossConfig,
@@ -165,6 +169,7 @@ class DistillAgentConfig(BaseAgentConfig):
         DistillModelConfig,
         FeedForwardModelConfig,
         DistillVQPAEModelConfig,
+        DistillPAEModelConfig,
         DistillGeometricModelConfig,
         DistillLatentVelocityModelConfig,
     ] = field(

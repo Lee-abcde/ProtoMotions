@@ -506,6 +506,11 @@ class PPO(BaseAgent):
                 == "protomotions.agents.distill.vq_pae"
                 and self.actor.mu.__class__.__name__ == "DistillVQPAEModel"
             )
+            is_pae_actor = (
+                self.actor.mu.__class__.__module__
+                == "protomotions.agents.distill.pae"
+                and self.actor.mu.__class__.__name__ == "DistillPAEModel"
+            )
 
             # Build clean TensorDict and accumulate input perturbation
             input_ss = torch.tensor(0.0, device=self.device)
@@ -528,7 +533,7 @@ class PPO(BaseAgent):
 
             input_dist = (input_ss / input_n).detach()
 
-            if is_vq_pae_actor:
+            if is_vq_pae_actor or is_pae_actor:
                 mu_was_training = self.actor.mu.training
                 self.actor.mu.eval()
                 try:
