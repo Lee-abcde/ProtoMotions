@@ -79,6 +79,19 @@ class DistillEvaluator(MimicEvaluator):
             out_keys = getattr(self.agent.model.module, "out_keys", None)
         return out_keys is not None and "privileged_action" in out_keys
 
+    def _supports_prior_action(self) -> bool:
+        """Check whether the model exposes a distinct prior-action output."""
+        out_keys = getattr(self.agent.model, "out_keys", None)
+        if out_keys is None and hasattr(self.agent.model, "module"):
+            out_keys = getattr(self.agent.model.module, "out_keys", None)
+        if out_keys is not None and "prior_action" in out_keys:
+            return True
+
+        model_module = (
+            self.agent.model.module if hasattr(self.agent.model, "module") else self.agent.model
+        )
+        return isinstance(model_module, DistillVQPAEModel)
+
     def _get_interaction_action_key(self) -> str:
         """Action head used for the interactive inference loop."""
         if self.config.use_privileged_action_for_interaction:
@@ -88,15 +101,21 @@ class DistillEvaluator(MimicEvaluator):
                     "but the model does not expose that output."
                 )
             return "privileged_action"
-        return "action"
+        if self._supports_prior_action():
+            return "prior_action"
+        raise RuntimeError(
+            "Distill evaluator requires an explicit prior_action output for "
+            "non-privileged interaction, but the model does not expose it."
+        )
 
     def _select_actions(self, model_outs: Dict[str, Tensor], action_key: str) -> Tensor:
-        """Select either the standard evaluation action or the privileged one."""
-        if action_key == "privileged_action" and "privileged_action" in model_outs:
-            return model_outs["privileged_action"]
-        if "mean_action" in model_outs:
-            return model_outs["mean_action"]
-        return model_outs["action"]
+        """Select the requested explicit action head."""
+        if action_key not in model_outs:
+            raise KeyError(
+                f"Requested action key '{action_key}' not found in model outputs. "
+                f"Available keys: {sorted(model_outs.keys())}"
+            )
+        return model_outs[action_key]
 
     def _create_eval_state(
         self,
@@ -257,7 +276,7 @@ class DistillEvaluator(MimicEvaluator):
         self,
         env_ids: torch.Tensor,
         max_steps: int,
-        action_key: str = "action",
+        action_key: str = "prior_action",
     ) -> None:
         """Run one evaluation episode using the requested action output."""
         ema_alpha = self.config.eval_action_ema_alpha
@@ -289,6 +308,12 @@ class DistillEvaluator(MimicEvaluator):
 
     def run_evaluation(self) -> None:
         """Run normal and optional privileged evaluation across motion batches."""
+        if not self._supports_prior_action():
+            raise RuntimeError(
+                "Distill evaluator requires prior_action for the primary evaluation pass, "
+                "but the model does not expose it."
+            )
+        primary_action_key = "prior_action"
         for env_ids, motion_ids in self._build_eval_batches():
             motion_lengths = self.motion_lib.get_motion_length(motion_ids)
             max_len = min(
@@ -301,7 +326,7 @@ class DistillEvaluator(MimicEvaluator):
                     max=self.config.max_eval_steps
                 ),
             )
-            self.evaluate_episode(env_ids, max_len, action_key="action")
+            self.evaluate_episode(env_ids, max_len, action_key=primary_action_key)
             if self._privileged_eval_state is not None:
                 normal_state = self._capture_active_eval_state()
                 self._restore_active_eval_state(self._privileged_eval_state)
@@ -393,7 +418,7 @@ class DistillEvaluator(MimicEvaluator):
                 configured_speed_scale = getattr(self, "vq_speed_scale", 1.0)
                 is_loop_playback_active = self._vq_latent_loop_phase is not None
                 use_scaled_reference_directly = (
-                    (is_vq_pae_model and action_key == "action")
+                    (is_vq_pae_model and action_key == "prior_action")
                     or (is_distill_vae_model and action_key == "privileged_action")
                 )
                 active_motion_speed_scale = (
@@ -426,7 +451,7 @@ class DistillEvaluator(MimicEvaluator):
                 if (
                     speed_scale != 1.0
                     and is_vq_pae_model
-                    and (playback_latent is None or action_key == "action")
+                    and (playback_latent is None or action_key == "prior_action")
                 ):
                     obs_td["vq_speed_scale"] = torch.full(
                         (obs_td.batch_size[0],),

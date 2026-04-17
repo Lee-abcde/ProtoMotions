@@ -466,6 +466,7 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vae_latent"] = actor_latent
         tensordict = self._trunk(tensordict)
         tensordict["action"] = tensordict[self._trunk.out_keys[0]]
+        tensordict["prior_action"] = tensordict["action"]
 
         tensordict["vae_latent"] = privileged_latent
         tensordict = self._trunk(tensordict)

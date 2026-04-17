@@ -256,7 +256,7 @@ def agent_config(
         VQPAELossConfig,
     )
     from protomotions.agents.evaluators.config import (
-        MimicEvaluatorConfig,
+        DistillEvaluatorConfig,
         MotionWeightsRulesConfig,
     )
     from protomotions.agents.ppo.config import (
@@ -426,7 +426,7 @@ def agent_config(
         actor_logstd=-2.9,
         learnable_std=True,
         in_keys=actor_in_keys,
-        mu_key="action",
+        mu_key="privileged_action",
         mu_model=vq_pae_actor_config,
     )
 
@@ -454,7 +454,14 @@ def agent_config(
     return PPOAgentConfig(
         model=PPOModelConfig(
             in_keys=model_in_keys,
-            out_keys=["action", "mean_action", "neglogp", "value"],
+            out_keys=[
+                "action",
+                "mean_action",
+                "neglogp",
+                "value",
+                "privileged_action",
+                "prior_action",
+            ],
             actor=actor_config,
             critic=critic_config,
             actor_optimizer=OptimizerConfig(
@@ -480,7 +487,9 @@ def agent_config(
                 "trunk_target_relative_rot": "clean_trunk_target_relative_rot",
             },
         ),
-        evaluator=MimicEvaluatorConfig(
+        evaluator=DistillEvaluatorConfig(
+            use_privileged_success_for_motion_weights=True,
+            use_privileged_action_for_interaction=True,
             evaluation_components={
                 "anchor_ori": anchor_ori_metric_factory(),
                 "relative_body_pos": relative_body_pos_metric_factory(),
@@ -599,6 +608,7 @@ def apply_inference_overrides(
             "historical_dof_pos": EnvContext.historical.dof_pos,
             "historical_dof_vel": EnvContext.historical.dof_vel,
             "historical_root_local_ang_vel": EnvContext.historical.root_local_ang_vel,
+            "historical_anchor_rot": EnvContext.historical.anchor_rot,
         },
         static_params={"history_steps": TOTAL_STORED_HISTORICAL_STEPS},
     )
