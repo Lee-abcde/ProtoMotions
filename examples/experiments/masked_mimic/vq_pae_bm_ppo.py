@@ -41,7 +41,6 @@ from protomotions.components.motion_lib import MotionLibConfig
 from protomotions.envs.base_env.config import EnvConfig
 from protomotions.envs.obs.vq_pae_bm import (
     build_reduced_core_obs,
-    build_projected_gravity_obs,
     build_reduced_future_core_target_poses,
     build_future_relative_anchor_rot_obs,
     build_historical_reduced_core_obs,
@@ -109,6 +108,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 "dof_pos": EnvContext.noisy.dof_pos,
                 "dof_vel": EnvContext.noisy.dof_vel,
                 "root_local_ang_vel": EnvContext.noisy.root_local_ang_vel,
+                "anchor_rot": EnvContext.noisy.anchor_rot,
             },
         ),
         "clean_encoder_current_obs": MdpComponent(
@@ -117,17 +117,8 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 "dof_pos": EnvContext.current.dof_pos,
                 "dof_vel": EnvContext.current.dof_vel,
                 "root_local_ang_vel": EnvContext.current.root_local_ang_vel,
+                "anchor_rot": EnvContext.current.anchor_rot,
             },
-        ),
-        "trunk_proj_gravity": MdpComponent(
-            compute_func=build_projected_gravity_obs,
-            dynamic_vars={"anchor_rot": EnvContext.noisy.anchor_rot},
-            static_params={"w_last": True},
-        ),
-        "clean_trunk_proj_gravity": MdpComponent(
-            compute_func=build_projected_gravity_obs,
-            dynamic_vars={"anchor_rot": EnvContext.current.anchor_rot},
-            static_params={"w_last": True},
         ),
         "historical_previous_processed_actions": previous_actions_factory(
             history_steps=1, processed=True
@@ -137,6 +128,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             dynamic_vars={
                 "mimic_ref_root_rot": EnvContext.mimic.future_root_rot,
                 "mimic_ref_root_ang_vel": EnvContext.mimic.future_root_ang_vel,
+                "mimic_ref_anchor_rot": EnvContext.mimic.future_anchor_rot,
                 "mimic_ref_dof_vel": EnvContext.mimic.future_dof_vel,
                 "mimic_ref_dof_pos": EnvContext.mimic.future_dof_pos,
             },
@@ -167,6 +159,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 "historical_dof_pos": EnvContext.noisy_historical.dof_pos,
                 "historical_dof_vel": EnvContext.noisy_historical.dof_vel,
                 "historical_root_local_ang_vel": EnvContext.noisy_historical.root_local_ang_vel,
+                "historical_anchor_rot": EnvContext.noisy_historical.anchor_rot,
             },
             static_params={"history_steps": TOTAL_STORED_HISTORICAL_STEPS},
         ),
@@ -176,6 +169,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 "historical_dof_pos": EnvContext.historical.dof_pos,
                 "historical_dof_vel": EnvContext.historical.dof_vel,
                 "historical_root_local_ang_vel": EnvContext.historical.root_local_ang_vel,
+                "historical_anchor_rot": EnvContext.historical.anchor_rot,
             },
             static_params={"history_steps": TOTAL_STORED_HISTORICAL_STEPS},
         ),
@@ -286,7 +280,7 @@ def agent_config(
     simulator_name = getattr(args, "simulator", "isaacgym")
     sim_params = getattr(robot_config.simulation_params, simulator_name)
     env_time_step = sim_params.decimation * (1.0 / sim_params.fps)
-    current_obs_dim = 2 * num_dofs + 3
+    current_obs_dim = 2 * num_dofs + 6
     historical_obs_dim = current_obs_dim
     future_obs_dim = current_obs_dim
 
@@ -295,14 +289,12 @@ def agent_config(
             "encoder_current_obs",
             "historical_pose_obs",
             "encoder_future_target_obs",
-            "trunk_proj_gravity",
             "trunk_target_relative_rot",
         ],
         out_keys=[
             "max_coords_obs_norm",
             "historical_pose_obs_norm",
             "vq_pae_target_poses_norm",
-            "trunk_proj_gravity_norm",
             "trunk_target_relative_rot_norm",
         ],
         models=[
@@ -328,13 +320,6 @@ def agent_config(
                 module_operations=[ModuleOperationForwardConfig()],
             ),
             ObsProcessorConfig(
-                in_keys=["trunk_proj_gravity"],
-                out_keys=["trunk_proj_gravity_norm"],
-                normalize_obs=True,
-                norm_clamp_value=5,
-                module_operations=[ModuleOperationForwardConfig()],
-            ),
-            ObsProcessorConfig(
                 in_keys=["trunk_target_relative_rot"],
                 out_keys=["trunk_target_relative_rot_norm"],
                 normalize_obs=True,
@@ -347,7 +332,6 @@ def agent_config(
         in_keys=[
             "encoder_current_obs",
             "historical_previous_processed_actions",
-            "trunk_proj_gravity_norm",
             "trunk_target_relative_rot_norm",
             "vae_latent",
         ],
@@ -371,7 +355,6 @@ def agent_config(
                 in_keys=[
                     "encoder_current_obs_norm",
                     "historical_previous_processed_actions_norm",
-                    "trunk_proj_gravity_norm",
                     "trunk_target_relative_rot_norm",
                     "vae_latent",
                 ],
@@ -429,14 +412,12 @@ def agent_config(
         "encoder_current_obs",
         "historical_pose_obs",
         "encoder_future_target_obs",
-        "trunk_proj_gravity",
         "trunk_target_relative_rot",
         "historical_previous_processed_actions",
     ]
     clean_actor_obs_keys = [
         "clean_encoder_current_obs",
         "clean_historical_pose_obs",
-        "clean_trunk_proj_gravity",
         "clean_trunk_target_relative_rot",
     ]
 
@@ -496,7 +477,6 @@ def agent_config(
             obs_pairs={
                 "encoder_current_obs": "clean_encoder_current_obs",
                 "historical_pose_obs": "clean_historical_pose_obs",
-                "trunk_proj_gravity": "clean_trunk_proj_gravity",
                 "trunk_target_relative_rot": "clean_trunk_target_relative_rot",
             },
         ),
@@ -602,12 +582,8 @@ def apply_inference_overrides(
             "dof_pos": EnvContext.current.dof_pos,
             "dof_vel": EnvContext.current.dof_vel,
             "root_local_ang_vel": EnvContext.current.root_local_ang_vel,
+            "anchor_rot": EnvContext.current.anchor_rot,
         },
-    )
-    env_cfg.observation_components["trunk_proj_gravity"] = MdpComponent(
-        compute_func=build_projected_gravity_obs,
-        dynamic_vars={"anchor_rot": EnvContext.current.anchor_rot},
-        static_params={"w_last": True},
     )
     env_cfg.observation_components["trunk_target_relative_rot"] = MdpComponent(
         compute_func=build_future_relative_anchor_rot_obs,
@@ -629,7 +605,6 @@ def apply_inference_overrides(
 
     for key in [
         "clean_encoder_current_obs",
-        "clean_trunk_proj_gravity",
         "clean_trunk_target_relative_rot",
         "clean_historical_pose_obs",
     ]:

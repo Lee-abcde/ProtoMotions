@@ -13,13 +13,17 @@ def build_reduced_core_obs(
     dof_pos: torch.Tensor,
     dof_vel: torch.Tensor,
     root_local_ang_vel: torch.Tensor,
+    anchor_rot: torch.Tensor,
+    w_last: bool = True,
 ) -> torch.Tensor:
     num_envs = dof_pos.shape[0]
+    proj_gravity = root_projected_gravity(anchor_rot, w_last)
     return torch.cat(
         [
             dof_pos.view(num_envs, -1),
             dof_vel.view(num_envs, -1),
             root_local_ang_vel.view(num_envs, -1),
+            proj_gravity.view(num_envs, -1),
         ],
         dim=-1,
     )
@@ -34,6 +38,7 @@ def build_projected_gravity_obs(
 def build_reduced_future_core_target_poses(
     mimic_ref_root_rot: torch.Tensor,
     mimic_ref_root_ang_vel: torch.Tensor,
+    mimic_ref_anchor_rot: torch.Tensor,
     mimic_ref_dof_vel: torch.Tensor,
     mimic_ref_dof_pos: torch.Tensor,
     w_last: bool = True,
@@ -46,6 +51,7 @@ def build_reduced_future_core_target_poses(
         mimic_ref_root_ang_vel = select_step_indices(
             mimic_ref_root_ang_vel, future_steps
         )
+        mimic_ref_anchor_rot = select_step_indices(mimic_ref_anchor_rot, future_steps)
         mimic_ref_dof_vel = select_step_indices(mimic_ref_dof_vel, future_steps)
         mimic_ref_dof_pos = select_step_indices(mimic_ref_dof_pos, future_steps)
 
@@ -54,6 +60,9 @@ def build_reduced_future_core_target_poses(
         mimic_ref_root_ang_vel.reshape(-1, 3),
         w_last,
     ).view(*mimic_ref_root_ang_vel.shape)
+    proj_gravity = root_projected_gravity(
+        mimic_ref_anchor_rot.reshape(-1, 4), w_last
+    ).view(*mimic_ref_root_ang_vel.shape)
 
     num_envs = mimic_ref_dof_pos.shape[0]
     return torch.cat(
@@ -61,6 +70,7 @@ def build_reduced_future_core_target_poses(
             mimic_ref_dof_pos.reshape(num_envs, -1),
             mimic_ref_dof_vel.reshape(num_envs, -1),
             local_root_ang_vel.reshape(num_envs, -1),
+            proj_gravity.reshape(num_envs, -1),
         ],
         dim=-1,
     )
@@ -113,7 +123,9 @@ def build_historical_reduced_core_obs(
     historical_dof_pos: torch.Tensor,
     historical_dof_vel: torch.Tensor,
     historical_root_local_ang_vel: torch.Tensor,
+    historical_anchor_rot: torch.Tensor,
     history_steps=None,
+    w_last: bool = True,
 ) -> torch.Tensor:
     from protomotions.envs.obs.utils import select_step_indices
 
@@ -123,13 +135,18 @@ def build_historical_reduced_core_obs(
         historical_root_local_ang_vel = select_step_indices(
             historical_root_local_ang_vel, history_steps
         )
+        historical_anchor_rot = select_step_indices(historical_anchor_rot, history_steps)
 
     num_envs = historical_dof_pos.shape[0]
+    proj_gravity = root_projected_gravity(
+        historical_anchor_rot.reshape(-1, 4), w_last
+    ).view(*historical_root_local_ang_vel.shape)
     return torch.cat(
         [
             historical_dof_pos.reshape(num_envs, -1),
             historical_dof_vel.reshape(num_envs, -1),
             historical_root_local_ang_vel.reshape(num_envs, -1),
+            proj_gravity.reshape(num_envs, -1),
         ],
         dim=-1,
     )
