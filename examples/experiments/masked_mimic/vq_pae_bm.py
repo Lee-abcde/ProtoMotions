@@ -140,8 +140,8 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         "encoder_future_target_obs": MdpComponent(
             compute_func=build_reduced_future_core_target_poses,
             dynamic_vars={
-                "mimic_ref_anchor_rot": EnvContext.mimic.future_anchor_rot,
-                "mimic_ref_anchor_ang_vel": EnvContext.mimic.future_anchor_ang_vel,
+                "mimic_ref_root_rot": EnvContext.mimic.future_root_rot,
+                "mimic_ref_root_ang_vel": EnvContext.mimic.future_root_ang_vel,
                 "mimic_ref_dof_vel": EnvContext.mimic.future_dof_vel,
                 "mimic_ref_dof_pos": EnvContext.mimic.future_dof_pos,
             },
@@ -562,8 +562,8 @@ def apply_inference_overrides(
     env_cfg.observation_components["encoder_future_target_obs"] = MdpComponent(
         compute_func=build_reduced_future_core_target_poses,
         dynamic_vars={
-            "mimic_ref_anchor_rot": EnvContext.mimic.future_anchor_rot,
-            "mimic_ref_anchor_ang_vel": EnvContext.mimic.future_anchor_ang_vel,
+            "mimic_ref_root_rot": EnvContext.mimic.future_root_rot,
+            "mimic_ref_root_ang_vel": EnvContext.mimic.future_root_ang_vel,
             "mimic_ref_dof_vel": EnvContext.mimic.future_dof_vel,
             "mimic_ref_dof_pos": EnvContext.mimic.future_dof_pos,
         },

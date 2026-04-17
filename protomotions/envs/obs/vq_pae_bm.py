@@ -32,8 +32,8 @@ def build_projected_gravity_obs(
 
 
 def build_reduced_future_core_target_poses(
-    mimic_ref_anchor_rot: torch.Tensor,
-    mimic_ref_anchor_ang_vel: torch.Tensor,
+    mimic_ref_root_rot: torch.Tensor,
+    mimic_ref_root_ang_vel: torch.Tensor,
     mimic_ref_dof_vel: torch.Tensor,
     mimic_ref_dof_pos: torch.Tensor,
     w_last: bool = True,
@@ -42,18 +42,18 @@ def build_reduced_future_core_target_poses(
     from protomotions.envs.obs.utils import select_step_indices
 
     if future_steps is not None:
-        mimic_ref_anchor_rot = select_step_indices(mimic_ref_anchor_rot, future_steps)
-        mimic_ref_anchor_ang_vel = select_step_indices(
-            mimic_ref_anchor_ang_vel, future_steps
+        mimic_ref_root_rot = select_step_indices(mimic_ref_root_rot, future_steps)
+        mimic_ref_root_ang_vel = select_step_indices(
+            mimic_ref_root_ang_vel, future_steps
         )
         mimic_ref_dof_vel = select_step_indices(mimic_ref_dof_vel, future_steps)
         mimic_ref_dof_pos = select_step_indices(mimic_ref_dof_pos, future_steps)
 
     local_root_ang_vel = rotations.quat_rotate_inverse(
-        mimic_ref_anchor_rot.reshape(-1, 4),
-        mimic_ref_anchor_ang_vel.reshape(-1, 3),
+        mimic_ref_root_rot.reshape(-1, 4),
+        mimic_ref_root_ang_vel.reshape(-1, 3),
         w_last,
-    ).view(*mimic_ref_anchor_ang_vel.shape)
+    ).view(*mimic_ref_root_ang_vel.shape)
 
     num_envs = mimic_ref_dof_pos.shape[0]
     return torch.cat(
