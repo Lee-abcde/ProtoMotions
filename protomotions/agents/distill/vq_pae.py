@@ -91,7 +91,7 @@ class DistillVQPAEModel(BaseModel):
                 + trunk_in_keys_without_latent
             )
         )
-        self.out_keys = ["action", "privileged_action"]
+        self.out_keys = list(self.config.out_keys)
 
         if self.config.input_projector:
             self.current_projector = nn.Linear(

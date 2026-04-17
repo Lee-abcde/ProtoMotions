@@ -38,6 +38,9 @@ class DistillVQPAEModelConfig(BaseModelConfig):
     """Configuration for the phase-aware VQ MaskedMimic variant."""
 
     _target_: str = "protomotions.agents.distill.vq_pae.DistillVQPAEModel"
+    out_keys: List[str] = field(
+        default_factory=lambda: ["action", "prior_action", "privileged_action"]
+    )
 
     prior_in_keys: List[str] = field(
         default_factory=lambda: [
