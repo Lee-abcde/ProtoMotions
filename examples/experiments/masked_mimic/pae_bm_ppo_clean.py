@@ -125,6 +125,7 @@ def agent_config(
     agent_cfg.model.in_keys = list(dict.fromkeys(actor_in_keys + critic_in_keys))
     agent_cfg.model.actor.mu_model.reconstruction_current_obs_key = "encoder_current_obs"
     agent_cfg.model.actor.mu_model.reconstruction_historical_obs_key = "historical_pose_obs"
+    agent_cfg.model.actor.mu_model.losses.reconstruction_weight = 5.0
     agent_cfg.l2c2.enabled = False
     agent_cfg.l2c2.obs_pairs = {}
 

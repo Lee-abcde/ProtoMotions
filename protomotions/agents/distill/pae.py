@@ -533,12 +533,14 @@ class DistillPAEModel(BaseModel):
             * losses.frequency_alignment_weight
         )
         reconstruction = torch.tensor(0.0, device=prior_alignment.device)
+        reconstruction_raw = torch.tensor(0.0, device=prior_alignment.device)
         if (
             losses.reconstruction_weight > 0.0
             and "pae_reconstruction_loss" in tensordict.keys()
         ):
+            reconstruction_raw = tensordict["pae_reconstruction_loss"].mean()
             reconstruction = (
-                tensordict["pae_reconstruction_loss"].mean()
+                reconstruction_raw
                 * losses.reconstruction_weight
             )
         total = prior_alignment + phase_alignment + frequency_alignment + reconstruction
@@ -548,7 +550,10 @@ class DistillPAEModel(BaseModel):
             "distill/pae_frequency_alignment_loss": frequency_alignment.detach(),
         }
         if losses.reconstruction_weight > 0.0:
-            log_dict["distill/pae_reconstruction_loss"] = reconstruction.detach()
+            log_dict["distill/pae_reconstruction_loss"] = reconstruction_raw.detach()
+            log_dict["distill/pae_reconstruction_loss_weighted"] = (
+                reconstruction.detach()
+            )
             if "pae_reconstruction_history_loss" in tensordict.keys():
                 log_dict["distill/pae_reconstruction_history_loss"] = (
                     tensordict["pae_reconstruction_history_loss"].mean().detach()
