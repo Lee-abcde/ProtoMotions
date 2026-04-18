@@ -55,6 +55,12 @@ class DistillVQPAEModelConfig(BaseModelConfig):
             "historical_pose_obs",
         ]
     )
+    current_obs_key: str = "max_coords_obs_norm"
+    historical_obs_key: str = "historical_pose_obs_norm"
+    future_obs_key: str = "vq_pae_target_poses_norm"
+    reconstruction_current_obs_key: str = "max_coords_obs_norm"
+    reconstruction_historical_obs_key: str = "historical_pose_obs_norm"
+    reconstruction_future_obs_key: str = "vq_pae_target_poses_norm"
     preprocessor: ModuleContainerConfig = field(
         default_factory=ModuleContainerConfig,
         metadata={"help": "Optional preprocessing container for normalized inputs."},

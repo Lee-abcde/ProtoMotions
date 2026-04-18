@@ -227,22 +227,36 @@ class DistillVQPAEModel(BaseModel):
             )
 
     def _reshape_history(self, tensordict: TensorDict) -> torch.Tensor:
-        return tensordict["historical_pose_obs_norm"].reshape(
+        return tensordict[self.config.historical_obs_key].reshape(
             -1,
             self.config.num_historical_conditioned_steps,
             self.config.historical_obs_dim,
         )
 
     def _reshape_future(self, tensordict: TensorDict) -> torch.Tensor:
-        return tensordict["vq_pae_target_poses_norm"].reshape(
+        return tensordict[self.config.future_obs_key].reshape(
             -1,
             self.config.num_future_steps,
             self.config.future_obs_dim,
         )
 
+    def _normalize_with_preprocessor(
+        self, source: torch.Tensor, normalized_key: str
+    ) -> torch.Tensor:
+        for model in self._preprocessor.models:
+            if normalized_key in getattr(model, "out_keys", []):
+                norm = getattr(model, "norm", None)
+                if norm is None:
+                    return source
+                source_shape = source.shape
+                flat_source = source.reshape(-1, source_shape[-1])
+                normalized = norm.running_obs_norm.normalize(flat_source)
+                return normalized.reshape(*source_shape[:-1], -1)
+        raise KeyError(f"No preprocessor normalizer found for key '{normalized_key}'")
+
     def _build_prior_sequence(self, tensordict: TensorDict) -> torch.Tensor:
         history = self.history_projector(self._reshape_history(tensordict))
-        current = self.current_projector(tensordict["max_coords_obs_norm"]).unsqueeze(1)
+        current = self.current_projector(tensordict[self.config.current_obs_key]).unsqueeze(1)
         return torch.cat([history, current], dim=1)
 
     def _build_posterior_sequence(self, tensordict: TensorDict) -> torch.Tensor:
@@ -251,9 +265,23 @@ class DistillVQPAEModel(BaseModel):
         return torch.cat([prior_sequence, future], dim=1)
 
     def _build_posterior_reconstruction_target(self, tensordict: TensorDict) -> torch.Tensor:
-        history = self._reshape_history(tensordict)
-        current = tensordict["max_coords_obs_norm"].unsqueeze(1)
-        future = self._reshape_future(tensordict)
+        history = self._normalize_with_preprocessor(
+            tensordict[self.config.reconstruction_historical_obs_key],
+            self.config.historical_obs_key,
+        ).reshape(
+            -1,
+            self.config.num_historical_conditioned_steps,
+            self.config.historical_obs_dim,
+        )
+        current = self._normalize_with_preprocessor(
+            tensordict[self.config.reconstruction_current_obs_key],
+            self.config.current_obs_key,
+        ).unsqueeze(1)
+        future = tensordict[self.config.reconstruction_future_obs_key].reshape(
+            -1,
+            self.config.num_future_steps,
+            self.config.future_obs_dim,
+        )
         return torch.cat([history, current, future], dim=1)
 
     def analytical_phase(

@@ -525,6 +525,17 @@ class PPO(BaseAgent):
                     input_n += diff.numel()
                 else:
                     clean_td_dict[key] = batch_td[key]
+
+            if is_vq_pae_actor or is_pae_actor:
+                # PAE/VQ-PAE reconstruction may depend on clean target keys
+                # that are not part of the actor's formal input interface.
+                for extra_key in [
+                    self.actor.mu.config.reconstruction_current_obs_key,
+                    self.actor.mu.config.reconstruction_historical_obs_key,
+                    self.actor.mu.config.reconstruction_future_obs_key,
+                ]:
+                    if extra_key in batch_td.keys():
+                        clean_td_dict[extra_key] = batch_td[extra_key]
             clean_td = TensorDict(clean_td_dict, batch_size=mu_noisy.shape[0])
             if is_vq_pae_actor:
                 clean_td["vq_pae_update_codebook"] = torch.zeros(

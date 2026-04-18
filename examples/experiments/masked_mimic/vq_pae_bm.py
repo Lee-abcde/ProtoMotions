@@ -129,6 +129,15 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 "anchor_rot": EnvContext.noisy.anchor_rot,
             },
         ),
+        "clean_encoder_current_obs": MdpComponent(
+            compute_func=build_reduced_core_obs,
+            dynamic_vars={
+                "dof_pos": EnvContext.current.dof_pos,
+                "dof_vel": EnvContext.current.dof_vel,
+                "root_local_ang_vel": EnvContext.current.root_local_ang_vel,
+                "anchor_rot": EnvContext.current.anchor_rot,
+            },
+        ),
         "historical_previous_processed_actions": previous_actions_factory(
             history_steps=1, processed=True
         ),
@@ -158,6 +167,16 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 "historical_dof_vel": EnvContext.noisy_historical.dof_vel,
                 "historical_root_local_ang_vel": EnvContext.noisy_historical.root_local_ang_vel,
                 "historical_anchor_rot": EnvContext.noisy_historical.anchor_rot,
+            },
+            static_params={"history_steps": total_stored_historical_steps},
+        ),
+        "clean_historical_pose_obs": MdpComponent(
+            compute_func=build_historical_reduced_core_obs,
+            dynamic_vars={
+                "historical_dof_pos": EnvContext.historical.dof_pos,
+                "historical_dof_vel": EnvContext.historical.dof_vel,
+                "historical_root_local_ang_vel": EnvContext.historical.root_local_ang_vel,
+                "historical_anchor_rot": EnvContext.historical.anchor_rot,
             },
             static_params={"history_steps": total_stored_historical_steps},
         ),
@@ -389,6 +408,8 @@ def agent_config(
             "vq_pae_target_poses_norm",
             "historical_pose_obs_norm",
         ],
+        reconstruction_current_obs_key="clean_encoder_current_obs",
+        reconstruction_historical_obs_key="clean_historical_pose_obs",
         preprocessor=preprocessor_config,
         trunk=trunk_config,
         num_future_steps=NUM_FUTURE_STEPS,

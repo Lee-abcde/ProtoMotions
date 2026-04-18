@@ -373,6 +373,8 @@ def agent_config(
             "vq_pae_target_poses_norm",
             "historical_pose_obs_norm",
         ],
+        reconstruction_current_obs_key="clean_encoder_current_obs",
+        reconstruction_historical_obs_key="clean_historical_pose_obs",
         preprocessor=preprocessor_config,
         trunk=trunk_config,
         num_future_steps=NUM_FUTURE_STEPS,
