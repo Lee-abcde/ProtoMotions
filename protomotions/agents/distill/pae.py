@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Dict, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -223,7 +223,10 @@ class DistillPAEModel(BaseModel):
         )
 
     def _normalize_with_preprocessor(
-        self, source: torch.Tensor, normalized_key: str
+        self,
+        source: torch.Tensor,
+        normalized_key: str,
+        norm_snapshots: Optional[Dict[str, Dict[str, object]]] = None,
     ) -> torch.Tensor:
         for model in self._preprocessor.models:
             if normalized_key in getattr(model, "out_keys", []):
@@ -232,9 +235,41 @@ class DistillPAEModel(BaseModel):
                     return source
                 source_shape = source.shape
                 flat_source = source.reshape(-1, source_shape[-1])
-                normalized = norm.running_obs_norm.normalize(flat_source)
+                snapshot = None if norm_snapshots is None else norm_snapshots.get(normalized_key)
+                if snapshot is not None:
+                    if snapshot["initialized"]:
+                        normalized = (
+                            flat_source - snapshot["mean"].float()
+                        ) / torch.sqrt(snapshot["var"].float() + snapshot["epsilon"])
+                    else:
+                        normalized = flat_source
+                    clamp_value = snapshot["clamp_value"]
+                    if clamp_value is not None:
+                        normalized = torch.clamp(normalized, -clamp_value, clamp_value)
+                else:
+                    normalized = norm.running_obs_norm.normalize(flat_source)
                 return normalized.reshape(*source_shape[:-1], -1)
         raise KeyError(f"No preprocessor normalizer found for key '{normalized_key}'")
+
+    def _capture_preprocessor_norm_snapshots(self) -> Dict[str, Dict[str, object]]:
+        snapshots: Dict[str, Dict[str, object]] = {}
+        for model in self._preprocessor.models:
+            out_keys = getattr(model, "out_keys", [])
+            norm = getattr(model, "norm", None)
+            if norm is None:
+                continue
+            running_obs_norm = norm.running_obs_norm
+            snapshot = {
+                "initialized": running_obs_norm._initialized,
+                "epsilon": running_obs_norm.epsilon,
+                "clamp_value": running_obs_norm.clamp_value,
+            }
+            if running_obs_norm._initialized:
+                snapshot["mean"] = running_obs_norm.mean.detach().clone()
+                snapshot["var"] = running_obs_norm.var.detach().clone()
+            for out_key in out_keys:
+                snapshots[out_key] = snapshot
+        return snapshots
 
     def _build_prior_sequence(self, tensordict: TensorDict) -> torch.Tensor:
         history = self.history_projector(self._reshape_history(tensordict))
@@ -246,10 +281,15 @@ class DistillPAEModel(BaseModel):
         future = self.future_projector(self._reshape_future(tensordict))
         return torch.cat([prior_sequence, future], dim=1)
 
-    def _build_posterior_reconstruction_target(self, tensordict: TensorDict) -> torch.Tensor:
+    def _build_posterior_reconstruction_target(
+        self,
+        tensordict: TensorDict,
+        norm_snapshots: Optional[Dict[str, Dict[str, object]]] = None,
+    ) -> torch.Tensor:
         history = self._normalize_with_preprocessor(
             tensordict[self.config.reconstruction_historical_obs_key],
             self.config.historical_obs_key,
+            norm_snapshots=norm_snapshots,
         ).reshape(
             -1,
             self.config.num_historical_conditioned_steps,
@@ -258,6 +298,7 @@ class DistillPAEModel(BaseModel):
         current = self._normalize_with_preprocessor(
             tensordict[self.config.reconstruction_current_obs_key],
             self.config.current_obs_key,
+            norm_snapshots=norm_snapshots,
         ).unsqueeze(1)
         future = tensordict[self.config.reconstruction_future_obs_key].reshape(
             -1,
@@ -382,6 +423,7 @@ class DistillPAEModel(BaseModel):
         }
 
     def forward(self, tensordict: TensorDict) -> TensorDict:
+        norm_snapshots = self._capture_preprocessor_norm_snapshots()
         tensordict = self._preprocessor(tensordict)
         external_actor_latent = tensordict.get("pae_external_latent", None)
         external_privileged_latent = tensordict.get("pae_external_privileged_latent", None)
@@ -452,13 +494,27 @@ class DistillPAEModel(BaseModel):
         tensordict["pae_privileged_latent"] = privileged_latent
         if self.reconstruction_head is not None:
             reconstructed_window = self.reconstruction_head(posterior["manifold"]).transpose(1, 2)
-            target_window = self._build_posterior_reconstruction_target(tensordict)
-            tensordict["pae_reconstructed_future"] = reconstructed_window
-            tensordict["pae_reconstruction_loss"] = F.mse_loss(
+            target_window = self._build_posterior_reconstruction_target(
+                tensordict, norm_snapshots=norm_snapshots
+            )
+            reconstruction_error = F.mse_loss(
                 reconstructed_window,
                 target_window.detach(),
                 reduction="none",
-            ).mean(dim=(1, 2))
+            )
+            history_steps = self.config.num_historical_conditioned_steps
+            current_step = history_steps + 1
+            tensordict["pae_reconstructed_future"] = reconstructed_window
+            tensordict["pae_reconstruction_loss"] = reconstruction_error.mean(dim=(1, 2))
+            tensordict["pae_reconstruction_history_loss"] = reconstruction_error[
+                :, :history_steps, :
+            ].mean(dim=(1, 2))
+            tensordict["pae_reconstruction_current_loss"] = reconstruction_error[
+                :, history_steps:current_step, :
+            ].mean(dim=(1, 2))
+            tensordict["pae_reconstruction_future_loss"] = reconstruction_error[
+                :, current_step:, :
+            ].mean(dim=(1, 2))
 
         return tensordict
 
@@ -493,6 +549,18 @@ class DistillPAEModel(BaseModel):
         }
         if losses.reconstruction_weight > 0.0:
             log_dict["distill/pae_reconstruction_loss"] = reconstruction.detach()
+            if "pae_reconstruction_history_loss" in tensordict.keys():
+                log_dict["distill/pae_reconstruction_history_loss"] = (
+                    tensordict["pae_reconstruction_history_loss"].mean().detach()
+                )
+            if "pae_reconstruction_current_loss" in tensordict.keys():
+                log_dict["distill/pae_reconstruction_current_loss"] = (
+                    tensordict["pae_reconstruction_current_loss"].mean().detach()
+                )
+            if "pae_reconstruction_future_loss" in tensordict.keys():
+                log_dict["distill/pae_reconstruction_future_loss"] = (
+                    tensordict["pae_reconstruction_future_loss"].mean().detach()
+                )
         return total, log_dict
 
     def get_inference_in_keys(self) -> list:
