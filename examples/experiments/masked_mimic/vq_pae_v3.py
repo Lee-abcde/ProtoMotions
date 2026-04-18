@@ -41,7 +41,6 @@ def _load_sibling_module(filename: str, module_name: str):
 _TRANSFORMER_MODULE = _load_sibling_module(
     "transformer.py", "masked_mimic_transformer_experiment_v3"
 )
-_BASE_VQPAE_MODULE = _load_sibling_module("vq_pae.py", "masked_mimic_vq_pae_base_v3")
 
 NUM_FUTURE_STEPS = _TRANSFORMER_MODULE.NUM_FUTURE_STEPS
 NUM_HISTORICAL_CONDITIONED_STEPS = _TRANSFORMER_MODULE.NUM_HISTORICAL_CONDITIONED_STEPS
@@ -49,7 +48,6 @@ additional_experiment_arguments = _TRANSFORMER_MODULE.additional_experiment_argu
 terrain_config = _TRANSFORMER_MODULE.terrain_config
 scene_lib_config = _TRANSFORMER_MODULE.scene_lib_config
 motion_lib_config = _TRANSFORMER_MODULE.motion_lib_config
-apply_inference_overrides = _BASE_VQPAE_MODULE.apply_inference_overrides
 
 
 def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
@@ -382,3 +380,53 @@ def agent_config(
         evaluator=evaluator_config,
         expert_model_path=getattr(args, "expert_model_path", None),
     )
+
+
+def apply_inference_overrides(
+    robot_cfg: RobotConfig,
+    simulator_cfg,
+    env_cfg: EnvConfig,
+    agent_cfg: DistillAgentConfig,
+    terrain_cfg,
+    motion_lib_cfg,
+    scene_lib_cfg,
+    args: argparse.Namespace,
+):
+    from protomotions.utils.config_utils import import_experiment_relative_eval_overrides
+
+    apply_inference_overrides_fn = import_experiment_relative_eval_overrides(
+        "../mimic/mlp.py"
+    )
+    apply_inference_overrides_fn(
+        robot_cfg,
+        simulator_cfg,
+        env_cfg,
+        agent_cfg,
+        terrain_cfg,
+        motion_lib_cfg,
+        scene_lib_cfg,
+        args,
+    )
+
+    if agent_cfg is not None and hasattr(agent_cfg, "expert_model_path"):
+        expert_model_path = agent_cfg.expert_model_path
+
+        if expert_model_path is not None and env_cfg is not None:
+            if (
+                hasattr(env_cfg, "observation_components")
+                and env_cfg.observation_components is not None
+            ):
+                from protomotions.agents.distill.utils import (
+                    get_expert_observation_keys,
+                    load_expert_configs,
+                )
+
+                expert_configs = load_expert_configs(expert_model_path)
+                expert_obs_keys = get_expert_observation_keys(
+                    expert_configs["env"], expert_configs["agent"]
+                )
+                for key in expert_obs_keys:
+                    if key in env_cfg.observation_components:
+                        del env_cfg.observation_components[key]
+
+        agent_cfg.expert_model_path = None
