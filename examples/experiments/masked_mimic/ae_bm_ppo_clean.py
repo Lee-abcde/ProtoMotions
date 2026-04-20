@@ -186,7 +186,7 @@ def agent_config(
         historical_obs_dim=historical_obs_dim,
         future_obs_dim=future_obs_dim,
         latent_dim=current_obs_dim,
-        losses=AELossConfig(reconstruction_weight=1.0),
+        losses=AELossConfig(reconstruction_weight=0.1),
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
     actor_in_keys = [

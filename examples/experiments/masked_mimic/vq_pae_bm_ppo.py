@@ -405,7 +405,7 @@ def agent_config(
             prior_alignment_weight=1.0,
             phase_alignment_weight=0.1,
             frequency_alignment_weight=0.1,
-            reconstruction_weight=1.0,
+            reconstruction_weight=0.1,
         ),
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
