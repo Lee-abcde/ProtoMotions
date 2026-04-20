@@ -180,6 +180,8 @@ def agent_config(
     ae_actor_config = DistillAEModelConfig(
         preprocessor=preprocessor_config,
         trunk=trunk_config,
+        reconstruction_current_obs_key="clean_encoder_current_obs",
+        reconstruction_historical_obs_key="clean_historical_pose_obs",
         num_future_steps=NUM_FUTURE_STEPS,
         num_historical_conditioned_steps=NUM_HISTORICAL_CONDITIONED_STEPS,
         current_obs_dim=current_obs_dim,
