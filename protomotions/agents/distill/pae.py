@@ -307,6 +307,16 @@ class DistillPAEModel(BaseModel):
         )
         return torch.cat([history, current, future], dim=1)
 
+    def _has_reconstruction_target_keys(self, tensordict: TensorDict) -> bool:
+        return all(
+            key in tensordict.keys()
+            for key in [
+                self.config.reconstruction_current_obs_key,
+                self.config.reconstruction_historical_obs_key,
+                self.config.reconstruction_future_obs_key,
+            ]
+        )
+
     def analytical_phase(
         self,
         latent: torch.Tensor,
@@ -494,27 +504,36 @@ class DistillPAEModel(BaseModel):
         tensordict["pae_privileged_latent"] = privileged_latent
         if self.reconstruction_head is not None:
             reconstructed_window = self.reconstruction_head(posterior["manifold"]).transpose(1, 2)
-            target_window = self._build_posterior_reconstruction_target(
-                tensordict, norm_snapshots=norm_snapshots
-            )
-            reconstruction_error = F.mse_loss(
-                reconstructed_window,
-                target_window.detach(),
-                reduction="none",
-            )
             history_steps = self.config.num_historical_conditioned_steps
             current_step = history_steps + 1
             tensordict["pae_reconstructed_future"] = reconstructed_window
-            tensordict["pae_reconstruction_loss"] = reconstruction_error.mean(dim=(1, 2))
-            tensordict["pae_reconstruction_history_loss"] = reconstruction_error[
-                :, :history_steps, :
-            ].mean(dim=(1, 2))
-            tensordict["pae_reconstruction_current_loss"] = reconstruction_error[
-                :, history_steps:current_step, :
-            ].mean(dim=(1, 2))
-            tensordict["pae_reconstruction_future_loss"] = reconstruction_error[
-                :, current_step:, :
-            ].mean(dim=(1, 2))
+            if self._has_reconstruction_target_keys(tensordict):
+                target_window = self._build_posterior_reconstruction_target(
+                    tensordict, norm_snapshots=norm_snapshots
+                )
+                reconstruction_error = F.mse_loss(
+                    reconstructed_window,
+                    target_window.detach(),
+                    reduction="none",
+                )
+                tensordict["pae_reconstruction_loss"] = reconstruction_error.mean(dim=(1, 2))
+                tensordict["pae_reconstruction_history_loss"] = reconstruction_error[
+                    :, :history_steps, :
+                ].mean(dim=(1, 2))
+                tensordict["pae_reconstruction_current_loss"] = reconstruction_error[
+                    :, history_steps:current_step, :
+                ].mean(dim=(1, 2))
+                tensordict["pae_reconstruction_future_loss"] = reconstruction_error[
+                    :, current_step:, :
+                ].mean(dim=(1, 2))
+            else:
+                zero_loss = torch.zeros(
+                    posterior["manifold"].shape[0], device=posterior["manifold"].device
+                )
+                tensordict["pae_reconstruction_loss"] = zero_loss
+                tensordict["pae_reconstruction_history_loss"] = zero_loss
+                tensordict["pae_reconstruction_current_loss"] = zero_loss
+                tensordict["pae_reconstruction_future_loss"] = zero_loss
 
         return tensordict
 

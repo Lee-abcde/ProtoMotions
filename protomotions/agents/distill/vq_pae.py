@@ -325,6 +325,16 @@ class DistillVQPAEModel(BaseModel):
         )
         return torch.cat([history, current, future], dim=1)
 
+    def _has_reconstruction_target_keys(self, tensordict: TensorDict) -> bool:
+        return all(
+            key in tensordict.keys()
+            for key in [
+                self.config.reconstruction_current_obs_key,
+                self.config.reconstruction_historical_obs_key,
+                self.config.reconstruction_future_obs_key,
+            ]
+        )
+
     def analytical_phase(
         self,
         latent: torch.Tensor,
@@ -564,15 +574,20 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_privileged_latent"] = privileged_latent
         if self.reconstruction_head is not None:
             reconstructed_window = self.reconstruction_head(posterior["manifold"]).transpose(1, 2)
-            target_window = self._build_posterior_reconstruction_target(
-                tensordict, norm_snapshots=norm_snapshots
-            )
             tensordict["vq_pae_reconstructed_future"] = reconstructed_window
-            tensordict["vq_pae_reconstruction_loss"] = F.mse_loss(
-                reconstructed_window,
-                target_window.detach(),
-                reduction="none",
-            ).mean(dim=(1, 2))
+            if self._has_reconstruction_target_keys(tensordict):
+                target_window = self._build_posterior_reconstruction_target(
+                    tensordict, norm_snapshots=norm_snapshots
+                )
+                tensordict["vq_pae_reconstruction_loss"] = F.mse_loss(
+                    reconstructed_window,
+                    target_window.detach(),
+                    reduction="none",
+                ).mean(dim=(1, 2))
+            else:
+                tensordict["vq_pae_reconstruction_loss"] = torch.zeros(
+                    posterior["manifold"].shape[0], device=posterior["manifold"].device
+                )
 
         return tensordict
 
