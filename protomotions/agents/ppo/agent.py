@@ -511,6 +511,12 @@ class PPO(BaseAgent):
                 == "protomotions.agents.distill.pae"
                 and self.actor.mu.__class__.__name__ == "DistillPAEModel"
             )
+            is_deepphase_actor = (
+                self.actor.mu.__class__.__module__
+                == "protomotions.agents.distill.deepphase"
+                and self.actor.mu.__class__.__name__ == "DistillDeepPhaseModel"
+            )
+            uses_eval_clean_pass = is_vq_pae_actor or is_pae_actor or is_deepphase_actor
 
             # Build clean TensorDict and accumulate input perturbation
             input_ss = torch.tensor(0.0, device=self.device)
@@ -544,7 +550,7 @@ class PPO(BaseAgent):
 
             input_dist = (input_ss / input_n).detach()
 
-            if is_vq_pae_actor or is_pae_actor:
+            if uses_eval_clean_pass:
                 mu_was_training = self.actor.mu.training
                 self.actor.mu.eval()
                 try:
