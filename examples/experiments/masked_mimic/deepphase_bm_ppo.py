@@ -185,7 +185,7 @@ def agent_config(
         current_obs_dim=current_obs_dim,
         historical_obs_dim=historical_obs_dim,
         future_obs_dim=future_obs_dim,
-        embedding_channels=current_obs_dim,
+        embedding_channels=8,
         intermediate_channels=current_obs_dim // 3,
         losses=DeepPhaseLossConfig(reconstruction_weight=1.0),
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
