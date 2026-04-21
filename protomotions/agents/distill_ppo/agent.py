@@ -27,7 +27,7 @@ from protomotions.agents.ppo.agent import PPO
 from protomotions.agents.ppo.config import PPOAgentConfig
 from protomotions.agents.ppo.model import PPOActor, PPOModel
 from protomotions.agents.utils.normalization import RunningMeanStd
-from protomotions.agents.utils.training import bounds_loss
+from protomotions.agents.utils.training import bounds_loss, handle_model_grad_clipping
 from protomotions.utils.hydra_replacement import get_class
 
 log = logging.getLogger(__name__)
@@ -35,6 +35,12 @@ log = logging.getLogger(__name__)
 
 class DistillPPO(PPO):
     config: DistillPPOAgentConfig
+
+    def _should_enable_actor_clip_skip(self) -> bool:
+        return (
+            self._get_ppo_loss_coef() > 0.0
+            and self.config.actor_clip_frac_threshold is not None
+        )
 
     def _get_ppo_loss_coef(self) -> float:
         schedule = self.config.ppo_loss_schedule
@@ -354,3 +360,76 @@ class DistillPPO(PPO):
         ppo_loss = ppo_loss.detach()
 
         return actor_loss, log_dict
+
+    def perform_optimization_step(self, batch_dict, batch_idx) -> Dict:
+        iter_log_dict = {}
+        actor_loss, actor_loss_dict = self.actor_step(batch_dict)
+        iter_log_dict.update(actor_loss_dict)
+
+        if self.config.adaptive_lr.enabled and "actor/kl" in actor_loss_dict:
+            self._update_learning_rate(actor_loss_dict["actor/kl"])
+            iter_log_dict["info/actor_lr"] = torch.tensor(
+                self.actor_lr, device=self.device
+            )
+            iter_log_dict["info/critic_lr"] = torch.tensor(
+                self.critic_lr, device=self.device
+            )
+
+        clip_skip_enabled = self._should_enable_actor_clip_skip()
+        iter_log_dict["actor/clip_skip_enabled"] = torch.tensor(
+            float(clip_skip_enabled), device=self.device
+        )
+
+        if clip_skip_enabled and not self._skip_actor_for_epoch:
+            clip_frac = actor_loss_dict["actor/clip_frac"].item()
+            if self.fabric.world_size > 1 and torch.distributed.is_initialized():
+                clip_frac_tensor = torch.tensor(clip_frac, device=self.device)
+                torch.distributed.all_reduce(
+                    clip_frac_tensor, op=torch.distributed.ReduceOp.SUM
+                )
+                clip_frac = (clip_frac_tensor / self.fabric.world_size).item()
+
+            if clip_frac > self.config.actor_clip_frac_threshold:
+                self._skip_actor_for_epoch = True
+                if self.fabric.global_rank == 0:
+                    log.warning(
+                        f"Epoch {self.current_epoch}: Skipping actor updates for remaining batches "
+                        f"(clip_frac {clip_frac:.3f} > {self.config.actor_clip_frac_threshold})"
+                    )
+
+        actor_update_skipped = clip_skip_enabled and self._skip_actor_for_epoch
+        if not actor_update_skipped:
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            self.fabric.backward(actor_loss)
+            actor_grad_clip_dict = handle_model_grad_clipping(
+                config=self.config,
+                fabric=self.fabric,
+                model=self.actor,
+                optimizer=self.actor_optimizer,
+                model_name="actor",
+            )
+            iter_log_dict.update(actor_grad_clip_dict)
+            self.actor_optimizer.step()
+            iter_log_dict["actor/update_skipped"] = torch.tensor(
+                0.0, device=self.device
+            )
+        else:
+            iter_log_dict["actor/update_skipped"] = torch.tensor(
+                1.0, device=self.device
+            )
+
+        critic_loss, critic_loss_dict = self.critic_step(batch_dict)
+        iter_log_dict.update(critic_loss_dict)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        self.fabric.backward(critic_loss)
+        critic_grad_clip_dict = handle_model_grad_clipping(
+            config=self.config,
+            fabric=self.fabric,
+            model=self.critic,
+            optimizer=self.critic_optimizer,
+            model_name="critic",
+        )
+        iter_log_dict.update(critic_grad_clip_dict)
+        self.critic_optimizer.step()
+
+        return iter_log_dict
