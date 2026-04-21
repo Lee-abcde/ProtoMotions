@@ -57,6 +57,9 @@ class DistillPPO(PPO):
             and self.config.action_loss_coef > 0.0
         )
 
+    def _use_deterministic_rollout_actions(self) -> bool:
+        return self._get_ppo_loss_coef() <= 0.0
+
     def create_model(self) -> PPOModel:
         model = super().create_model()
 
@@ -155,7 +158,19 @@ class DistillPPO(PPO):
             )
 
     def collect_rollout_step(self, obs_td: TensorDict, step):
-        output_td = super().collect_rollout_step(obs_td, step)
+        output_td = self.model(obs_td)
+
+        if self._use_deterministic_rollout_actions():
+            mean_action = output_td["mean_action"]
+            std = torch.exp(self.actor.logstd)
+            dist = torch.distributions.Normal(mean_action, mean_action * 0 + std)
+            output_td["action"] = mean_action
+            output_td["neglogp"] = -dist.log_prob(mean_action).sum(dim=-1)
+
+        for key in self.model_output_keys:
+            if key in output_td:
+                assert torch.all(torch.isfinite(output_td[key])), f"NaN or Inf in {key}"
+                self.experience_buffer.update_data(key, step, output_td[key])
 
         if not self._uses_action_distillation():
             return output_td
@@ -300,9 +315,13 @@ class DistillPPO(PPO):
 
         if self.config.model.actor.learnable_std:
             entropy_loss = dist.entropy().sum(dim=-1).mean()
-            actor_loss = actor_loss - self.config.entropy_coef * entropy_loss
+            scaled_entropy_bonus = (
+                self.config.entropy_coef * ppo_loss_coef * entropy_loss
+            )
+            actor_loss = actor_loss - scaled_entropy_bonus
         else:
             entropy_loss = torch.tensor(0.0, device=self.device)
+            scaled_entropy_bonus = torch.tensor(0.0, device=self.device)
 
         log_dict = {
             "actor/ppo_loss": actor_ppo_loss.detach(),
@@ -313,6 +332,7 @@ class DistillPPO(PPO):
             "actor/bounds_loss": b_loss.detach(),
             "actor/extra_loss": extra_loss.detach(),
             "actor/entropy_loss": entropy_loss.detach(),
+            "actor/scaled_entropy_bonus": scaled_entropy_bonus.detach(),
             "actor/clip_frac": clipped.detach(),
             "losses/actor_loss": actor_loss.detach(),
         }
