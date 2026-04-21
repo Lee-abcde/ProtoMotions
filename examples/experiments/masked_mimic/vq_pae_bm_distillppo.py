@@ -115,6 +115,7 @@ def agent_config(robot_config, env_config, args):
     }
     base_cfg_kwargs.pop("_target_", None)
     base_cfg_kwargs["num_mini_epochs"] = 6
+    base_cfg_kwargs["actor_clip_frac_threshold"] = 0.65
 
     return DistillPPOAgentConfig(
         **base_cfg_kwargs,
@@ -137,14 +138,14 @@ def agent_config(robot_config, env_config, args):
         mini_epoch_schedule=MiniEpochScheduleConfig(
             enabled=True,
             init_num_mini_epochs=6,
-            end_num_mini_epochs=2,
+            end_num_mini_epochs=1,
             start_epoch=1000,
             end_epoch=1000,
         ),
         actor_lr_schedule=ActorLRScheduleConfig(
             enabled=True,
             init_lr=2e-5,
-            end_lr=1e-5,
+            end_lr=7e-6,
             start_epoch=1000,
             end_epoch=1000,
         ),
