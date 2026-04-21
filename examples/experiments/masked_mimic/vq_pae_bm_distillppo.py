@@ -22,7 +22,9 @@ from pathlib import Path
 from copy import deepcopy
 
 from protomotions.agents.distill_ppo.config import (
+    ActionLossScheduleConfig,
     DistillPPOAgentConfig,
+    MiniEpochScheduleConfig,
     PPOLossScheduleConfig,
 )
 
@@ -117,12 +119,26 @@ def agent_config(robot_config, env_config, args):
         **base_cfg_kwargs,
         expert_model_path=getattr(args, "expert_model_path", None),
         action_loss_coef=1.0,
+        action_loss_schedule=ActionLossScheduleConfig(
+            enabled=True,
+            init_coef=1.0,
+            end_coef=0.2,
+            start_epoch=1000,
+            end_epoch=3000,
+        ),
         ppo_loss_schedule=PPOLossScheduleConfig(
             enabled=True,
             init_coef=0.05,
             end_coef=1.0,
             start_epoch=0,
             end_epoch=3000,
+        ),
+        mini_epoch_schedule=MiniEpochScheduleConfig(
+            enabled=True,
+            init_num_mini_epochs=6,
+            end_num_mini_epochs=2,
+            start_epoch=1000,
+            end_epoch=1000,
         ),
     )
 

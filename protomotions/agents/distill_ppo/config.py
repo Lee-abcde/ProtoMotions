@@ -45,6 +45,54 @@ class PPOLossScheduleConfig:
 
 
 @dataclass
+class ActionLossScheduleConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={"help": "Enable scheduling of the distillation action loss weight."},
+    )
+    init_coef: float = field(
+        default=1.0,
+        metadata={"help": "Initial action loss coefficient.", "min": 0.0},
+    )
+    end_coef: float = field(
+        default=1.0,
+        metadata={"help": "Final action loss coefficient.", "min": 0.0},
+    )
+    start_epoch: int = field(
+        default=0,
+        metadata={"help": "Epoch to start ramping the action loss coefficient.", "min": 0},
+    )
+    end_epoch: int = field(
+        default=0,
+        metadata={"help": "Epoch to finish ramping the action loss coefficient.", "min": 0},
+    )
+
+
+@dataclass
+class MiniEpochScheduleConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={"help": "Enable scheduling of the number of mini-epochs per update."},
+    )
+    init_num_mini_epochs: int = field(
+        default=1,
+        metadata={"help": "Initial number of mini-epochs per update.", "min": 1},
+    )
+    end_num_mini_epochs: int = field(
+        default=1,
+        metadata={"help": "Final number of mini-epochs per update.", "min": 1},
+    )
+    start_epoch: int = field(
+        default=0,
+        metadata={"help": "Epoch to start transitioning mini-epochs.", "min": 0},
+    )
+    end_epoch: int = field(
+        default=0,
+        metadata={"help": "Epoch to finish transitioning mini-epochs.", "min": 0},
+    )
+
+
+@dataclass
 class DistillPPOAgentConfig(PPOAgentConfig):
     _target_: str = "protomotions.agents.distill_ppo.agent.DistillPPO"
 
@@ -56,7 +104,15 @@ class DistillPPOAgentConfig(PPOAgentConfig):
         default=1.0,
         metadata={"help": "Weight applied to the expert action matching loss."},
     )
+    action_loss_schedule: ActionLossScheduleConfig = field(
+        default_factory=ActionLossScheduleConfig,
+        metadata={"help": "Schedule for scaling the distillation action loss term."},
+    )
     ppo_loss_schedule: PPOLossScheduleConfig = field(
         default_factory=PPOLossScheduleConfig,
         metadata={"help": "Schedule for scaling the PPO surrogate loss term."},
+    )
+    mini_epoch_schedule: MiniEpochScheduleConfig = field(
+        default_factory=MiniEpochScheduleConfig,
+        metadata={"help": "Schedule for changing mini-epochs per update over training."},
     )

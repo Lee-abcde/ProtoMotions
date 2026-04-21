@@ -36,6 +36,21 @@ log = logging.getLogger(__name__)
 class DistillPPO(PPO):
     config: DistillPPOAgentConfig
 
+    @staticmethod
+    def _get_linear_schedule_value(current_epoch: int, schedule) -> float:
+        if not schedule.enabled:
+            return None
+
+        if schedule.end_epoch <= schedule.start_epoch:
+            return schedule.end_coef
+
+        progress = min(
+            max(current_epoch - schedule.start_epoch, 0)
+            / (schedule.end_epoch - schedule.start_epoch),
+            1.0,
+        )
+        return schedule.init_coef + progress * (schedule.end_coef - schedule.init_coef)
+
     def _should_enable_actor_clip_skip(self) -> bool:
         return (
             self._get_ppo_loss_coef() > 0.0
@@ -47,15 +62,34 @@ class DistillPPO(PPO):
         if not schedule.enabled:
             return 1.0
 
+        scheduled_value = self._get_linear_schedule_value(self.current_epoch, schedule)
+        return 1.0 if scheduled_value is None else scheduled_value
+
+    def _get_action_loss_coef(self) -> float:
+        schedule = self.config.action_loss_schedule
+        if not schedule.enabled:
+            return self.config.action_loss_coef
+
+        scheduled_value = self._get_linear_schedule_value(self.current_epoch, schedule)
+        return self.config.action_loss_coef if scheduled_value is None else scheduled_value
+
+    def _get_num_mini_epochs(self) -> int:
+        schedule = self.config.mini_epoch_schedule
+        if not schedule.enabled:
+            return self.config.num_mini_epochs
+
         if schedule.end_epoch <= schedule.start_epoch:
-            return schedule.end_coef
+            return schedule.end_num_mini_epochs
 
         progress = min(
             max(self.current_epoch - schedule.start_epoch, 0)
             / (schedule.end_epoch - schedule.start_epoch),
             1.0,
         )
-        return schedule.init_coef + progress * (schedule.end_coef - schedule.init_coef)
+        scheduled_value = schedule.init_num_mini_epochs + progress * (
+            schedule.end_num_mini_epochs - schedule.init_num_mini_epochs
+        )
+        return max(1, int(round(scheduled_value)))
 
     def _uses_action_distillation(self) -> bool:
         return (
@@ -275,11 +309,15 @@ class DistillPPO(PPO):
         action_loss = torch.square(
             batch_td["mean_action"] - batch_td["expert_actions"]
         ).mean()
-        weighted_action_loss = action_loss * self.config.action_loss_coef
+        action_loss_coef = self._get_action_loss_coef()
+        weighted_action_loss = action_loss * action_loss_coef
         extra_loss = extra_loss + weighted_action_loss
         log_dict.update(
             {
                 "actor/action_loss": action_loss.detach(),
+                "actor/action_loss_coef": torch.tensor(
+                    action_loss_coef, device=self.device, dtype=action_loss.dtype
+                ),
                 "actor/action_loss_weighted": weighted_action_loss.detach(),
             }
         )
@@ -433,3 +471,11 @@ class DistillPPO(PPO):
         self.critic_optimizer.step()
 
         return iter_log_dict
+
+    def optimize_model(self) -> Dict:
+        self.num_mini_epochs = self._get_num_mini_epochs()
+        training_log_dict = super().optimize_model()
+        training_log_dict["training/num_mini_epochs"] = torch.tensor(
+            float(self.num_mini_epochs), device=self.device
+        )
+        return training_log_dict
