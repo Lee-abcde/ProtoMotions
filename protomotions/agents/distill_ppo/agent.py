@@ -91,6 +91,21 @@ class DistillPPO(PPO):
         )
         return max(1, int(round(scheduled_value)))
 
+    def _get_actor_lr(self) -> float:
+        schedule = self.config.actor_lr_schedule
+        if not schedule.enabled:
+            return self.config.model.actor_optimizer.lr
+
+        if schedule.end_epoch <= schedule.start_epoch:
+            return schedule.end_lr
+
+        progress = min(
+            max(self.current_epoch - schedule.start_epoch, 0)
+            / (schedule.end_epoch - schedule.start_epoch),
+            1.0,
+        )
+        return schedule.init_lr + progress * (schedule.end_lr - schedule.init_lr)
+
     def _uses_action_distillation(self) -> bool:
         return (
             self.config.expert_model_path is not None
@@ -473,8 +488,17 @@ class DistillPPO(PPO):
         return iter_log_dict
 
     def optimize_model(self) -> Dict:
+        actor_lr = self._get_actor_lr()
+        for param_group in self.actor_optimizer.param_groups:
+            param_group["lr"] = actor_lr
+        if self.config.adaptive_lr.enabled:
+            self.actor_lr = actor_lr
+
         self.num_mini_epochs = self._get_num_mini_epochs()
         training_log_dict = super().optimize_model()
+        training_log_dict["training/actor_lr"] = torch.tensor(
+            float(actor_lr), device=self.device
+        )
         training_log_dict["training/num_mini_epochs"] = torch.tensor(
             float(self.num_mini_epochs), device=self.device
         )

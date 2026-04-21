@@ -93,6 +93,30 @@ class MiniEpochScheduleConfig:
 
 
 @dataclass
+class ActorLRScheduleConfig:
+    enabled: bool = field(
+        default=False,
+        metadata={"help": "Enable scheduling of the actor optimizer learning rate."},
+    )
+    init_lr: float = field(
+        default=2e-5,
+        metadata={"help": "Initial actor learning rate.", "min": 0.0},
+    )
+    end_lr: float = field(
+        default=2e-5,
+        metadata={"help": "Final actor learning rate.", "min": 0.0},
+    )
+    start_epoch: int = field(
+        default=0,
+        metadata={"help": "Epoch to start transitioning the actor learning rate.", "min": 0},
+    )
+    end_epoch: int = field(
+        default=0,
+        metadata={"help": "Epoch to finish transitioning the actor learning rate.", "min": 0},
+    )
+
+
+@dataclass
 class DistillPPOAgentConfig(PPOAgentConfig):
     _target_: str = "protomotions.agents.distill_ppo.agent.DistillPPO"
 
@@ -115,4 +139,8 @@ class DistillPPOAgentConfig(PPOAgentConfig):
     mini_epoch_schedule: MiniEpochScheduleConfig = field(
         default_factory=MiniEpochScheduleConfig,
         metadata={"help": "Schedule for changing mini-epochs per update over training."},
+    )
+    actor_lr_schedule: ActorLRScheduleConfig = field(
+        default_factory=ActorLRScheduleConfig,
+        metadata={"help": "Schedule for the actor optimizer learning rate."},
     )

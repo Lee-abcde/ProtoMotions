@@ -23,6 +23,7 @@ from copy import deepcopy
 
 from protomotions.agents.distill_ppo.config import (
     ActionLossScheduleConfig,
+    ActorLRScheduleConfig,
     DistillPPOAgentConfig,
     MiniEpochScheduleConfig,
     PPOLossScheduleConfig,
@@ -137,6 +138,13 @@ def agent_config(robot_config, env_config, args):
             enabled=True,
             init_num_mini_epochs=6,
             end_num_mini_epochs=2,
+            start_epoch=1000,
+            end_epoch=1000,
+        ),
+        actor_lr_schedule=ActorLRScheduleConfig(
+            enabled=True,
+            init_lr=2e-5,
+            end_lr=1e-5,
             start_epoch=1000,
             end_epoch=1000,
         ),
