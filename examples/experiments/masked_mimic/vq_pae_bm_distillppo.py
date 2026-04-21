@@ -116,6 +116,7 @@ def agent_config(robot_config, env_config, args):
         **base_cfg_kwargs,
         expert_model_path=getattr(args, "expert_model_path", None),
         action_loss_coef=1.0,
+        num_mini_epochs=6,
         ppo_loss_schedule=PPOLossScheduleConfig(
             enabled=True,
             init_coef=0.05,
