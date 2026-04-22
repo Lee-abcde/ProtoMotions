@@ -13,27 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""VQ-PAE distill PPO with kinematic posterior inputs and noisy prior inputs."""
+"""VQ-PAE PPO config with kinematic posterior inputs and targets."""
 
 import argparse
 import importlib.util
 from pathlib import Path
 
-from protomotions.robot_configs.base import RobotConfig
-from protomotions.simulator.base_simulator.config import SimulatorConfig
-from protomotions.components.terrains.config import TerrainConfig
-from protomotions.components.scene_lib import SceneLibConfig
 from protomotions.components.motion_lib import MotionLibConfig
+from protomotions.components.scene_lib import SceneLibConfig
+from protomotions.components.terrains.config import TerrainConfig
 from protomotions.envs.base_env.config import EnvConfig
 from protomotions.envs.obs.vq_pae_bm import (
     build_reduced_current_core_target_pose,
     build_reduced_historical_core_target_poses,
 )
+from protomotions.robot_configs.base import RobotConfig
+from protomotions.simulator.base_simulator.config import SimulatorConfig
 
 
 def _load_base_module():
-    base_path = Path(__file__).with_name("vq_pae_bm_distillppo.py")
-    spec = importlib.util.spec_from_file_location("vq_pae_bm_distillppo_base", base_path)
+    base_path = Path(__file__).with_name("vq_pae_bm_ppo.py")
+    spec = importlib.util.spec_from_file_location("vq_pae_bm_ppo_base", base_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Failed to load module spec from {base_path}")
     module = importlib.util.module_from_spec(spec)
@@ -53,7 +53,6 @@ terrain_config = _BASE.terrain_config
 scene_lib_config = _BASE.scene_lib_config
 motion_lib_config = _BASE.motion_lib_config
 configure_robot_and_simulator = _BASE.configure_robot_and_simulator
-additional_experiment_arguments = _BASE.additional_experiment_arguments
 
 
 def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
@@ -97,12 +96,11 @@ def agent_config(
 
     agent_cfg = _BASE.agent_config(robot_config, env_config, args)
     mu_model = agent_cfg.model.actor.mu_model
-    mu_model.losses.reconstruction_weight = 1.0
     preprocessor = mu_model.preprocessor
 
     preprocessor.in_keys = list(
         dict.fromkeys(
-            preprocessor.in_keys
+            list(preprocessor.in_keys)
             + [
                 "motion_ref_current_obs",
                 "motion_ref_history_obs",
@@ -111,7 +109,7 @@ def agent_config(
     )
     preprocessor.out_keys = list(
         dict.fromkeys(
-            preprocessor.out_keys
+            list(preprocessor.out_keys)
             + [
                 "motion_ref_current_obs_norm",
                 "motion_ref_history_obs_norm",

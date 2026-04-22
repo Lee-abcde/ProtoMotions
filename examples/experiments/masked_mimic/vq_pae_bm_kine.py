@@ -13,27 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""VQ-PAE distill PPO with kinematic posterior inputs and noisy prior inputs."""
+"""VQ-PAE distillation config with kinematic posterior inputs and targets."""
 
 import argparse
 import importlib.util
 from pathlib import Path
 
-from protomotions.robot_configs.base import RobotConfig
-from protomotions.simulator.base_simulator.config import SimulatorConfig
-from protomotions.components.terrains.config import TerrainConfig
-from protomotions.components.scene_lib import SceneLibConfig
 from protomotions.components.motion_lib import MotionLibConfig
+from protomotions.components.scene_lib import SceneLibConfig
+from protomotions.components.terrains.config import TerrainConfig
 from protomotions.envs.base_env.config import EnvConfig
 from protomotions.envs.obs.vq_pae_bm import (
     build_reduced_current_core_target_pose,
     build_reduced_historical_core_target_poses,
 )
+from protomotions.robot_configs.base import RobotConfig
+from protomotions.simulator.base_simulator.config import SimulatorConfig
 
 
 def _load_base_module():
-    base_path = Path(__file__).with_name("vq_pae_bm_distillppo.py")
-    spec = importlib.util.spec_from_file_location("vq_pae_bm_distillppo_base", base_path)
+    base_path = Path(__file__).with_name("vq_pae_bm.py")
+    spec = importlib.util.spec_from_file_location("vq_pae_bm_base", base_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Failed to load module spec from {base_path}")
     module = importlib.util.module_from_spec(spec)
@@ -96,13 +96,12 @@ def agent_config(
     )
 
     agent_cfg = _BASE.agent_config(robot_config, env_config, args)
-    mu_model = agent_cfg.model.actor.mu_model
-    mu_model.losses.reconstruction_weight = 1.0
-    preprocessor = mu_model.preprocessor
+    model_cfg = agent_cfg.model
+    preprocessor = model_cfg.preprocessor
 
     preprocessor.in_keys = list(
         dict.fromkeys(
-            preprocessor.in_keys
+            list(preprocessor.in_keys)
             + [
                 "motion_ref_current_obs",
                 "motion_ref_history_obs",
@@ -111,7 +110,7 @@ def agent_config(
     )
     preprocessor.out_keys = list(
         dict.fromkeys(
-            preprocessor.out_keys
+            list(preprocessor.out_keys)
             + [
                 "motion_ref_current_obs_norm",
                 "motion_ref_history_obs_norm",
@@ -137,30 +136,24 @@ def agent_config(
         ]
     )
 
-    mu_model.posterior_in_keys = [
+    model_cfg.posterior_in_keys = [
         "motion_ref_current_obs_norm",
         "vq_pae_target_poses_norm",
         "motion_ref_history_obs_norm",
     ]
-    mu_model.posterior_current_obs_key = "motion_ref_current_obs_norm"
-    mu_model.posterior_historical_obs_key = "motion_ref_history_obs_norm"
-    mu_model.reconstruction_current_obs_key = "motion_ref_current_obs_norm"
-    mu_model.reconstruction_historical_obs_key = "motion_ref_history_obs_norm"
+    model_cfg.posterior_current_obs_key = "motion_ref_current_obs_norm"
+    model_cfg.posterior_historical_obs_key = "motion_ref_history_obs_norm"
+    model_cfg.reconstruction_current_obs_key = "motion_ref_current_obs_norm"
+    model_cfg.reconstruction_historical_obs_key = "motion_ref_history_obs_norm"
 
-    actor_in_keys = list(
+    model_cfg.in_keys = list(
         dict.fromkeys(
-            list(agent_cfg.model.actor.in_keys)
+            list(model_cfg.in_keys)
             + [
                 "motion_ref_current_obs",
                 "motion_ref_history_obs",
             ]
         )
-    )
-    critic_in_keys = list(agent_cfg.model.critic.in_keys)
-
-    agent_cfg.model.actor.in_keys = actor_in_keys
-    agent_cfg.model.in_keys = list(
-        dict.fromkeys(list(agent_cfg.model.in_keys) + actor_in_keys + critic_in_keys)
     )
 
     return agent_cfg

@@ -110,6 +110,7 @@ def env_config(robot_cfg, args):
 
 def agent_config(robot_config, env_config, args):
     base_cfg = _BASE.agent_config(robot_config, env_config, args)
+    base_cfg.model.actor.mu_model.losses.reconstruction_weight = 1.0
     base_cfg_kwargs = {
         field.name: getattr(base_cfg, field.name) for field in fields(base_cfg)
     }
