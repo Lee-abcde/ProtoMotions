@@ -574,20 +574,38 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_privileged_latent"] = privileged_latent
         if self.reconstruction_head is not None:
             reconstructed_window = self.reconstruction_head(posterior["manifold"]).transpose(1, 2)
+            history_steps = self.config.num_historical_conditioned_steps
+            current_step = history_steps + 1
             tensordict["vq_pae_reconstructed_future"] = reconstructed_window
             if self._has_reconstruction_target_keys(tensordict):
                 target_window = self._build_posterior_reconstruction_target(
                     tensordict, norm_snapshots=norm_snapshots
                 )
-                tensordict["vq_pae_reconstruction_loss"] = F.mse_loss(
+                reconstruction_error = F.mse_loss(
                     reconstructed_window,
                     target_window.detach(),
                     reduction="none",
-                ).mean(dim=(1, 2))
+                )
+                tensordict["vq_pae_reconstruction_loss"] = reconstruction_error.mean(
+                    dim=(1, 2)
+                )
+                tensordict["vq_pae_reconstruction_history_loss"] = reconstruction_error[
+                    :, :history_steps, :
+                ].mean(dim=(1, 2))
+                tensordict["vq_pae_reconstruction_current_loss"] = reconstruction_error[
+                    :, history_steps:current_step, :
+                ].mean(dim=(1, 2))
+                tensordict["vq_pae_reconstruction_future_loss"] = reconstruction_error[
+                    :, current_step:, :
+                ].mean(dim=(1, 2))
             else:
-                tensordict["vq_pae_reconstruction_loss"] = torch.zeros(
+                zero_loss = torch.zeros(
                     posterior["manifold"].shape[0], device=posterior["manifold"].device
                 )
+                tensordict["vq_pae_reconstruction_loss"] = zero_loss
+                tensordict["vq_pae_reconstruction_history_loss"] = zero_loss
+                tensordict["vq_pae_reconstruction_current_loss"] = zero_loss
+                tensordict["vq_pae_reconstruction_future_loss"] = zero_loss
 
         return tensordict
 
@@ -611,14 +629,13 @@ class DistillVQPAEModel(BaseModel):
             * losses.frequency_alignment_weight
         )
         reconstruction = torch.tensor(0.0, device=commitment.device)
+        reconstruction_raw = torch.tensor(0.0, device=commitment.device)
         if (
             losses.reconstruction_weight > 0.0
             and "vq_pae_reconstruction_loss" in tensordict.keys()
         ):
-            reconstruction = (
-                tensordict["vq_pae_reconstruction_loss"].mean()
-                * losses.reconstruction_weight
-            )
+            reconstruction_raw = tensordict["vq_pae_reconstruction_loss"].mean()
+            reconstruction = reconstruction_raw * losses.reconstruction_weight
         total = (
             commitment
             + prior_commitment
@@ -636,7 +653,22 @@ class DistillVQPAEModel(BaseModel):
             "distill/vq_perplexity": tensordict["vq_pae_perplexity"].mean().detach(),
         }
         if losses.reconstruction_weight > 0.0:
-            log_dict["distill/vq_reconstruction_loss"] = reconstruction.detach()
+            log_dict["distill/vq_reconstruction_loss"] = reconstruction_raw.detach()
+            log_dict["distill/vq_reconstruction_loss_weighted"] = (
+                reconstruction.detach()
+            )
+            if "vq_pae_reconstruction_history_loss" in tensordict.keys():
+                log_dict["distill/vq_reconstruction_history_loss"] = (
+                    tensordict["vq_pae_reconstruction_history_loss"].mean().detach()
+                )
+            if "vq_pae_reconstruction_current_loss" in tensordict.keys():
+                log_dict["distill/vq_reconstruction_current_loss"] = (
+                    tensordict["vq_pae_reconstruction_current_loss"].mean().detach()
+                )
+            if "vq_pae_reconstruction_future_loss" in tensordict.keys():
+                log_dict["distill/vq_reconstruction_future_loss"] = (
+                    tensordict["vq_pae_reconstruction_future_loss"].mean().detach()
+                )
         return total, log_dict
 
     def get_inference_in_keys(self) -> list:
