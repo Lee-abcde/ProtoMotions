@@ -185,6 +185,45 @@ class MimicControl(ControlComponent):
         future_dof_vel = future_state.dof_vel.view(
             num_envs, future_steps, num_dofs
         )
+
+        history_steps = self.env.config.num_state_history_steps
+        if history_steps > 0:
+            historical_step_indices = list(range(history_steps, 0, -1))
+            historical_time_offsets = dt * torch.tensor(
+                historical_step_indices, device=device, dtype=torch.float32
+            )
+            historical_times = motion_times.unsqueeze(-1) - historical_time_offsets
+            historical_times = historical_times.clamp(min=0.0)
+
+            flat_historical_motion_ids = motion_ids.unsqueeze(-1).expand(
+                num_envs, history_steps
+            ).reshape(-1)
+            flat_historical_times = historical_times.reshape(-1)
+            historical_state = self.env.motion_lib.get_motion_state(
+                flat_historical_motion_ids, flat_historical_times
+            )
+
+            historical_root_rot = historical_state.rigid_body_rot.view(
+                num_envs, history_steps, num_bodies, 4
+            )[:, :, 0, :]
+            historical_root_ang_vel = historical_state.rigid_body_ang_vel.view(
+                num_envs, history_steps, num_bodies, 3
+            )[:, :, 0, :]
+            historical_anchor_rot = historical_state.rigid_body_rot.view(
+                num_envs, history_steps, num_bodies, 4
+            )[:, :, self.env.robot_config.anchor_body_index, :]
+            historical_dof_pos = historical_state.dof_pos.view(
+                num_envs, history_steps, num_dofs
+            )
+            historical_dof_vel = historical_state.dof_vel.view(
+                num_envs, history_steps, num_dofs
+            )
+        else:
+            historical_root_rot = torch.empty(num_envs, 0, 4, device=device)
+            historical_root_ang_vel = torch.empty(num_envs, 0, 3, device=device)
+            historical_anchor_rot = torch.empty(num_envs, 0, 4, device=device)
+            historical_dof_pos = torch.empty(num_envs, 0, num_dofs, device=device)
+            historical_dof_vel = torch.empty(num_envs, 0, num_dofs, device=device)
         
         hinge_axes_map = self.env.robot_config.kinematic_info.hinge_axes_map
         ref_lr = dof_to_local(ref_state.dof_pos, hinge_axes_map, True)
@@ -198,6 +237,11 @@ class MimicControl(ControlComponent):
             future_ang_vel=future_ang_vel,
             future_dof_pos=future_dof_pos,
             future_dof_vel=future_dof_vel,
+            historical_root_rot=historical_root_rot,
+            historical_root_ang_vel=historical_root_ang_vel,
+            historical_anchor_rot=historical_anchor_rot,
+            historical_dof_pos=historical_dof_pos,
+            historical_dof_vel=historical_dof_vel,
             anchor_idx=self.env.robot_config.anchor_body_index,
             ref_lr=ref_lr,
         )

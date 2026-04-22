@@ -76,6 +76,56 @@ def build_reduced_future_core_target_poses(
     )
 
 
+def build_reduced_current_core_target_pose(
+    ref_rigid_body_rot: torch.Tensor,
+    ref_rigid_body_ang_vel: torch.Tensor,
+    ref_dof_pos: torch.Tensor,
+    ref_dof_vel: torch.Tensor,
+    anchor_idx: int,
+    w_last: bool = True,
+) -> torch.Tensor:
+    root_rot = ref_rigid_body_rot[:, 0, :]
+    root_ang_vel = ref_rigid_body_ang_vel[:, 0, :]
+    anchor_rot = ref_rigid_body_rot[:, anchor_idx, :]
+    root_local_ang_vel = rotations.quat_rotate_inverse(root_rot, root_ang_vel, w_last)
+    return build_reduced_core_obs(
+        dof_pos=ref_dof_pos,
+        dof_vel=ref_dof_vel,
+        root_local_ang_vel=root_local_ang_vel,
+        anchor_rot=anchor_rot,
+        w_last=w_last,
+    )
+
+
+def build_reduced_historical_core_target_poses(
+    mimic_ref_historical_root_rot: torch.Tensor,
+    mimic_ref_historical_root_ang_vel: torch.Tensor,
+    mimic_ref_historical_anchor_rot: torch.Tensor,
+    mimic_ref_historical_dof_vel: torch.Tensor,
+    mimic_ref_historical_dof_pos: torch.Tensor,
+    w_last: bool = True,
+) -> torch.Tensor:
+    local_root_ang_vel = rotations.quat_rotate_inverse(
+        mimic_ref_historical_root_rot.reshape(-1, 4),
+        mimic_ref_historical_root_ang_vel.reshape(-1, 3),
+        w_last,
+    ).view(*mimic_ref_historical_root_ang_vel.shape)
+    proj_gravity = root_projected_gravity(
+        mimic_ref_historical_anchor_rot.reshape(-1, 4), w_last
+    ).view(*mimic_ref_historical_root_ang_vel.shape)
+
+    num_envs = mimic_ref_historical_dof_pos.shape[0]
+    return torch.cat(
+        [
+            mimic_ref_historical_dof_pos.reshape(num_envs, -1),
+            mimic_ref_historical_dof_vel.reshape(num_envs, -1),
+            local_root_ang_vel.reshape(num_envs, -1),
+            proj_gravity.reshape(num_envs, -1),
+        ],
+        dim=-1,
+    )
+
+
 def resolve_student_future_steps(
     available_future_steps, num_future_steps: int
 ) -> List[int]:
@@ -150,7 +200,6 @@ def build_historical_reduced_core_obs(
         ],
         dim=-1,
     )
-
 
 def make_reduced_target_pose_component(
     env_context,

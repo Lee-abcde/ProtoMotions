@@ -15,7 +15,7 @@
 #
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 from protomotions.agents.base_agent.config import BaseModelConfig, OptimizerConfig
 from protomotions.agents.common.config import MLPLayerConfig, ModuleContainerConfig
@@ -57,6 +57,8 @@ class DistillVQPAEModelConfig(BaseModelConfig):
     )
     current_obs_key: str = "max_coords_obs_norm"
     historical_obs_key: str = "historical_pose_obs_norm"
+    posterior_current_obs_key: Optional[str] = None
+    posterior_historical_obs_key: Optional[str] = None
     future_obs_key: str = "vq_pae_target_poses_norm"
     reconstruction_current_obs_key: str = "max_coords_obs_norm"
     reconstruction_historical_obs_key: str = "historical_pose_obs_norm"

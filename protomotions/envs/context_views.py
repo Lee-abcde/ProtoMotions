@@ -286,6 +286,13 @@ class MimicContext:
     future_root_vel: Tensor = FieldPath()
     future_root_ang_vel: Tensor = FieldPath()
 
+    # Historical reference properties (precomputed)
+    historical_root_rot: Tensor = FieldPath()
+    historical_root_ang_vel: Tensor = FieldPath()
+    historical_anchor_rot: Tensor = FieldPath()
+    historical_dof_pos: Tensor = FieldPath()
+    historical_dof_vel: Tensor = FieldPath()
+
     # Current-frame reference anchor position (precomputed)
     ref_anchor_pos: Tensor = FieldPath()
 
@@ -304,6 +311,11 @@ class MimicContext:
         future_ang_vel: Tensor,
         future_dof_pos: Tensor,
         future_dof_vel: Tensor,
+        historical_root_rot: Tensor,
+        historical_root_ang_vel: Tensor,
+        historical_anchor_rot: Tensor,
+        historical_dof_pos: Tensor,
+        historical_dof_vel: Tensor,
         anchor_idx: int,
         ref_lr: Tensor,
     ):
@@ -317,6 +329,11 @@ class MimicContext:
             future_ang_vel: Future angular velocities [num_envs, future_steps, num_bodies, 3].
             future_dof_pos: Future DOF positions [num_envs, future_steps, num_dofs].
             future_dof_vel: Future DOF velocities [num_envs, future_steps, num_dofs].
+            historical_root_rot: Historical root rotations [num_envs, history_steps, 4].
+            historical_root_ang_vel: Historical root angular velocities [num_envs, history_steps, 3].
+            historical_anchor_rot: Historical anchor rotations [num_envs, history_steps, 4].
+            historical_dof_pos: Historical DOF positions [num_envs, history_steps, num_dofs].
+            historical_dof_vel: Historical DOF velocities [num_envs, history_steps, num_dofs].
             anchor_idx: Index of anchor body for computing anchor-relative values.
             ref_lr: Reference DOF in local rotation format for DOF tracking rewards.
         """
@@ -328,6 +345,11 @@ class MimicContext:
         self.future_ang_vel = future_ang_vel
         self.future_dof_pos = future_dof_pos
         self.future_dof_vel = future_dof_vel
+        self.historical_root_rot = historical_root_rot
+        self.historical_root_ang_vel = historical_root_ang_vel
+        self.historical_anchor_rot = historical_anchor_rot
+        self.historical_dof_pos = historical_dof_pos
+        self.historical_dof_vel = historical_dof_vel
         self.anchor_idx = anchor_idx
         self.ref_lr = ref_lr
 

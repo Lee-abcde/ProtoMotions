@@ -225,9 +225,20 @@ class DistillVQPAEModel(BaseModel):
                 num_layers=self.config.phase_encoder_layers,
                 kernel_size=self.config.phase_kernel_size,
             )
-
-    def _reshape_history(self, tensordict: TensorDict) -> torch.Tensor:
-        return tensordict[self.config.historical_obs_key].reshape(
+        self._needs_reconstruction_norm_snapshots = (
+            self.reconstruction_head is not None
+            and (
+                self.config.reconstruction_historical_obs_key
+                != self._get_posterior_historical_obs_key()
+                or self.config.reconstruction_current_obs_key
+                != self._get_posterior_current_obs_key()
+            )
+        )
+    def _reshape_history(
+        self, tensordict: TensorDict, obs_key: str | None = None
+    ) -> torch.Tensor:
+        history_key = self.config.historical_obs_key if obs_key is None else obs_key
+        return tensordict[history_key].reshape(
             -1,
             self.config.num_historical_conditioned_steps,
             self.config.historical_obs_dim,
@@ -289,13 +300,29 @@ class DistillVQPAEModel(BaseModel):
                 snapshots[out_key] = snapshot
         return snapshots
 
+    def _get_posterior_current_obs_key(self) -> str:
+        posterior_key = getattr(self.config, "posterior_current_obs_key", None)
+        return self.config.current_obs_key if not posterior_key else posterior_key
+
+    def _get_posterior_historical_obs_key(self) -> str:
+        posterior_key = getattr(self.config, "posterior_historical_obs_key", None)
+        return self.config.historical_obs_key if not posterior_key else posterior_key
+
     def _build_prior_sequence(self, tensordict: TensorDict) -> torch.Tensor:
-        history = self.history_projector(self._reshape_history(tensordict))
+        history = self.history_projector(
+            self._reshape_history(tensordict, self.config.historical_obs_key)
+        )
         current = self.current_projector(tensordict[self.config.current_obs_key]).unsqueeze(1)
         return torch.cat([history, current], dim=1)
 
     def _build_posterior_sequence(self, tensordict: TensorDict) -> torch.Tensor:
-        prior_sequence = self._build_prior_sequence(tensordict)
+        posterior_history_key = self._get_posterior_historical_obs_key()
+        posterior_current_key = self._get_posterior_current_obs_key()
+        history = self.history_projector(
+            self._reshape_history(tensordict, posterior_history_key)
+        )
+        current = self.current_projector(tensordict[posterior_current_key]).unsqueeze(1)
+        prior_sequence = torch.cat([history, current], dim=1)
         future = self.future_projector(self._reshape_future(tensordict))
         return torch.cat([prior_sequence, future], dim=1)
 
@@ -304,19 +331,32 @@ class DistillVQPAEModel(BaseModel):
         tensordict: TensorDict,
         norm_snapshots: Optional[Dict[str, Dict[str, object]]] = None,
     ) -> torch.Tensor:
-        history = self._normalize_with_preprocessor(
-            tensordict[self.config.reconstruction_historical_obs_key],
-            self.config.historical_obs_key,
-            norm_snapshots=norm_snapshots,
+        posterior_history_key = self._get_posterior_historical_obs_key()
+        posterior_current_key = self._get_posterior_current_obs_key()
+
+        def _get_reconstruction_component(
+            reconstruction_key: str,
+            normalized_key: str,
+        ) -> torch.Tensor:
+            if reconstruction_key == normalized_key:
+                return tensordict[reconstruction_key]
+            return self._normalize_with_preprocessor(
+                tensordict[reconstruction_key],
+                normalized_key,
+                norm_snapshots=norm_snapshots,
+            )
+
+        history = _get_reconstruction_component(
+            self.config.reconstruction_historical_obs_key,
+            posterior_history_key,
         ).reshape(
             -1,
             self.config.num_historical_conditioned_steps,
             self.config.historical_obs_dim,
         )
-        current = self._normalize_with_preprocessor(
-            tensordict[self.config.reconstruction_current_obs_key],
-            self.config.current_obs_key,
-            norm_snapshots=norm_snapshots,
+        current = _get_reconstruction_component(
+            self.config.reconstruction_current_obs_key,
+            posterior_current_key,
         ).unsqueeze(1)
         future = tensordict[self.config.reconstruction_future_obs_key].reshape(
             -1,
@@ -483,7 +523,11 @@ class DistillVQPAEModel(BaseModel):
         }
 
     def forward(self, tensordict: TensorDict) -> TensorDict:
-        norm_snapshots = self._capture_preprocessor_norm_snapshots()
+        norm_snapshots = (
+            self._capture_preprocessor_norm_snapshots()
+            if self._needs_reconstruction_norm_snapshots
+            else None
+        )
         tensordict = self._preprocessor(tensordict)
         external_actor_latent = tensordict.get("vq_external_vae_latent", None)
         external_privileged_latent = tensordict.get(
