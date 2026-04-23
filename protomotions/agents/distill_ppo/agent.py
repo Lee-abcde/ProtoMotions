@@ -42,7 +42,11 @@ class DistillPPO(PPO):
             return None
 
         if schedule.end_epoch <= schedule.start_epoch:
-            return schedule.end_coef
+            return (
+                schedule.init_coef
+                if current_epoch < schedule.start_epoch
+                else schedule.end_coef
+            )
 
         progress = min(
             max(current_epoch - schedule.start_epoch, 0)
@@ -79,7 +83,11 @@ class DistillPPO(PPO):
             return self.config.num_mini_epochs
 
         if schedule.end_epoch <= schedule.start_epoch:
-            return schedule.end_num_mini_epochs
+            return (
+                schedule.init_num_mini_epochs
+                if self.current_epoch < schedule.start_epoch
+                else schedule.end_num_mini_epochs
+            )
 
         progress = min(
             max(self.current_epoch - schedule.start_epoch, 0)
@@ -97,7 +105,11 @@ class DistillPPO(PPO):
             return self.config.model.actor_optimizer.lr
 
         if schedule.end_epoch <= schedule.start_epoch:
-            return schedule.end_lr
+            return (
+                schedule.init_lr
+                if self.current_epoch < schedule.start_epoch
+                else schedule.end_lr
+            )
 
         progress = min(
             max(self.current_epoch - schedule.start_epoch, 0)
