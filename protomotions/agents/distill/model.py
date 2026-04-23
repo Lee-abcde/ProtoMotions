@@ -84,7 +84,7 @@ class DistillModel(BaseModel):
                 + trunk_in_keys_without_latents
             )
         )
-        self.out_keys = ["action", "privileged_action"]
+        self.out_keys = ["action", "prior_action", "privileged_action"]
 
     @staticmethod
     def reparameterization(mean, std, vae_noise):
@@ -151,6 +151,7 @@ class DistillModel(BaseModel):
         tensordict["distill_actor_latent"] = z
         tensordict["distill_privileged_latent"] = privileged_z
         tensordict["action"] = action
+        tensordict["prior_action"] = action
         tensordict["privileged_action"] = privileged_action
         return tensordict
 
@@ -183,6 +184,7 @@ class DistillModel(BaseModel):
         action = tensordict[self._trunk.out_keys[0]]
 
         tensordict["action"] = action
+        tensordict["prior_action"] = action
         return tensordict
 
     def get_inference_in_keys(self) -> list:
