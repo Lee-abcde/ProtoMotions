@@ -354,8 +354,8 @@ def agent_config(
             kld_schedule=KLDScheduleConfig(
                 start_epoch=2500,
                 end_epoch=5000,
-                init_kld_coeff=0.001,
-                end_kld_coeff=0.01,
+                init_kld_coeff=0.01,
+                end_kld_coeff=0.001,
             ),
         ),
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
