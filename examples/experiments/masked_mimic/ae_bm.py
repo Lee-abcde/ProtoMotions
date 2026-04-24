@@ -13,18 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""BM PPO baseline with a simple windowed MLP autoencoder actor and L2C2."""
+"""AE distillation config with BM-style domain randomization for sim2real."""
 
 import argparse
 import importlib.util
 import os
 
+from protomotions.components.motion_lib import MotionLibConfig
+from protomotions.components.scene_lib import SceneLibConfig
+from protomotions.components.terrains.config import TerrainConfig
+from protomotions.envs.base_env.config import EnvConfig
 from protomotions.robot_configs.base import RobotConfig
 from protomotions.simulator.base_simulator.config import SimulatorConfig
-from protomotions.components.terrains.config import TerrainConfig
-from protomotions.components.scene_lib import SceneLibConfig
-from protomotions.components.motion_lib import MotionLibConfig
-from protomotions.envs.base_env.config import EnvConfig
 
 
 def _load_sibling_module(filename: str, module_name: str):
@@ -37,20 +37,26 @@ def _load_sibling_module(filename: str, module_name: str):
     return module
 
 
-_PAE_NOISY_MODULE = _load_sibling_module(
-    "pae_bm_ppo.py", "masked_mimic_pae_bm_ppo_noisy_base"
-)
+_BM_DISTILL_MODULE = _load_sibling_module("vq_pae_bm.py", "masked_mimic_vq_pae_bm_base")
 
-NUM_FUTURE_STEPS = _PAE_NOISY_MODULE.NUM_FUTURE_STEPS
-TOTAL_STORED_HISTORICAL_STEPS = _PAE_NOISY_MODULE.TOTAL_STORED_HISTORICAL_STEPS
-NUM_HISTORICAL_CONDITIONED_STEPS = _PAE_NOISY_MODULE.NUM_HISTORICAL_CONDITIONED_STEPS
+NUM_FUTURE_STEPS = _BM_DISTILL_MODULE.NUM_FUTURE_STEPS
+TOTAL_STORED_HISTORICAL_STEPS = _BM_DISTILL_MODULE.TOTAL_STORED_HISTORICAL_STEPS
+NUM_HISTORICAL_CONDITIONED_STEPS = _BM_DISTILL_MODULE.NUM_HISTORICAL_CONDITIONED_STEPS
 
-terrain_config = _PAE_NOISY_MODULE.terrain_config
-scene_lib_config = _PAE_NOISY_MODULE.scene_lib_config
-motion_lib_config = _PAE_NOISY_MODULE.motion_lib_config
-env_config = _PAE_NOISY_MODULE.env_config
-configure_robot_and_simulator = _PAE_NOISY_MODULE.configure_robot_and_simulator
-apply_inference_overrides = _PAE_NOISY_MODULE.apply_inference_overrides
+terrain_config = _BM_DISTILL_MODULE.terrain_config
+scene_lib_config = _BM_DISTILL_MODULE.scene_lib_config
+motion_lib_config = _BM_DISTILL_MODULE.motion_lib_config
+env_config = _BM_DISTILL_MODULE.env_config
+configure_robot_and_simulator = _BM_DISTILL_MODULE.configure_robot_and_simulator
+
+
+def additional_experiment_arguments(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--expert-model-path",
+        type=str,
+        default=None,
+        help="Path to expert model checkpoint for distillation training",
+    )
 
 
 def agent_config(
@@ -61,32 +67,25 @@ def agent_config(
         MLPWithConcatConfig,
         MLPLayerConfig,
         ModuleContainerConfig,
-        ObsProcessorConfig,
         ModuleOperationForwardConfig,
+        ObsProcessorConfig,
     )
     from protomotions.agents.distill.ae_config import (
-        DistillAEModelConfig,
         AELossConfig,
+        DistillAEModelConfig,
     )
+    from protomotions.agents.distill.config import DistillAgentConfig
     from protomotions.agents.evaluators.config import (
         DistillEvaluatorConfig,
         MotionWeightsRulesConfig,
     )
-    from protomotions.agents.ppo.config import (
-        PPOActorConfig,
-        PPOAgentConfig,
-        PPOModelConfig,
-        AdaptiveLRConfig,
-        AdvantageNormalizationConfig,
-        L2C2Config,
-    )
     from protomotions.envs.component_factories import (
-        anchor_ori_metric_factory,
-        relative_body_pos_metric_factory,
         anchor_height_error_metric_factory,
-        gt_error_factory,
+        anchor_ori_metric_factory,
         gr_error_factory,
+        gt_error_factory,
         max_joint_error_factory,
+        relative_body_pos_metric_factory,
     )
 
     num_dofs = robot_config.kinematic_info.num_dofs
@@ -177,7 +176,7 @@ def agent_config(
         ],
     )
 
-    ae_actor_config = DistillAEModelConfig(
+    model_config = DistillAEModelConfig(
         preprocessor=preprocessor_config,
         trunk=trunk_config,
         reconstruction_current_obs_key="clean_encoder_current_obs",
@@ -192,100 +191,52 @@ def agent_config(
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
 
-    actor_in_keys = [
-        "encoder_current_obs",
-        "historical_pose_obs",
-        "encoder_future_target_obs",
-        "trunk_target_relative_rot",
-        "historical_previous_processed_actions",
-    ]
-    clean_actor_obs_keys = [
-        "clean_encoder_current_obs",
-        "clean_historical_pose_obs",
-        "clean_trunk_target_relative_rot",
-    ]
-
-    actor_config = PPOActorConfig(
-        num_out=robot_config.number_of_actions,
-        actor_logstd=-2.9,
-        learnable_std=True,
-        in_keys=actor_in_keys,
-        mu_key="privileged_action",
-        mu_model=ae_actor_config,
-    )
-
-    critic_config = MLPWithConcatConfig(
-        in_keys=[
-            "max_coords_obs",
-            "mimic_max_coords_target_poses",
-            "historical_previous_processed_actions",
-        ],
-        out_keys=["value"],
-        normalize_obs=True,
-        norm_clamp_value=5.0,
-        num_out=1,
-        layers=[MLPLayerConfig(units=1024, activation="relu") for _ in range(4)],
-    )
-
-    model_in_keys = list(
-        dict.fromkeys(actor_in_keys + clean_actor_obs_keys + critic_config.in_keys)
-    )
-
-    return PPOAgentConfig(
-        model=PPOModelConfig(
-            in_keys=model_in_keys,
-            out_keys=[
-                "action",
-                "mean_action",
-                "neglogp",
-                "value",
-                "privileged_action",
-                "prior_action",
-            ],
-            actor=actor_config,
-            critic=critic_config,
-            actor_optimizer=OptimizerConfig(
-                _target_="torch.optim.Adam", lr=2e-5, betas=(0.95, 0.99)
-            ),
-            critic_optimizer=OptimizerConfig(
-                _target_="torch.optim.Adam", lr=1e-4, betas=(0.95, 0.99)
-            ),
+    evaluator_config = DistillEvaluatorConfig(
+        use_privileged_success_for_motion_weights=True,
+        evaluation_components={
+            "anchor_ori": anchor_ori_metric_factory(),
+            "relative_body_pos": relative_body_pos_metric_factory(),
+            "anchor_height_error": anchor_height_error_metric_factory(threshold=0.25),
+            "gt_error": gt_error_factory(),
+            "gr_error": gr_error_factory(),
+            "max_joint_error": max_joint_error_factory(),
+        },
+        motion_weights_rules=MotionWeightsRulesConfig(
+            motion_weights_update_success_discount=0.999,
+            motion_weights_update_failure_discount=0,
         ),
-        normalize_rewards=False,
-        adaptive_lr=AdaptiveLRConfig(enabled=False),
+    )
+
+    return DistillAgentConfig(
+        model=model_config,
         batch_size=args.batch_size,
-        num_mini_epochs=2,
         training_max_steps=args.training_max_steps,
         gradient_clip_val=50.0,
-        clip_critic_loss=True,
-        l2c2=L2C2Config(
-            enabled=True,
-            lambda_l2c2=1.0,
-            obs_pairs={
-                "encoder_current_obs": "clean_encoder_current_obs",
-                "historical_pose_obs": "clean_historical_pose_obs",
-                "trunk_target_relative_rot": "clean_trunk_target_relative_rot",
-            },
-        ),
-        evaluator=DistillEvaluatorConfig(
-            use_privileged_success_for_motion_weights=True,
-            use_privileged_action_for_interaction=True,
-            evaluation_components={
-                "anchor_ori": anchor_ori_metric_factory(),
-                "relative_body_pos": relative_body_pos_metric_factory(),
-                "anchor_height_error": anchor_height_error_metric_factory(
-                    threshold=0.25
-                ),
-                "gt_error": gt_error_factory(),
-                "gr_error": gr_error_factory(),
-                "max_joint_error": max_joint_error_factory(),
-            },
-            motion_weights_rules=MotionWeightsRulesConfig(
-                motion_weights_update_success_discount=0.999,
-                motion_weights_update_failure_discount=0,
-            ),
-        ),
-        advantage_normalization=AdvantageNormalizationConfig(
-            enabled=True, shift_mean=True
-        ),
+        num_mini_epochs=6,
+        evaluator=evaluator_config,
+        expert_model_path=getattr(args, "expert_model_path", None),
     )
+
+
+def apply_inference_overrides(
+    robot_cfg: RobotConfig,
+    simulator_cfg: SimulatorConfig,
+    env_cfg: EnvConfig,
+    agent_cfg,
+    terrain_cfg: TerrainConfig,
+    motion_lib_cfg: MotionLibConfig,
+    scene_lib_cfg: SceneLibConfig,
+    args: argparse.Namespace,
+):
+    _BM_DISTILL_MODULE.apply_inference_overrides(
+        robot_cfg,
+        simulator_cfg,
+        env_cfg,
+        agent_cfg,
+        terrain_cfg,
+        motion_lib_cfg,
+        scene_lib_cfg,
+        args,
+    )
+    if agent_cfg is not None and hasattr(agent_cfg, "expert_model_path"):
+        agent_cfg.expert_model_path = None

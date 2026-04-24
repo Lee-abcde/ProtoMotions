@@ -39,6 +39,9 @@ from protomotions.agents.distill.latent_velocity_config import (
     DistillLatentVelocityModelConfig,
     LatentVelocityLossConfig,
 )
+from protomotions.agents.distill.ae_config import (
+    DistillAEModelConfig,
+)
 
 
 @dataclass
@@ -172,6 +175,7 @@ class DistillAgentConfig(BaseAgentConfig):
         DistillPAEModelConfig,
         DistillGeometricModelConfig,
         DistillLatentVelocityModelConfig,
+        DistillAEModelConfig,
     ] = field(
         default_factory=DistillModelConfig,
         metadata={"help": "Model configuration (VAE or FeedForward variant)."}
