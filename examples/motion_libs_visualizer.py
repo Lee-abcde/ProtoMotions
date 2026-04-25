@@ -100,6 +100,28 @@ parser.add_argument(
     default=0,
     help="Motion index to start playback from (default: 0)",
 )
+parser.add_argument(
+    "--text-display",
+    type=str,
+    choices=["off", "change", "frame"],
+    default="off",
+    help=(
+        "How to print text annotations from MotionLibs: "
+        "'off' disables, 'change' prints only when active text changes, "
+        "'frame' prints every displayed frame."
+    ),
+)
+parser.add_argument(
+    "--text-selection",
+    type=str,
+    choices=["all", "preferred"],
+    default="all",
+    help=(
+        "Which text annotations to print: "
+        "'all' shows every active label, "
+        "'preferred' shows the single training-oriented label selected by MotionLib."
+    ),
+)
 args = parser.parse_args()
 
 # Import simulator before torch - isaacgym/isaaclab must be imported before torch
@@ -337,6 +359,8 @@ class MotionVisualizerSmoothness:
         metric: str = "nj",
         use_data_vel: bool = False,
         window_sec: float = 2.0,
+        text_display: str = "off",
+        text_selection: str = "all",
     ):
         self.motion_files = [Path(f) for f in motion_files]
         self.robot_name = robot_name
@@ -351,6 +375,9 @@ class MotionVisualizerSmoothness:
         self.metric = metric
         self.use_data_vel = use_data_vel  # If False (default), use finite differences
         self.window_frames = max(4, int(round(window_sec * FPS)))
+        self.text_display = text_display
+        self.text_selection = text_selection
+        self._last_text_signature = None
 
         # Load motion libraries (.pt files)
         from protomotions.components.motion_lib import MotionLibConfig
@@ -472,8 +499,15 @@ class MotionVisualizerSmoothness:
         print("  '3' - Increase smoothness threshold by 1.5x (NumPad 3 for IsaacLab)")
         print("  '4' - Decrease smoothness threshold by 1.5x (NumPad 4 for IsaacLab)")
         print("Motion will play automatically and loop")
+        if self.text_display != "off":
+            print(
+                f"Text display: {self.text_display} "
+                f"| text selection: {self.text_selection} "
+                "(prints text annotations from packaged MotionLib data)"
+            )
 
-        self.simulator.user_requested_reset = True
+        # Start playback from start_motion_idx instead of auto-advancing to the next motion.
+        self.simulator.user_requested_reset = False
 
         # Speed control state
         self.speed_change_factor = 1.5  # 150% speed change
@@ -487,6 +521,7 @@ class MotionVisualizerSmoothness:
         # Pre-compute smoothness for the initial motion
         print("Pre-computing smoothness metrics for initial motion...")
         self._precompute_motion_smoothness()
+        self._maybe_print_current_text(force=True)
 
     def _create_visualization_markers(self) -> Dict[str, VisualizationMarkerConfig]:
         """Create visualization markers for specified body locations"""
@@ -543,6 +578,7 @@ class MotionVisualizerSmoothness:
         """Switch to the next motion in the dataset"""
         self.current_motion_idx = (self.current_motion_idx + 1) % self.total_motions
         self.current_frame = 0
+        self._last_text_signature = None
         self.current_motion_length = (
             self.motion_libs[0]
             .get_motion_num_frames(None)[self.current_motion_idx]
@@ -560,6 +596,94 @@ class MotionVisualizerSmoothness:
         # Pre-compute smoothness for new motion
         print("Pre-computing smoothness metrics for new motion...")
         self._precompute_motion_smoothness()
+        self._maybe_print_current_text(force=True)
+
+    def _get_current_text_snapshot(self):
+        clamped_frame = min(self.current_frame, self.current_motion_length - 1)
+        motion_idx = torch.tensor(
+            [self.current_motion_idx], device=self.device, dtype=torch.long
+        )
+
+        snapshot = []
+        for lib_idx, motion_lib in enumerate(self.motion_libs):
+            if not motion_lib.has_text_annotations():
+                snapshot.append(
+                    {
+                        "lib_idx": lib_idx,
+                        "motion_time": None,
+                        "texts": (),
+                        "has_text_data": False,
+                    }
+                )
+                continue
+
+            motion_dt = float(motion_lib.motion_dt[self.current_motion_idx].item())
+            motion_time = clamped_frame * motion_dt
+            motion_time_tensor = torch.tensor(
+                [motion_time], device=self.device, dtype=torch.float32
+            )
+            if self.text_selection == "preferred":
+                preferred_text = motion_lib.get_preferred_motion_text(
+                    motion_idx,
+                    motion_time_tensor,
+                )[0]
+                texts = (preferred_text,) if preferred_text else ()
+            else:
+                texts = motion_lib.get_active_motion_text(
+                    motion_idx,
+                    motion_time_tensor,
+                )[0]
+            snapshot.append(
+                {
+                    "lib_idx": lib_idx,
+                    "motion_time": motion_time,
+                    "texts": tuple(texts),
+                    "has_text_data": True,
+                }
+            )
+
+        return clamped_frame, snapshot
+
+    def _format_text_snapshot(self, clamped_frame, snapshot):
+        parts = [f"frame={clamped_frame}", f"motion_idx={self.current_motion_idx}"]
+        for item in snapshot:
+            if not item["has_text_data"]:
+                parts.append(f"lib{item['lib_idx']}:<no_text_data>")
+                continue
+
+            motion_time = item["motion_time"]
+            texts = item["texts"]
+            if texts:
+                text_str = " | ".join(texts)
+            else:
+                text_str = "<no_active_text>"
+            parts.append(
+                f"lib{item['lib_idx']}@t={motion_time:.3f}s:{text_str}"
+            )
+        return "Text " + " ".join(parts)
+
+    def _maybe_print_current_text(self, force: bool = False):
+        if self.text_display == "off":
+            return
+
+        clamped_frame, snapshot = self._get_current_text_snapshot()
+        signature = tuple(
+            (
+                item["lib_idx"],
+                item["has_text_data"],
+                item["texts"],
+            )
+            for item in snapshot
+        )
+
+        should_print = force or self.text_display == "frame"
+        if self.text_display == "change" and signature != self._last_text_signature:
+            should_print = True
+
+        if should_print:
+            print(self._format_text_snapshot(clamped_frame, snapshot))
+
+        self._last_text_signature = signature
 
     def _precompute_motion_smoothness(self):
         """Pre-compute smoothness metrics for the entire current motion"""
@@ -916,6 +1040,7 @@ class MotionVisualizerSmoothness:
             if step_count % frames_per_step == 0:
                 # Get current pose for display
                 dof_pos, rigid_body_pos, rigid_body_rot, _ = self._get_current_pose()
+                self._maybe_print_current_text()
 
                 # Set robot pose
                 self._set_robot_pose(dof_pos, rigid_body_pos, rigid_body_rot)
@@ -977,6 +1102,8 @@ def main():
         metric=args.metric,
         use_data_vel=args.use_data_vel,
         window_sec=args.window_sec,
+        text_display=args.text_display,
+        text_selection=args.text_selection,
     )
 
     try:

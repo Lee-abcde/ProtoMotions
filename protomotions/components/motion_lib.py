@@ -33,7 +33,7 @@ Key Features:
 import logging
 import os
 import re
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 from easydict import EasyDict
 from pathlib import Path
 
@@ -124,6 +124,7 @@ class MotionLib:
     contacts: torch.Tensor
 
     motion_files: Tuple[str]
+    motion_text_data: Optional[Tuple[Optional[dict], ...]] = None
 
     # Optional fields
     lrs: Optional[torch.Tensor] = (
@@ -195,6 +196,7 @@ class MotionLib:
         self.motion_weights = torch.empty(0, device=self.device)
         self.contacts = torch.empty(0, 0, device=self.device)
         self.motion_files = ()
+        self.motion_text_data = None
         self.lrs = None
 
     @classmethod
@@ -526,6 +528,7 @@ class MotionLib:
         )
 
         self.motion_files = tuple(motion_files)  # for saving to packed pt file
+        self.motion_text_data = None
 
         num_motions = len(motions)
         total_len = sum(motion_lengths)
@@ -573,6 +576,144 @@ class MotionLib:
             motion_weights,
         )
 
+    def has_text_annotations(self) -> bool:
+        return self.motion_text_data is not None and any(
+            entry is not None for entry in self.motion_text_data
+        )
+
+    def get_motion_text_data(
+        self, motion_ids: Optional[Sequence[int]] = None
+    ) -> Optional[Tuple[Optional[dict], ...]]:
+        if self.motion_text_data is None:
+            return None
+
+        if motion_ids is None:
+            return self.motion_text_data
+
+        if torch.is_tensor(motion_ids):
+            motion_ids = motion_ids.tolist()
+
+        return tuple(self.motion_text_data[int(motion_id)] for motion_id in motion_ids)
+
+    @staticmethod
+    def _segment_time_bounds(segment: dict) -> Optional[Tuple[float, float]]:
+        if "local_start" in segment and "local_end" in segment:
+            return float(segment["local_start"]), float(segment["local_end"])
+
+        if "clip_start" in segment and "clip_end" in segment:
+            return float(segment["clip_start"]), float(segment["clip_end"])
+
+        if "start" in segment and "end" in segment:
+            return float(segment["start"]), float(segment["end"])
+
+        return None
+
+    @staticmethod
+    def _segment_duration(segment: dict) -> float:
+        bounds = MotionLib._segment_time_bounds(segment)
+        if bounds is None:
+            print(
+                "Warning: text segment has no valid time bounds; using inf duration. "
+                f"segment={segment}"
+            )
+            return float("inf")
+        start_t, end_t = bounds
+        return max(0.0, end_t - start_t)
+
+    @staticmethod
+    def _is_transition_text_segment(segment: dict) -> bool:
+        proc_label = str(segment.get("proc_label", "")).strip().lower()
+        if proc_label == "transition":
+            return True
+
+        text = str(segment.get("text", "")).strip().lower()
+        return text == "transition" or text.startswith("transition to ")
+
+    @classmethod
+    def _select_preferred_text_segment(
+        cls, segments: Sequence[dict]
+    ) -> Optional[dict]:
+        if not segments:
+            return None
+
+        non_transition_segments = [
+            segment
+            for segment in segments
+            if not cls._is_transition_text_segment(segment)
+        ]
+        candidate_segments = non_transition_segments or list(segments)
+
+        return min(candidate_segments, key=cls._segment_duration)
+
+    def get_active_motion_text_segments(
+        self, motion_ids, motion_times
+    ) -> Tuple[Tuple[dict, ...], ...]:
+        if self.motion_text_data is None:
+            if torch.is_tensor(motion_ids):
+                num_queries = int(motion_ids.shape[0])
+            else:
+                num_queries = len(motion_ids)
+            return tuple(() for _ in range(num_queries))
+
+        if torch.is_tensor(motion_ids):
+            motion_ids = motion_ids.tolist()
+        if torch.is_tensor(motion_times):
+            motion_times = motion_times.tolist()
+
+        active_segments = []
+        for motion_id, motion_time in zip(motion_ids, motion_times):
+            meta = self.motion_text_data[int(motion_id)]
+            if meta is None:
+                active_segments.append(())
+                continue
+
+            if "segments" in meta and meta["segments"] is not None:
+                segments = meta["segments"]
+            else:
+                segments = [meta]
+
+            matching_segments = []
+            query_time = float(motion_time)
+            for segment in segments:
+                bounds = self._segment_time_bounds(segment)
+                if bounds is None:
+                    continue
+                start_t, end_t = bounds
+                if start_t <= query_time < end_t:
+                    matching_segments.append(segment)
+
+            active_segments.append(tuple(matching_segments))
+
+        return tuple(active_segments)
+
+    def get_active_motion_text(self, motion_ids, motion_times) -> Tuple[Tuple[str, ...], ...]:
+        active_segments = self.get_active_motion_text_segments(motion_ids, motion_times)
+        active_text = []
+        for segments in active_segments:
+            active_text.append(
+                tuple(str(segment["text"]) for segment in segments if segment.get("text"))
+            )
+        return tuple(active_text)
+
+    def get_preferred_motion_text_segments(
+        self, motion_ids, motion_times
+    ) -> Tuple[Optional[dict], ...]:
+        active_segments = self.get_active_motion_text_segments(motion_ids, motion_times)
+        return tuple(
+            self._select_preferred_text_segment(segments) for segments in active_segments
+        )
+
+    def get_preferred_motion_text(
+        self, motion_ids, motion_times
+    ) -> Tuple[Optional[str], ...]:
+        preferred_segments = self.get_preferred_motion_text_segments(
+            motion_ids, motion_times
+        )
+        return tuple(
+            str(segment["text"]) if segment is not None and segment.get("text") else None
+            for segment in preferred_segments
+        )
+
     def save_to_file(self, file_path):
         """
         Save the motion library to a packaged file (.pt).
@@ -611,6 +752,7 @@ class MotionLib:
             file_path, map_location=self.device, weights_only=False
         )
 
+        self.motion_text_data = None
         for field in loaded_data:
             assert loaded_data[field] is not None, f"Field {field} is None"
             setattr(self, field, loaded_data[field])
