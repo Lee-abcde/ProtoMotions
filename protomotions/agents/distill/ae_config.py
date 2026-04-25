@@ -46,6 +46,7 @@ class DistillAEModelConfig(BaseModelConfig):
     historical_obs_dim: int = 493
     future_obs_dim: int = 493
     latent_dim: int = 128
+    merge_future_latents: bool = False
 
     encoder_layers: List[MLPLayerConfig] = field(
         default_factory=lambda: [

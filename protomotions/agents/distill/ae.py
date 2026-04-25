@@ -75,6 +75,18 @@ class DistillAEModel(BaseModel):
             decoder_layers,
             nn.Linear(decoder_out_dim, self.window_obs_dim),
         )
+        self.future_merge = None
+        if self.config.merge_future_latents:
+            if self.config.num_future_steps <= 0:
+                raise ValueError("merge_future_latents requires at least one future step.")
+            self.future_merge = nn.Sequential(
+                nn.Linear(
+                    self.config.num_future_steps * self.config.latent_dim,
+                    self.config.latent_dim,
+                ),
+                nn.ReLU(),
+                nn.Linear(self.config.latent_dim, self.config.latent_dim),
+            )
 
     def _reshape_history(self, tensordict: TensorDict, key: str) -> torch.Tensor:
         return tensordict[key].reshape(
@@ -211,7 +223,13 @@ class DistillAEModel(BaseModel):
         history_steps = self.config.num_historical_conditioned_steps
         current_idx = history_steps
         first_future_idx = current_idx + 1
-        first_future_latent = latent_window[:, first_future_idx, :]
+        future_latents = latent_window[:, first_future_idx:, :]
+        if self.future_merge is not None:
+            first_future_latent = self.future_merge(
+                future_latents.reshape(future_latents.shape[0], -1)
+            )
+        else:
+            first_future_latent = latent_window[:, first_future_idx, :]
 
         tensordict["ae_latent_window"] = latent_window
         tensordict["ae_first_future_latent"] = first_future_latent

@@ -42,11 +42,11 @@ _BM_DISTILL_MODULE = _load_sibling_module("vq_pae_bm.py", "masked_mimic_vq_pae_b
 NUM_FUTURE_STEPS = _BM_DISTILL_MODULE.NUM_FUTURE_STEPS
 TOTAL_STORED_HISTORICAL_STEPS = _BM_DISTILL_MODULE.TOTAL_STORED_HISTORICAL_STEPS
 NUM_HISTORICAL_CONDITIONED_STEPS = _BM_DISTILL_MODULE.NUM_HISTORICAL_CONDITIONED_STEPS
+BM_TEACHER_FUTURE_STEPS = _BM_DISTILL_MODULE.BM_TEACHER_FUTURE_STEPS
 
 terrain_config = _BM_DISTILL_MODULE.terrain_config
 scene_lib_config = _BM_DISTILL_MODULE.scene_lib_config
 motion_lib_config = _BM_DISTILL_MODULE.motion_lib_config
-env_config = _BM_DISTILL_MODULE.env_config
 configure_robot_and_simulator = _BM_DISTILL_MODULE.configure_robot_and_simulator
 
 
@@ -57,6 +57,26 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         default=None,
         help="Path to expert model checkpoint for distillation training",
     )
+
+
+def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
+    from protomotions.envs.context_views import EnvContext
+    from protomotions.envs.mdp_component import MdpComponent
+    from protomotions.envs.obs.vq_pae_bm import build_reduced_future_core_target_poses
+
+    cfg = _BM_DISTILL_MODULE.env_config(robot_cfg, args)
+    cfg.observation_components["encoder_future_target_obs"] = MdpComponent(
+        compute_func=build_reduced_future_core_target_poses,
+        dynamic_vars={
+            "mimic_ref_root_rot": EnvContext.mimic.future_root_rot,
+            "mimic_ref_root_ang_vel": EnvContext.mimic.future_root_ang_vel,
+            "mimic_ref_anchor_rot": EnvContext.mimic.future_anchor_rot,
+            "mimic_ref_dof_vel": EnvContext.mimic.future_dof_vel,
+            "mimic_ref_dof_pos": EnvContext.mimic.future_dof_pos,
+        },
+        static_params={"future_steps": BM_TEACHER_FUTURE_STEPS, "w_last": True},
+    )
+    return cfg
 
 
 def agent_config(
@@ -181,12 +201,13 @@ def agent_config(
         trunk=trunk_config,
         reconstruction_current_obs_key="clean_encoder_current_obs",
         reconstruction_historical_obs_key="clean_historical_pose_obs",
-        num_future_steps=NUM_FUTURE_STEPS,
+        num_future_steps=len(BM_TEACHER_FUTURE_STEPS),
         num_historical_conditioned_steps=NUM_HISTORICAL_CONDITIONED_STEPS,
         current_obs_dim=current_obs_dim,
         historical_obs_dim=historical_obs_dim,
         future_obs_dim=future_obs_dim,
         latent_dim=current_obs_dim,
+        merge_future_latents=True,
         losses=AELossConfig(reconstruction_weight=1.0),
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
