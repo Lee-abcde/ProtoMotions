@@ -60,6 +60,24 @@ def load_json(path: Path) -> dict:
         return json.load(f)
 
 
+def load_text_embedding_payload(path: Path) -> dict:
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Expected text embedding payload dict in {path}, got {type(payload).__name__}"
+        )
+
+    embeddings = payload.get("embeddings")
+    if not torch.is_tensor(embeddings):
+        raise ValueError(f"Missing tensor field 'embeddings' in {path}")
+
+    texts = payload.get("texts")
+    if not isinstance(texts, list):
+        raise ValueError(f"Missing list field 'texts' in {path}")
+
+    return payload
+
+
 def resolve_motion_file(yaml_path: Path, motion_entry: dict) -> Path:
     motion_file = Path(str(motion_entry["file"]))
     if motion_file.is_absolute():
@@ -316,6 +334,16 @@ def main():
             "Disconnected labeled regions become separate packaged motions."
         ),
     )
+    parser.add_argument(
+        "--text-embeddings-pt",
+        type=Path,
+        default=None,
+        help=(
+            "Optional precomputed text embedding lookup table produced by "
+            "precompute_clip_text_embeddings.py. When provided, the packaged "
+            "MotionLib will include the embedding table."
+        ),
+    )
     args = parser.parse_args()
 
     motion_yaml = load_yaml(args.motion_yaml)
@@ -464,6 +492,17 @@ def main():
         motion_lib.motion_text_data = build_aligned_motion_text_data(
             filtered_config["motions"], filtered_sidecar
         )
+        if args.text_embeddings_pt is not None:
+            text_embedding_payload = load_text_embedding_payload(args.text_embeddings_pt)
+            motion_lib.text_embedding_table = text_embedding_payload["embeddings"].to(
+                device=args.device
+            )
+            motion_lib.text_embedding_texts = tuple(text_embedding_payload["texts"])
+            metadata = text_embedding_payload.get("metadata", {})
+            model_name = metadata.get("model_name")
+            motion_lib.text_embedding_model_name = (
+                str(model_name) if model_name is not None else None
+            )
         motion_lib.save_to_file(args.output_file)
 
     print(f"Loaded {len(motions)} YAML motions from {args.motion_yaml}")
@@ -480,6 +519,8 @@ def main():
     print(f"Packaged {packaged_motion_count} motions into {args.output_file}")
     print(f"Included text metadata for {len(filtered_sidecar)} motions")
     print(f"Included {count_text_segments(filtered_sidecar)} text segments/prompts")
+    if args.text_embeddings_pt is not None:
+        print(f"Merged text embedding table from {args.text_embeddings_pt}")
 
 
 if __name__ == "__main__":

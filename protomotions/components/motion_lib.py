@@ -125,6 +125,9 @@ class MotionLib:
 
     motion_files: Tuple[str]
     motion_text_data: Optional[Tuple[Optional[dict], ...]] = None
+    text_embedding_table: Optional[torch.Tensor] = None
+    text_embedding_texts: Optional[Tuple[str, ...]] = None
+    text_embedding_model_name: Optional[str] = None
 
     # Optional fields
     lrs: Optional[torch.Tensor] = (
@@ -197,6 +200,9 @@ class MotionLib:
         self.contacts = torch.empty(0, 0, device=self.device)
         self.motion_files = ()
         self.motion_text_data = None
+        self.text_embedding_table = None
+        self.text_embedding_texts = None
+        self.text_embedding_model_name = None
         self.lrs = None
 
     @classmethod
@@ -713,6 +719,57 @@ class MotionLib:
             str(segment["text"]) if segment is not None and segment.get("text") else None
             for segment in preferred_segments
         )
+
+    def has_text_embeddings(self) -> bool:
+        return (
+            self.text_embedding_table is not None
+            and self.text_embedding_table.numel() > 0
+        )
+
+    def get_active_motion_text_embedding_indices(
+        self, motion_ids, motion_times
+    ) -> torch.Tensor:
+        preferred_segments = self.get_preferred_motion_text_segments(
+            motion_ids, motion_times
+        )
+        indices = []
+        for segment in preferred_segments:
+            if segment is None:
+                indices.append(-1)
+                continue
+
+            embedding_idx = segment.get("text_embedding_idx")
+            if embedding_idx is None:
+                indices.append(-1)
+                continue
+
+            indices.append(int(embedding_idx))
+
+        return torch.tensor(indices, dtype=torch.long, device=self.device)
+
+    def get_active_motion_text_embeddings(
+        self, motion_ids, motion_times
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if not self.has_text_embeddings():
+            raise ValueError("MotionLib does not contain packaged text embeddings.")
+
+        embedding_indices = self.get_active_motion_text_embedding_indices(
+            motion_ids, motion_times
+        )
+        valid_mask = embedding_indices >= 0
+        embedding_dim = int(self.text_embedding_table.shape[1])
+        gathered = torch.zeros(
+            embedding_indices.shape[0],
+            embedding_dim,
+            dtype=self.text_embedding_table.dtype,
+            device=self.device,
+        )
+        if valid_mask.any():
+            gathered[valid_mask] = self.text_embedding_table[
+                embedding_indices[valid_mask]
+            ]
+
+        return gathered, valid_mask
 
     def save_to_file(self, file_path):
         """
