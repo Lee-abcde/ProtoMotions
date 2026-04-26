@@ -227,7 +227,21 @@ class MimicControl(ControlComponent):
         
         hinge_axes_map = self.env.robot_config.kinematic_info.hinge_axes_map
         ref_lr = dof_to_local(ref_state.dof_pos, hinge_axes_map, True)
-        
+        if self.env.motion_lib.has_text_embeddings():
+            future_text_times = motion_times + dt
+            motion_lengths = self.env.motion_lib.get_motion_length(motion_ids)
+            future_text_times = torch.minimum(future_text_times, motion_lengths)
+            text_embedding, text_embedding_valid_mask = (
+                self.env.motion_lib.get_active_motion_text_embeddings(
+                    motion_ids, future_text_times
+                )
+            )
+        else:
+            text_embedding = torch.empty(num_envs, 0, device=device)
+            text_embedding_valid_mask = torch.zeros(
+                num_envs, dtype=torch.bool, device=device
+            )
+
         # Populate the mimic view
         ctx.mimic = MimicContext(
             ref_state=ref_state,
@@ -244,6 +258,8 @@ class MimicControl(ControlComponent):
             historical_dof_vel=historical_dof_vel,
             anchor_idx=self.env.robot_config.anchor_body_index,
             ref_lr=ref_lr,
+            text_embedding=text_embedding,
+            text_embedding_valid_mask=text_embedding_valid_mask,
         )
     
     def create_visualization_markers(self, headless: bool) -> Dict[str, VisualizationMarkerConfig]:

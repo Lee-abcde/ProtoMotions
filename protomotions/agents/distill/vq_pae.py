@@ -234,6 +234,21 @@ class DistillVQPAEModel(BaseModel):
                 != self._get_posterior_current_obs_key()
             )
         )
+
+        if self.config.use_text_conditioning:
+            if not self.config.text_obs_key or self.config.text_obs_dim <= 0:
+                raise ValueError(
+                    "Text conditioning requires text_obs_key and positive text_obs_dim."
+                )
+            self.text_projector = nn.Linear(
+                self.config.text_obs_dim, self.manifold_channels
+            )
+            self.text_gate = nn.Linear(
+                self.config.text_obs_dim, self.manifold_channels
+            )
+        else:
+            self.text_projector = None
+            self.text_gate = None
     def _reshape_history(
         self, tensordict: TensorDict, obs_key: str | None = None
     ) -> torch.Tensor:
@@ -314,6 +329,20 @@ class DistillVQPAEModel(BaseModel):
         )
         current = self.current_projector(tensordict[self.config.current_obs_key]).unsqueeze(1)
         return torch.cat([history, current], dim=1)
+
+    def _apply_text_conditioning(
+        self, latent: torch.Tensor, tensordict: TensorDict
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if not self.config.use_text_conditioning:
+            return latent, None
+
+        text_obs = tensordict[self.config.text_obs_key]
+        text_delta = self.text_projector(text_obs)
+        text_gate = torch.sigmoid(self.text_gate(text_obs))
+        text_residual = (
+            self.config.text_conditioning_scale * text_gate * text_delta
+        )
+        return latent + text_residual, text_residual
 
     def _build_posterior_sequence(self, tensordict: TensorDict) -> torch.Tensor:
         posterior_history_key = self._get_posterior_historical_obs_key()
@@ -568,21 +597,30 @@ class DistillVQPAEModel(BaseModel):
             update_codebook=False,
         )
 
-        actor_latent = prior["next_step"]
-        privileged_latent = posterior["next_step"]
+        raw_prior_latent = prior["next_step"]
+        posterior_latent = posterior["next_step"]
+        actor_latent = raw_prior_latent
+        privileged_latent = posterior_latent
         if speed_scale is not None:
-            actor_latent = self._decode_next_step(
+            raw_prior_latent = self._decode_next_step(
                 branch=prior,
                 args=self.prior_args,
                 speed_scale=speed_scale,
             )
-            privileged_latent = self._decode_next_step(
+            posterior_latent = self._decode_next_step(
                 branch=posterior,
                 args=self.posterior_args,
                 speed_scale=speed_scale,
             )
+            actor_latent = raw_prior_latent
+            privileged_latent = posterior_latent
+        text_residual = None
         if external_actor_latent is not None:
             actor_latent = external_actor_latent
+        else:
+            actor_latent, text_residual = self._apply_text_conditioning(
+                actor_latent, tensordict
+            )
         if external_privileged_latent is not None:
             privileged_latent = external_privileged_latent
 
@@ -599,7 +637,7 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_commitment_loss"] = posterior["commitment_loss"]
         tensordict["vq_pae_prior_commitment_loss"] = prior["commitment_loss"]
         tensordict["vq_pae_prior_alignment_loss"] = F.mse_loss(
-            prior["next_step"], posterior["next_step"].detach(), reduction="none"
+            actor_latent, posterior_latent.detach(), reduction="none"
         ).mean(dim=-1)
         tensordict["vq_pae_phase_alignment_loss"] = F.mse_loss(
             prior["phase"], posterior["phase"].detach(), reduction="none"
@@ -616,6 +654,16 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_actor_latent"] = actor_latent
         tensordict["vq_pae_prior_next_step"] = prior["next_step"]
         tensordict["vq_pae_privileged_latent"] = privileged_latent
+        tensordict["vq_pae_raw_prior_latent_norm"] = raw_prior_latent.norm(dim=-1)
+        tensordict["vq_pae_actor_latent_norm"] = actor_latent.norm(dim=-1)
+        tensordict["vq_pae_posterior_latent_norm"] = posterior_latent.norm(dim=-1)
+        if text_residual is not None:
+            text_delta_norm = text_residual.norm(dim=-1)
+            raw_prior_norm = raw_prior_latent.norm(dim=-1)
+            tensordict["vq_pae_text_delta_norm"] = text_delta_norm
+            tensordict["vq_pae_text_delta_ratio"] = text_delta_norm / (
+                raw_prior_norm + 1e-8
+            )
         if self.reconstruction_head is not None:
             reconstructed_window = self.reconstruction_head(posterior["manifold"]).transpose(1, 2)
             history_steps = self.config.num_historical_conditioned_steps
@@ -695,7 +743,23 @@ class DistillVQPAEModel(BaseModel):
             "distill/vq_phase_alignment_loss": phase_alignment.detach(),
             "distill/vq_frequency_alignment_loss": frequency_alignment.detach(),
             "distill/vq_perplexity": tensordict["vq_pae_perplexity"].mean().detach(),
+            "distill/vq_raw_prior_latent_norm": (
+                tensordict["vq_pae_raw_prior_latent_norm"].mean().detach()
+            ),
+            "distill/vq_actor_latent_norm": (
+                tensordict["vq_pae_actor_latent_norm"].mean().detach()
+            ),
+            "distill/vq_posterior_latent_norm": (
+                tensordict["vq_pae_posterior_latent_norm"].mean().detach()
+            ),
         }
+        if "vq_pae_text_delta_norm" in tensordict.keys():
+            log_dict["distill/vq_text_delta_norm"] = (
+                tensordict["vq_pae_text_delta_norm"].mean().detach()
+            )
+            log_dict["distill/vq_text_delta_ratio"] = (
+                tensordict["vq_pae_text_delta_ratio"].mean().detach()
+            )
         if losses.reconstruction_weight > 0.0:
             log_dict["distill/vq_reconstruction_loss"] = reconstruction_raw.detach()
             log_dict["distill/vq_reconstruction_loss_weighted"] = (

@@ -48,6 +48,7 @@ from protomotions.envs.obs.vq_pae_bm import (
     make_reduced_target_pose_component,
     build_future_relative_anchor_rot_obs,
     build_historical_reduced_core_obs,
+    passthrough_text_embedding,
 )
 
 
@@ -56,6 +57,7 @@ TOTAL_STORED_HISTORICAL_STEPS = 5  # How many historical steps we save
 NUM_HISTORICAL_CONDITIONED_STEPS = 5  # From those, how many do we sub-sample
 BM_TEACHER_FUTURE_STEPS = [1, 2, 4, 8]
 CONTROL_FUTURE_STEPS = max(NUM_FUTURE_STEPS, max(BM_TEACHER_FUTURE_STEPS))
+TEXT_EMBEDDING_DIM = 512
 
 def additional_experiment_arguments(parser: argparse.ArgumentParser):
     """Add MaskedMimic-specific CLI arguments."""
@@ -169,6 +171,12 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 "historical_anchor_rot": EnvContext.noisy_historical.anchor_rot,
             },
             static_params={"history_steps": total_stored_historical_steps},
+        ),
+        "text_embedding_obs": MdpComponent(
+            compute_func=passthrough_text_embedding,
+            dynamic_vars={
+                "text_embedding": EnvContext.mimic.text_embedding,
+            },
         ),
         "clean_historical_pose_obs": MdpComponent(
             compute_func=build_historical_reduced_core_obs,
@@ -322,12 +330,14 @@ def agent_config(
             "historical_pose_obs",
             "encoder_future_target_obs",
             "trunk_target_relative_rot",
+            "text_embedding_obs",
         ],
         out_keys=[
             "max_coords_obs_norm",
             "historical_pose_obs_norm",
             "vq_pae_target_poses_norm",
             "trunk_target_relative_rot_norm",
+            "text_embedding_obs_norm",
         ],
         models=[
             ObsProcessorConfig(
@@ -356,6 +366,12 @@ def agent_config(
                 out_keys=["trunk_target_relative_rot_norm"],
                 normalize_obs=True,
                 norm_clamp_value=5,
+                module_operations=[ModuleOperationForwardConfig()],
+            ),
+            ObsProcessorConfig(
+                in_keys=["text_embedding_obs"],
+                out_keys=["text_embedding_obs_norm"],
+                normalize_obs=False,
                 module_operations=[ModuleOperationForwardConfig()],
             ),
         ],
@@ -402,6 +418,7 @@ def agent_config(
         prior_in_keys=[
             "max_coords_obs_norm",
             "historical_pose_obs_norm",
+            "text_embedding_obs_norm",
         ],
         posterior_in_keys=[
             "max_coords_obs_norm",
@@ -410,6 +427,9 @@ def agent_config(
         ],
         reconstruction_current_obs_key="clean_encoder_current_obs",
         reconstruction_historical_obs_key="clean_historical_pose_obs",
+        use_text_conditioning=True,
+        text_obs_key="text_embedding_obs_norm",
+        text_obs_dim=TEXT_EMBEDDING_DIM,
         preprocessor=preprocessor_config,
         trunk=trunk_config,
         num_future_steps=NUM_FUTURE_STEPS,

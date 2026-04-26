@@ -201,6 +201,11 @@ def build_historical_reduced_core_obs(
         dim=-1,
     )
 
+
+def passthrough_text_embedding(text_embedding: torch.Tensor) -> torch.Tensor:
+    return text_embedding
+
+
 def make_reduced_target_pose_component(
     env_context,
     mdp_component_cls,

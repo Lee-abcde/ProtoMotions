@@ -301,6 +301,8 @@ class MimicContext:
     future_anchor_rot: Tensor = FieldPath()
     future_anchor_vel: Tensor = FieldPath()
     future_anchor_ang_vel: Tensor = FieldPath()
+    text_embedding: Tensor = FieldPath()
+    text_embedding_valid_mask: Tensor = FieldPath()
 
     def __init__(
         self,
@@ -318,6 +320,8 @@ class MimicContext:
         historical_dof_vel: Tensor,
         anchor_idx: int,
         ref_lr: Tensor,
+        text_embedding: Tensor,
+        text_embedding_valid_mask: Tensor,
     ):
         """Initialize MimicContext with precomputed derived values.
 
@@ -336,6 +340,8 @@ class MimicContext:
             historical_dof_vel: Historical DOF velocities [num_envs, history_steps, num_dofs].
             anchor_idx: Index of anchor body for computing anchor-relative values.
             ref_lr: Reference DOF in local rotation format for DOF tracking rewards.
+            text_embedding: Active text embedding for each env [num_envs, text_dim].
+            text_embedding_valid_mask: Whether each env has a valid active text prompt [num_envs].
         """
         # Store direct values
         self.ref_state = ref_state
@@ -367,6 +373,8 @@ class MimicContext:
         self.future_anchor_rot = future_rot[:, :, anchor_idx, :]
         self.future_anchor_vel = future_vel[:, :, anchor_idx, :]
         self.future_anchor_ang_vel = future_ang_vel[:, :, anchor_idx, :]
+        self.text_embedding = text_embedding
+        self.text_embedding_valid_mask = text_embedding_valid_mask
 
 
 class MaskedMimicContext:
