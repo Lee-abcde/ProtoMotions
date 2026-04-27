@@ -203,6 +203,7 @@ class MotionLib:
         self.text_embedding_table = None
         self.text_embedding_texts = None
         self.text_embedding_model_name = None
+        self._text_embedding_lookup = None
         self.lrs = None
 
     @classmethod
@@ -535,6 +536,7 @@ class MotionLib:
 
         self.motion_files = tuple(motion_files)  # for saving to packed pt file
         self.motion_text_data = None
+        self._text_embedding_lookup = None
 
         num_motions = len(motions)
         total_len = sum(motion_lengths)
@@ -586,6 +588,96 @@ class MotionLib:
         return self.motion_text_data is not None and any(
             entry is not None for entry in self.motion_text_data
         )
+
+    def _build_text_embedding_lookup(self) -> None:
+        if self.motion_text_data is None:
+            self._text_embedding_lookup = None
+            return
+
+        lookup = []
+        for meta in self.motion_text_data:
+            if meta is None:
+                lookup.append(None)
+                continue
+
+            segments = meta.get("segments")
+            if not isinstance(segments, list):
+                segments = [meta]
+
+            normalized_segments = []
+            boundaries = set()
+            for segment in segments:
+                bounds = self._segment_time_bounds(segment)
+                if bounds is None:
+                    continue
+                start_t, end_t = bounds
+                if end_t <= start_t:
+                    continue
+
+                normalized_segments.append((segment, start_t, end_t))
+                boundaries.add(start_t)
+                boundaries.add(end_t)
+
+            if len(boundaries) < 2:
+                lookup.append(None)
+                continue
+
+            sorted_boundaries = sorted(boundaries)
+            interval_starts = []
+            interval_ends = []
+            interval_indices = []
+
+            for start_t, end_t in zip(sorted_boundaries[:-1], sorted_boundaries[1:]):
+                if end_t <= start_t:
+                    continue
+
+                midpoint = start_t + 0.5 * (end_t - start_t)
+                active_segments = [
+                    segment
+                    for segment, segment_start, segment_end in normalized_segments
+                    if segment_start <= midpoint < segment_end
+                ]
+                preferred_segment = self._select_preferred_text_segment(active_segments)
+                if preferred_segment is None:
+                    continue
+
+                embedding_idx = preferred_segment.get("text_embedding_idx")
+                if embedding_idx is None:
+                    embedding_idx = -1
+                else:
+                    embedding_idx = int(embedding_idx)
+
+                if (
+                    interval_indices
+                    and interval_indices[-1] == embedding_idx
+                    and abs(interval_ends[-1] - start_t) <= 1e-8
+                ):
+                    interval_ends[-1] = end_t
+                    continue
+
+                interval_starts.append(start_t)
+                interval_ends.append(end_t)
+                interval_indices.append(embedding_idx)
+
+            if not interval_starts:
+                lookup.append(None)
+                continue
+
+            lookup.append(
+                {
+                    "starts": torch.tensor(
+                        interval_starts, dtype=torch.float32, device=self.device
+                    ),
+                    "ends": torch.tensor(
+                        interval_ends, dtype=torch.float32, device=self.device
+                    ),
+                    "embedding_indices": torch.tensor(
+                        interval_indices, dtype=torch.long, device=self.device
+                    ),
+                }
+            )
+
+        self._text_embedding_lookup = tuple(lookup)
 
     def get_motion_text_data(
         self, motion_ids: Optional[Sequence[int]] = None
@@ -729,24 +821,61 @@ class MotionLib:
     def get_active_motion_text_embedding_indices(
         self, motion_ids, motion_times
     ) -> torch.Tensor:
-        preferred_segments = self.get_preferred_motion_text_segments(
-            motion_ids, motion_times
-        )
-        indices = []
-        for segment in preferred_segments:
-            if segment is None:
-                indices.append(-1)
+        if self._text_embedding_lookup is None and self.motion_text_data is not None:
+            self._build_text_embedding_lookup()
+
+        if torch.is_tensor(motion_ids):
+            motion_ids_tensor = motion_ids.to(device=self.device, dtype=torch.long)
+        else:
+            motion_ids_tensor = torch.tensor(
+                motion_ids, dtype=torch.long, device=self.device
+            )
+
+        if torch.is_tensor(motion_times):
+            motion_times_tensor = motion_times.to(device=self.device, dtype=torch.float32)
+        else:
+            motion_times_tensor = torch.tensor(
+                motion_times, dtype=torch.float32, device=self.device
+            )
+
+        indices = torch.full_like(motion_ids_tensor, fill_value=-1, dtype=torch.long)
+        if self._text_embedding_lookup is None:
+            return indices
+
+        unique_motion_ids = torch.unique(motion_ids_tensor)
+        for motion_id_tensor in unique_motion_ids:
+            motion_id = int(motion_id_tensor.item())
+            if motion_id < 0 or motion_id >= len(self._text_embedding_lookup):
                 continue
 
-            embedding_idx = segment.get("text_embedding_idx")
-            if embedding_idx is None:
-                indices.append(-1)
+            lookup = self._text_embedding_lookup[motion_id]
+            if lookup is None:
                 continue
 
-            indices.append(int(embedding_idx))
+            motion_mask = motion_ids_tensor == motion_id_tensor
+            query_times = motion_times_tensor[motion_mask]
+            interval_positions = (
+                torch.bucketize(query_times, lookup["starts"], right=True) - 1
+            )
+            valid_positions = interval_positions >= 0
+            if not valid_positions.any():
+                continue
 
-        return torch.tensor(indices, dtype=torch.long, device=self.device)
+            valid_lookup_positions = interval_positions[valid_positions]
+            end_times = lookup["ends"][valid_lookup_positions]
+            valid_positions_in_bound = query_times[valid_positions] < end_times
+            valid_lookup_positions = valid_lookup_positions[valid_positions_in_bound]
+            if not valid_positions_in_bound.any():
+                continue
+            motion_indices = motion_mask.nonzero(as_tuple=False).squeeze(-1)
+            valid_motion_indices = motion_indices[valid_positions]
+            valid_motion_indices = valid_motion_indices[valid_positions_in_bound]
 
+            indices[valid_motion_indices] = lookup["embedding_indices"][
+                valid_lookup_positions
+            ]
+
+        return indices
     def get_active_motion_text_embeddings(
         self, motion_ids, motion_times
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -813,6 +942,9 @@ class MotionLib:
         for field in loaded_data:
             assert loaded_data[field] is not None, f"Field {field} is None"
             setattr(self, field, loaded_data[field])
+        self._text_embedding_lookup = None
+        if self.motion_text_data is not None:
+            self._build_text_embedding_lookup()
 
         if (
             self.contacts is not None
