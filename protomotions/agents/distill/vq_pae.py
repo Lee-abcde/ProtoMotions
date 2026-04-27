@@ -614,15 +614,20 @@ class DistillVQPAEModel(BaseModel):
             )
             actor_latent = raw_prior_latent
             privileged_latent = posterior_latent
-        text_residual = None
+        actor_text_residual = None
+        privileged_text_residual = None
         if external_actor_latent is not None:
             actor_latent = external_actor_latent
         else:
-            actor_latent, text_residual = self._apply_text_conditioning(
+            actor_latent, actor_text_residual = self._apply_text_conditioning(
                 actor_latent, tensordict
             )
         if external_privileged_latent is not None:
             privileged_latent = external_privileged_latent
+        else:
+            privileged_latent, privileged_text_residual = self._apply_text_conditioning(
+                privileged_latent, tensordict
+            )
 
         # Use one-step-ahead manifold embedding for action conditioning.
         tensordict["vae_latent"] = actor_latent
@@ -637,7 +642,7 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_commitment_loss"] = posterior["commitment_loss"]
         tensordict["vq_pae_prior_commitment_loss"] = prior["commitment_loss"]
         tensordict["vq_pae_prior_alignment_loss"] = F.mse_loss(
-            actor_latent, posterior_latent.detach(), reduction="none"
+            actor_latent, privileged_latent.detach(), reduction="none"
         ).mean(dim=-1)
         tensordict["vq_pae_phase_alignment_loss"] = F.mse_loss(
             prior["phase"], posterior["phase"].detach(), reduction="none"
@@ -663,12 +668,17 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_raw_prior_latent_norm"] = raw_prior_latent.norm(dim=-1)
         tensordict["vq_pae_actor_latent_norm"] = actor_latent.norm(dim=-1)
         tensordict["vq_pae_posterior_latent_norm"] = posterior_latent.norm(dim=-1)
-        if text_residual is not None:
-            text_delta_norm = text_residual.norm(dim=-1)
+        tensordict["vq_pae_privileged_latent_norm"] = privileged_latent.norm(dim=-1)
+        if actor_text_residual is not None:
+            text_delta_norm = actor_text_residual.norm(dim=-1)
             raw_prior_norm = raw_prior_latent.norm(dim=-1)
             tensordict["vq_pae_text_delta_norm"] = text_delta_norm
             tensordict["vq_pae_text_delta_ratio"] = text_delta_norm / (
                 raw_prior_norm + 1e-8
+            )
+        if privileged_text_residual is not None:
+            tensordict["vq_pae_privileged_text_delta_norm"] = (
+                privileged_text_residual.norm(dim=-1)
             )
         if self.reconstruction_head is not None:
             reconstructed_window = self.reconstruction_head(posterior["manifold"]).transpose(1, 2)
@@ -758,6 +768,9 @@ class DistillVQPAEModel(BaseModel):
             "distill/vq_posterior_latent_norm": (
                 tensordict["vq_pae_posterior_latent_norm"].mean().detach()
             ),
+            "distill/vq_privileged_latent_norm": (
+                tensordict["vq_pae_privileged_latent_norm"].mean().detach()
+            ),
         }
         if "vq_pae_text_delta_norm" in tensordict.keys():
             log_dict["distill/vq_text_delta_norm"] = (
@@ -765,6 +778,10 @@ class DistillVQPAEModel(BaseModel):
             )
             log_dict["distill/vq_text_delta_ratio"] = (
                 tensordict["vq_pae_text_delta_ratio"].mean().detach()
+            )
+        if "vq_pae_privileged_text_delta_norm" in tensordict.keys():
+            log_dict["distill/vq_privileged_text_delta_norm"] = (
+                tensordict["vq_pae_privileged_text_delta_norm"].mean().detach()
             )
         if losses.reconstruction_weight > 0.0:
             log_dict["distill/vq_reconstruction_loss"] = reconstruction_raw.detach()
