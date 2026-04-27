@@ -204,6 +204,8 @@ class MotionLib:
         self.text_embedding_texts = None
         self.text_embedding_model_name = None
         self._text_embedding_lookup = None
+        self._override_text_embedding = None
+        self._override_text_label = None
         self.lrs = None
 
     @classmethod
@@ -818,6 +820,98 @@ class MotionLib:
             and self.text_embedding_table.numel() > 0
         )
 
+    def clear_text_embedding_override(self) -> None:
+        self._override_text_embedding = None
+        self._override_text_label = None
+
+    def get_available_text_embeddings(self) -> Tuple[str, ...]:
+        if self.text_embedding_texts is None:
+            return ()
+        return tuple(str(text) for text in self.text_embedding_texts)
+
+    def search_text_embeddings(
+        self, query: str, max_results: int = 10
+    ) -> Tuple[Tuple[int, str], ...]:
+        available_texts = self.get_available_text_embeddings()
+        normalized_query = query.strip().lower()
+        if not normalized_query:
+            return tuple()
+
+        matches = [
+            (idx, text)
+            for idx, text in enumerate(available_texts)
+            if normalized_query in text.lower()
+        ]
+        return tuple(matches[:max_results])
+
+    def set_text_embedding_override_by_index(self, embedding_idx: int) -> None:
+        if not self.has_text_embeddings():
+            raise ValueError("MotionLib does not contain packaged text embeddings.")
+
+        if embedding_idx < 0 or embedding_idx >= int(self.text_embedding_table.shape[0]):
+            raise IndexError(
+                f"text embedding index {embedding_idx} out of range "
+                f"[0, {int(self.text_embedding_table.shape[0]) - 1}]"
+            )
+
+        self._override_text_embedding = self.text_embedding_table[embedding_idx].clone()
+        if (
+            self.text_embedding_texts is not None
+            and embedding_idx < len(self.text_embedding_texts)
+        ):
+            self._override_text_label = str(self.text_embedding_texts[embedding_idx])
+        else:
+            self._override_text_label = f"<embedding:{embedding_idx}>"
+
+    def set_text_embedding_override_by_text(self, text: str) -> None:
+        available_texts = self.get_available_text_embeddings()
+        if not available_texts:
+            raise ValueError("MotionLib does not contain packaged text embedding texts.")
+
+        normalized_text = text.strip()
+        exact_match_idx = None
+        for idx, candidate in enumerate(available_texts):
+            if candidate == normalized_text:
+                exact_match_idx = idx
+                break
+
+        if exact_match_idx is None:
+            lower_text = normalized_text.lower()
+            for idx, candidate in enumerate(available_texts):
+                if candidate.lower() == lower_text:
+                    exact_match_idx = idx
+                    break
+
+        if exact_match_idx is None:
+            suggestions = self.search_text_embeddings(normalized_text)
+            suggestion_text = (
+                " Suggestions: "
+                + ", ".join(f"[{idx}] {candidate}" for idx, candidate in suggestions)
+                if suggestions
+                else ""
+            )
+            raise ValueError(
+                f"Text prompt '{text}' not found in packaged text embeddings. "
+                "Use one of the packaged prompts or pass --text-embedding-index."
+                + suggestion_text
+            )
+
+        self.set_text_embedding_override_by_index(exact_match_idx)
+
+    def get_text_embedding_override(
+        self, num_envs: int
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        if self._override_text_embedding is None:
+            return None, None
+
+        embedding = self._override_text_embedding.to(device=self.device).unsqueeze(0)
+        embedding = embedding.expand(num_envs, -1).clone()
+        valid_mask = torch.ones(num_envs, dtype=torch.bool, device=self.device)
+        return embedding, valid_mask
+
+    def get_text_embedding_override_label(self) -> Optional[str]:
+        return self._override_text_label
+
     def get_active_motion_text_embedding_indices(
         self, motion_ids, motion_times
     ) -> torch.Tensor:
@@ -943,6 +1037,8 @@ class MotionLib:
             assert loaded_data[field] is not None, f"Field {field} is None"
             setattr(self, field, loaded_data[field])
         self._text_embedding_lookup = None
+        self._override_text_embedding = None
+        self._override_text_label = None
         if self.motion_text_data is not None:
             self._build_text_embedding_lookup()
 

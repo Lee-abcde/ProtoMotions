@@ -349,6 +349,7 @@ class IsaacLabSimulator(Simulator):
             "8": "NUMPAD_8",
             "9": "NUMPAD_9",
             "0": "NUMPAD_0",
+            "F8": "F8",
         }
 
         # Register custom key handlers

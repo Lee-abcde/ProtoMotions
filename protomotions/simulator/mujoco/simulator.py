@@ -61,6 +61,7 @@ class MujocoSimulator(Simulator):
     """
 
     config: MujocoSimulatorConfig
+    _MJKEY_F8 = 297
 
     def __init__(
         self,
@@ -69,6 +70,7 @@ class MujocoSimulator(Simulator):
         terrain,
         device: torch.device,
         scene_lib,
+        custom_key_handlers: Optional[Dict[str, callable]] = None,
     ) -> None:
         """Initialize MuJoCo simulator shell."""
         assert device.type == "cpu", "MuJoCo simulator only supports CPU device"
@@ -88,6 +90,7 @@ class MujocoSimulator(Simulator):
         self.data: Optional[mujoco.MjData] = None
         self.viewer = None
         self._viewer_initialized = False
+        self._custom_key_handlers = custom_key_handlers or {}
 
         # Cached control parameters
         self._kp = None  # [num_dofs] stiffness in common DOF order
@@ -1056,6 +1059,11 @@ class MujocoSimulator(Simulator):
             self._toggle_video_record()
         elif keycode == ord("M") or keycode == ord("m"):
             self._toggle_markers()
+        elif keycode == self._MJKEY_F8:
+            handler = self._custom_key_handlers.get("F8")
+            if handler is not None:
+                print("[mujoco-key-debug] invoking custom handler for key 'F8'")
+                handler()
 
     def _write_viewport_to_file(self, file_name: str) -> None:
         """Render current view to file."""

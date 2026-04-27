@@ -227,7 +227,13 @@ class MimicControl(ControlComponent):
         
         hinge_axes_map = self.env.robot_config.kinematic_info.hinge_axes_map
         ref_lr = dof_to_local(ref_state.dof_pos, hinge_axes_map, True)
-        if self.env.motion_lib.has_text_embeddings():
+        override_text_embedding, override_valid_mask = (
+            self.env.motion_lib.get_text_embedding_override(num_envs)
+        )
+        if override_text_embedding is not None:
+            text_embedding = override_text_embedding
+            text_embedding_valid_mask = override_valid_mask
+        elif self.env.motion_lib.has_text_embeddings():
             future_text_times = motion_times + dt
             motion_lengths = self.env.motion_lib.get_motion_length(motion_ids)
             future_text_times = torch.minimum(future_text_times, motion_lengths)

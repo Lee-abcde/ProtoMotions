@@ -339,6 +339,19 @@ def main():
         app_launcher = AppLauncher(app_launcher_flags)
         simulator_extra_params["simulation_app"] = app_launcher.app
 
+    runtime_hooks = {}
+    custom_key_handler_targets = {"F8": None}
+
+    def _edit_text_prompt_handler() -> None:
+        target = custom_key_handler_targets["F8"]
+        if target is None:
+            log.warning("Text prompt editor requested before evaluator was initialized.")
+            return
+        target()
+
+    runtime_hooks["F8"] = _edit_text_prompt_handler
+    simulator_extra_params["custom_key_handlers"] = runtime_hooks
+
     # Convert friction for simulator compatibility
     from protomotions.simulator.base_simulator.utils import (
         convert_friction_for_simulator,
@@ -410,6 +423,12 @@ def main():
     if hasattr(agent, "evaluator") and agent.evaluator is not None:
         setattr(agent.evaluator, "vq_speed_scale", args.vq_speed_scale)
         setattr(agent.evaluator, "vq_latent_loop_frames", args.vq_latent_loop_frames)
+        if hasattr(agent.evaluator, "interactive_edit_text_prompt"):
+            custom_key_handler_targets["F8"] = (
+                agent.evaluator.interactive_edit_text_prompt
+            )
+        if not args.headless and custom_key_handler_targets["F8"] is not None:
+            log.info("Live text prompt editor available on key 'F8'.")
 
     agent.setup()
     agent.load(args.checkpoint, load_env=False)

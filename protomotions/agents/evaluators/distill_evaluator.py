@@ -2,6 +2,7 @@ import torch
 from torch import Tensor
 from typing import Dict, Optional, Tuple, Any
 import math
+import logging
 
 from protomotions.agents.evaluators.mimic_evaluator import (
     MimicEvaluator,
@@ -11,6 +12,9 @@ from protomotions.agents.evaluators.metrics import MotionMetrics
 from protomotions.agents.evaluators.config import DistillEvaluatorConfig
 from protomotions.agents.distill.model import DistillModel
 from protomotions.agents.distill.vq_pae import DistillVQPAEModel
+
+
+log = logging.getLogger(__name__)
 
 
 class DistillEvaluator(MimicEvaluator):
@@ -71,6 +75,53 @@ class DistillEvaluator(MimicEvaluator):
             self._vq_latent_loop_phase + float(speed_scale),
             float(num_frames),
         )
+
+    def interactive_edit_text_prompt(self) -> None:
+        """Pause interactive inference and switch the live text-conditioning prompt."""
+        motion_lib = self.motion_lib
+        available_count = len(motion_lib.get_available_text_embeddings())
+        current_label = motion_lib.get_text_embedding_override_label()
+        prompt_state = {"text_prompt": current_label or ""}
+
+        print("\n[text-debug] Entering live prompt editor.")
+        print(
+            "[text-debug] In ipdb/pdb set prompt_state['text_prompt'] to a packaged prompt, then continue."
+        )
+        print(
+            "[text-debug] Example: prompt_state['text_prompt'] = 'walk'"
+        )
+        print(
+            "[text-debug] Use motion_lib.search_text_embeddings('walk') to search packaged prompts."
+        )
+        print(
+            "[text-debug] Set prompt_state['text_prompt'] = '' to clear the fixed override."
+        )
+        print(
+            f"[text-debug] current_override={current_label!r} available_packaged_prompts={available_count}"
+        )
+
+        try:
+            import ipdb as debugger
+        except ImportError:
+            import pdb as debugger
+
+        debugger.set_trace()
+
+        requested_prompt = str(prompt_state.get("text_prompt", "")).strip()
+        if not requested_prompt:
+            motion_lib.clear_text_embedding_override()
+            print("[text-debug] Cleared live text override; using motion-timed text.")
+            return
+
+        try:
+            motion_lib.set_text_embedding_override_by_text(requested_prompt)
+            print(
+                "[text-debug] Applied live text override: "
+                f"{motion_lib.get_text_embedding_override_label()!r}"
+            )
+        except Exception as exc:
+            print(f"[text-debug] Failed to apply live text override: {exc}")
+            log.exception("Failed to apply interactive text prompt override")
 
     def _supports_privileged_action(self) -> bool:
         """Check whether the model exposes a privileged action output."""
