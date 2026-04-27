@@ -649,8 +649,14 @@ class DistillVQPAEModel(BaseModel):
             tensordict.batch_size[0]
         )
         tensordict["vq_pae_indices"] = posterior["indices"]
+        tensordict["vq_pae_posterior_indices"] = posterior["indices"]
+        tensordict["vq_pae_prior_indices"] = prior["indices"]
         tensordict["vq_pae_phase"] = posterior["phase"]
         tensordict["vq_pae_frequency"] = posterior["frequency"]
+        tensordict["vq_pae_posterior_phase"] = posterior["phase"]
+        tensordict["vq_pae_posterior_frequency"] = posterior["frequency"]
+        tensordict["vq_pae_prior_phase"] = prior["phase"]
+        tensordict["vq_pae_prior_frequency"] = prior["frequency"]
         tensordict["vq_pae_actor_latent"] = actor_latent
         tensordict["vq_pae_prior_next_step"] = prior["next_step"]
         tensordict["vq_pae_privileged_latent"] = privileged_latent

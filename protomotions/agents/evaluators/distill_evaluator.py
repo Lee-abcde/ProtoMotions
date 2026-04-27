@@ -514,9 +514,27 @@ class DistillEvaluator(MimicEvaluator):
 
                 if "vq_pae_indices" in model_outs:
                     env_idx = 0
-                    manifold_idx = int(model_outs["vq_pae_indices"][env_idx].item())
-                    phase = model_outs.get("vq_pae_phase", None)
-                    frequency = model_outs.get("vq_pae_frequency", None)
+                    indices_key = (
+                        "vq_pae_posterior_indices"
+                        if action_key == "privileged_action"
+                        else "vq_pae_prior_indices"
+                    )
+                    indices = model_outs.get(indices_key, model_outs["vq_pae_indices"])
+                    manifold_idx = int(indices[env_idx].item())
+                    phase_key = (
+                        "vq_pae_posterior_phase"
+                        if action_key == "privileged_action"
+                        else "vq_pae_prior_phase"
+                    )
+                    frequency_key = (
+                        "vq_pae_posterior_frequency"
+                        if action_key == "privileged_action"
+                        else "vq_pae_prior_frequency"
+                    )
+                    phase = model_outs.get(phase_key, model_outs.get("vq_pae_phase", None))
+                    frequency = model_outs.get(
+                        frequency_key, model_outs.get("vq_pae_frequency", None)
+                    )
                     phase_str = (
                         f"{phase[env_idx].detach().cpu().tolist()}"
                         if phase is not None
@@ -530,6 +548,7 @@ class DistillEvaluator(MimicEvaluator):
                     print(
                         "[vq-pae-debug] "
                         f"step={step} env=0 manifold_idx={manifold_idx} "
+                        f"action_key={action_key} "
                         f"phase={phase_str} frequency={frequency_str} speed_scale={speed_scale:.3f}"
                     )
                 actor_latent = model_outs.get(latent_key, None) if latent_key is not None else None
