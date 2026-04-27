@@ -47,6 +47,9 @@ class MimicControlConfig(ControlComponentConfig):
     
     Attributes:
         bootstrap_on_episode_end: If True, don't terminate when motion clip ends.
+        reset_on_motion_end: If True, reset the env when the reference motion ends.
+            Disable for interactive inference when the policy should keep receiving
+            the final reference frame after a clip finishes.
         future_steps: Future reference poses to provide in context. If int N,
             provides N consecutive steps (1 to N). If list, provides specific step
             indices (e.g., [1, 3, 5, 9, 15] for non-uniform sampling).
@@ -54,6 +57,7 @@ class MimicControlConfig(ControlComponentConfig):
     _target_: str = "protomotions.envs.control.mimic_control.MimicControl"
     
     bootstrap_on_episode_end: bool = True
+    reset_on_motion_end: bool = True
     future_steps: Union[int, List[int]] = 1
 
 
@@ -91,10 +95,13 @@ class MimicControl(ControlComponent):
         
         # Check if motion clip has finished (access via env)
         done_clip = self.env.motion_manager.get_done_tracks()
-        reset_buf = done_clip
+        if self.config.reset_on_motion_end:
+            reset_buf = done_clip
+        else:
+            reset_buf = torch.zeros(num_envs, dtype=torch.bool, device=device)
         
         # Only terminate if not bootstrapping
-        if self.config.bootstrap_on_episode_end:
+        if self.config.bootstrap_on_episode_end or not self.config.reset_on_motion_end:
             terminate_buf = torch.zeros(num_envs, dtype=torch.bool, device=device)
         else:
             terminate_buf = done_clip
