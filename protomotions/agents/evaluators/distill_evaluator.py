@@ -466,16 +466,28 @@ class DistillEvaluator(MimicEvaluator):
                 obs, _ = self.env.reset(done_indices)
                 obs = self.agent.add_agent_info_to_obs(obs)
                 obs_td = self.agent.obs_dict_to_tensordict(obs)
-                configured_speed_scale = getattr(self, "vq_speed_scale", 1.0)
-                is_loop_playback_active = self._vq_latent_loop_phase is not None
-                use_scaled_reference_directly = (
-                    (is_vq_pae_model and action_key == "prior_action")
-                    or (is_distill_vae_model and action_key == "privileged_action")
+                configured_motion_speed_scale = getattr(
+                    self, "vq_motion_speed_scale", 1.0
                 )
+                configured_prior_frequency_scale = getattr(
+                    self, "vq_prior_frequency_scale", 1.0
+                )
+                # Decide if record/replay Mode
+                is_loop_playback_active = self._vq_latent_loop_phase is not None
+                is_recording_vq_latent = (
+                    is_vq_pae_model
+                    and action_key == "privileged_action"
+                    and record_frames_nums > 0
+                    and not is_loop_playback_active
+                    and capture_step < record_frames_nums
+                )
+                # Decide whether to speed up the motion
+                should_scale_motion_now = (
+                    is_vq_pae_model
+                    or (is_distill_vae_model and action_key == "privileged_action")
+                ) and not is_recording_vq_latent
                 active_motion_speed_scale = (
-                    configured_speed_scale
-                    if (is_loop_playback_active or use_scaled_reference_directly)
-                    else 1.0
+                    configured_motion_speed_scale if should_scale_motion_now else 1.0
                 )
                 if motion_manager is not None:
                     motion_manager.speed_scale = float(active_motion_speed_scale)
@@ -484,29 +496,27 @@ class DistillEvaluator(MimicEvaluator):
                     and is_loop_playback_active
                     and action_key == "privileged_action"
                 )
-                speed_scale = (
-                    configured_speed_scale
-                    if (is_loop_playback_active or use_scaled_reference_directly)
-                    else 1.0
-                )
                 playback_latent = (
                     self._sample_vq_loop_latent() if use_stored_vq_playback else None
                 )
                 if is_loop_playback_active:
-                    self._advance_vq_loop_phase(configured_speed_scale)
+                    self._advance_vq_loop_phase(configured_motion_speed_scale)
                 if playback_latent is not None and actor_external_key is not None:
                     if action_key == "privileged_action":
                         obs_td[privileged_external_key] = playback_latent
                     else:
                         obs_td[actor_external_key] = playback_latent
+                model_frequency_scale = 1.0
+                if is_vq_pae_model and action_key == "prior_action":
+                    model_frequency_scale = float(configured_prior_frequency_scale)
                 if (
-                    speed_scale != 1.0
+                    model_frequency_scale != 1.0
                     and is_vq_pae_model
-                    and (playback_latent is None or action_key == "prior_action")
+                    and action_key == "prior_action"
                 ):
                     obs_td["vq_speed_scale"] = torch.full(
                         (obs_td.batch_size[0],),
-                        float(speed_scale),
+                        float(model_frequency_scale),
                         device=self.device,
                     )
 
@@ -545,22 +555,29 @@ class DistillEvaluator(MimicEvaluator):
                         if frequency is not None
                         else "N/A"
                     )
+                    next_phase_wrapped_str = "N/A"
+                    if phase is not None and frequency is not None:
+                        dt = float(model_module.config.time_step)
+                        phase_env = phase[env_idx].detach()
+                        frequency_env = frequency[env_idx].detach()
+                        next_phase = (
+                            phase_env
+                            + frequency_env * float(model_frequency_scale) * dt
+                        )
+                        next_phase_wrapped = torch.remainder(next_phase + 0.5, 1.0) - 0.5
+                        next_phase_wrapped_str = f"{next_phase_wrapped.cpu().tolist()}"
                     print(
                         "[vq-pae-debug] "
                         f"step={step} env=0 manifold_idx={manifold_idx} "
                         f"action_key={action_key} "
-                        f"phase={phase_str} frequency={frequency_str} speed_scale={speed_scale:.3f}"
+                        f"phase={phase_str} frequency={frequency_str} "
+                        f"next_phase_wrapped={next_phase_wrapped_str} "
+                        f"prior_frequency_scale={model_frequency_scale:.3f} "
+                        f"motion_speed_scale={active_motion_speed_scale:.3f}"
                     )
                 actor_latent = model_outs.get(latent_key, None) if latent_key is not None else None
-                is_capture_mode = (
-                    is_vq_pae_model
-                    and record_frames_nums > 0
-                    and self._vq_latent_loop_phase is None
-                    and capture_step < record_frames_nums
-                )
                 capture_latent = (
-                    is_capture_mode
-                    and action_key == "privileged_action"
+                    is_recording_vq_latent
                     and actor_latent is not None
                 )
                 if capture_latent:
@@ -596,7 +613,7 @@ class DistillEvaluator(MimicEvaluator):
                         )
                         print(
                             "[vq-latent-loop] capture complete; loop playback enabled "
-                            f"(frames={record_frames_nums}, speed_scale={speed_scale:.3f})"
+                            f"(frames={record_frames_nums}, speed_scale={configured_motion_speed_scale:.3f})"
                         )
                 actions = self._select_actions(model_outs, action_key)
 

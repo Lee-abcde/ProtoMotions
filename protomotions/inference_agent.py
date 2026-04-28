@@ -116,10 +116,19 @@ def create_parser():
         help="Config overrides in format key=value (e.g., env.max_episode_length=5000 simulator.headless=True)",
     )
     parser.add_argument(
-        "--vq-speed-scale",
+        "--vq-motion-speed-scale",
         type=float,
         default=1.0,
-        help="Scale factor applied to VQ-PAE phase advance during interactive inference.",
+        help="Scale only the played/reference motion speed during interactive inference.",
+    )
+    parser.add_argument(
+        "--vq-prior-frequency-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Scale only the VQ-PAE prior predicted frequency during interactive "
+            "inference."
+        ),
     )
     parser.add_argument(
         "--vq-latent-loop-frames",
@@ -421,7 +430,12 @@ def main():
         config=agent_config, env=env, fabric=fabric, **agent_kwargs
     )
     if hasattr(agent, "evaluator") and agent.evaluator is not None:
-        setattr(agent.evaluator, "vq_speed_scale", args.vq_speed_scale)
+        setattr(agent.evaluator, "vq_motion_speed_scale", args.vq_motion_speed_scale)
+        setattr(
+            agent.evaluator,
+            "vq_prior_frequency_scale",
+            args.vq_prior_frequency_scale,
+        )
         setattr(agent.evaluator, "vq_latent_loop_frames", args.vq_latent_loop_frames)
         if hasattr(agent.evaluator, "interactive_edit_text_prompt"):
             custom_key_handler_targets["F8"] = (
