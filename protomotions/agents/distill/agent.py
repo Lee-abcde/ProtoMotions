@@ -300,6 +300,16 @@ class DistillAgent(BaseAgent):
 
         # Behavioral cloning loss
         bc_loss = torch.square(actions - expert_actions).mean()
+        prior_bc_loss = torch.tensor(0.0, device=bc_loss.device)
+        prior_bc_loss_weighted = torch.tensor(0.0, device=bc_loss.device)
+        prior_bc_weight = 0.0
+        losses_cfg = getattr(self.config.model, "losses", None)
+        if "prior_action" in batch_td.keys() and losses_cfg is not None:
+            prior_bc_weight = float(getattr(losses_cfg, "prior_bc_weight", 0.0))
+            prior_bc_loss = torch.square(
+                batch_td["prior_action"] - expert_actions
+            ).mean()
+            prior_bc_loss_weighted = prior_bc_loss * prior_bc_weight
 
         extra_loss, extra_log_dict = self.calculate_extra_loss(batch_dict, actions, batch_td)
 
@@ -323,10 +333,15 @@ class DistillAgent(BaseAgent):
         else:
             vae_kld_loss = 0.0
 
-        loss = bc_loss + extra_loss + vae_kld_loss
+        loss = bc_loss + prior_bc_loss_weighted + extra_loss + vae_kld_loss
 
         log_dict = {
             "distill/bc_loss": bc_loss.detach(),
+            "distill/prior_bc_loss": prior_bc_loss.detach(),
+            "distill/prior_bc_loss_weighted": prior_bc_loss_weighted.detach(),
+            "distill/prior_bc_weight": torch.tensor(
+                prior_bc_weight, device=bc_loss.device, dtype=bc_loss.dtype
+            ),
             "distill/extra_loss": extra_loss.detach(),
             "losses/distill_loss": loss.detach(),
         }

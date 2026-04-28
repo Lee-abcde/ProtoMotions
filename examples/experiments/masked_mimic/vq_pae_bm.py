@@ -430,6 +430,9 @@ def agent_config(
         use_text_conditioning=True,
         text_obs_key="text_embedding_obs_norm",
         text_obs_dim=TEXT_EMBEDDING_DIM,
+        prior_trunk_mask_keys=["trunk_target_relative_rot_norm"],
+        prior_trunk_mask_prob=0.5,
+        prior_trunk_mask_eval=True,
         preprocessor=preprocessor_config,
         trunk=trunk_config,
         num_future_steps=NUM_FUTURE_STEPS,
@@ -461,6 +464,7 @@ def agent_config(
             phase_alignment_weight=0.1,
             frequency_alignment_weight=0.1,
             reconstruction_weight=1.0,
+            prior_bc_weight=0.05,
         ),
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
