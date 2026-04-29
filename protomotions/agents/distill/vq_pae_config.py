@@ -28,6 +28,8 @@ class VQPAELossConfig:
     commitment_weight: float = 1.0
     prior_commitment_weight: float = 0.25
     prior_alignment_weight: float = 1.0
+    decoder_alignment_weight: float = 0.0
+    condition_alignment_weight: float = 0.0
     phase_alignment_weight: float = 0.1
     frequency_alignment_weight: float = 0.1
     reconstruction_weight: float = 0.0
@@ -68,6 +70,11 @@ class DistillVQPAEModelConfig(BaseModelConfig):
     text_obs_key: Optional[str] = None
     text_obs_dim: int = 0
     text_conditioning_scale: float = 0.25
+    use_text_current_rot_conditioning: bool = False
+    rotation_obs_key: Optional[str] = None
+    rotation_obs_dim: int = 0
+    prior_condition_current_obs_key: Optional[str] = None
+    prior_condition_current_obs_dim: int = 0
     prior_trunk_mask_keys: List[str] = field(default_factory=list)
     prior_trunk_mask_prob: float = 0.0
     prior_trunk_mask_eval: bool = False
