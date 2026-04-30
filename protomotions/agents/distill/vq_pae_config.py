@@ -32,6 +32,8 @@ class VQPAELossConfig:
     frequency_alignment_weight: float = 0.1
     reconstruction_weight: float = 0.0
     prior_bc_weight: float = 0.0
+    text_delta_ratio_penalty_weight: float = 0.0
+    text_delta_ratio_penalty_target: float = 1.0
 
 
 @dataclass
@@ -68,6 +70,7 @@ class DistillVQPAEModelConfig(BaseModelConfig):
     text_obs_key: Optional[str] = None
     text_obs_dim: int = 0
     text_conditioning_scale: float = 0.25
+    text_delta_max_ratio: Optional[float] = None
     prior_trunk_mask_keys: List[str] = field(default_factory=list)
     prior_trunk_mask_prob: float = 0.0
     prior_trunk_mask_eval: bool = False
