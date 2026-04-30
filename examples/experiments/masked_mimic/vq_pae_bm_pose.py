@@ -3,13 +3,26 @@
 #
 """VQ-PAE BM variant with pose-only encoder observations."""
 
-from examples.experiments.masked_mimic import vq_pae_bm as _base
-from examples.experiments.masked_mimic.vq_pae_bm import *  # noqa: F403
+import importlib.util
+from pathlib import Path
+
 from protomotions.envs.obs.vq_pae_bm import (
     build_historical_reduced_core_obs,
     build_reduced_core_obs,
     build_reduced_future_core_target_poses,
 )
+
+
+_BASE_PATH = Path(__file__).with_name("vq_pae_bm.py")
+_BASE_SPEC = importlib.util.spec_from_file_location("vq_pae_bm_base", _BASE_PATH)
+if _BASE_SPEC is None or _BASE_SPEC.loader is None:
+    raise ImportError(f"Could not load base experiment from {_BASE_PATH}")
+_base = importlib.util.module_from_spec(_BASE_SPEC)
+_BASE_SPEC.loader.exec_module(_base)
+
+for _name in dir(_base):
+    if not _name.startswith("_") and _name not in globals():
+        globals()[_name] = getattr(_base, _name)
 
 
 ENCODER_INCLUDE_DOF_VEL = False
