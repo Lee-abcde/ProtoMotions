@@ -63,15 +63,6 @@ def _freq_mlp(in_length: int) -> nn.Sequential:
     )
 
 
-def _condition_mlp(input_dim: int, output_dim: int) -> nn.Sequential:
-    hidden_dim = max(256, output_dim)
-    return nn.Sequential(
-        nn.Linear(input_dim, hidden_dim),
-        nn.GELU(),
-        nn.Linear(hidden_dim, output_dim),
-    )
-
-
 class DistillVQPAEModel(BaseModel):
     """MaskedMimic model with a shared VQ codebook and phase manifold."""
 
@@ -244,64 +235,20 @@ class DistillVQPAEModel(BaseModel):
             )
         )
 
-        if (
-            self.config.use_text_current_rot_conditioning
-            and not self.config.use_text_conditioning
-        ):
-            raise ValueError(
-                "use_text_current_rot_conditioning requires use_text_conditioning=True."
-            )
-
         if self.config.use_text_conditioning:
             if not self.config.text_obs_key or self.config.text_obs_dim <= 0:
                 raise ValueError(
                     "Text conditioning requires text_obs_key and positive text_obs_dim."
                 )
-            if self.config.use_text_current_rot_conditioning:
-                if not self.config.rotation_obs_key or self.config.rotation_obs_dim <= 0:
-                    raise ValueError(
-                        "Text/current/rotation conditioning requires rotation_obs_key "
-                        "and positive rotation_obs_dim."
-                    )
-                if (
-                    not self.config.prior_condition_current_obs_key
-                    or self.config.prior_condition_current_obs_dim <= 0
-                ):
-                    raise ValueError(
-                        "Text/current/rotation conditioning requires "
-                        "prior_condition_current_obs_key and positive "
-                        "prior_condition_current_obs_dim."
-                    )
-                self.posterior_text_projector = _condition_mlp(
-                    self.config.text_obs_dim, self.manifold_channels
-                )
-                self.posterior_rotation_projector = _condition_mlp(
-                    self.config.rotation_obs_dim, self.manifold_channels
-                )
-                self.prior_text_current_projector = _condition_mlp(
-                    self.config.text_obs_dim
-                    + self.config.prior_condition_current_obs_dim,
-                    self.manifold_channels,
-                )
-                self.text_projector = None
-                self.text_gate = None
-            else:
-                self.text_projector = nn.Linear(
-                    self.config.text_obs_dim, self.manifold_channels
-                )
-                self.text_gate = nn.Linear(
-                    self.config.text_obs_dim, self.manifold_channels
-                )
-                self.posterior_text_projector = None
-                self.posterior_rotation_projector = None
-                self.prior_text_current_projector = None
+            self.text_projector = nn.Linear(
+                self.config.text_obs_dim, self.manifold_channels
+            )
+            self.text_gate = nn.Linear(
+                self.config.text_obs_dim, self.manifold_channels
+            )
         else:
             self.text_projector = None
             self.text_gate = None
-            self.posterior_text_projector = None
-            self.posterior_rotation_projector = None
-            self.prior_text_current_projector = None
-
     def _reshape_history(
         self, tensordict: TensorDict, obs_key: str | None = None
     ) -> torch.Tensor:
@@ -396,34 +343,6 @@ class DistillVQPAEModel(BaseModel):
             self.config.text_conditioning_scale * text_gate * text_delta
         )
         return latent + text_residual, text_residual
-
-    def _apply_actor_conditioning(
-        self, latent: torch.Tensor, tensordict: TensorDict
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if not self.config.use_text_current_rot_conditioning:
-            return self._apply_text_conditioning(latent, tensordict)
-
-        text_obs = tensordict[self.config.text_obs_key]
-        current_obs = tensordict[self.config.prior_condition_current_obs_key]
-        condition_input = torch.cat([text_obs, current_obs], dim=-1)
-        condition = self.prior_text_current_projector(condition_input)
-        residual = self.config.text_conditioning_scale * condition
-        return latent + residual, residual
-
-    def _apply_privileged_conditioning(
-        self, latent: torch.Tensor, tensordict: TensorDict
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if not self.config.use_text_current_rot_conditioning:
-            return self._apply_text_conditioning(latent, tensordict)
-
-        text_obs = tensordict[self.config.text_obs_key]
-        rotation_obs = tensordict[self.config.rotation_obs_key]
-        condition = (
-            self.posterior_text_projector(text_obs)
-            + self.posterior_rotation_projector(rotation_obs)
-        )
-        residual = self.config.text_conditioning_scale * condition
-        return latent + residual, residual
 
     def _empty_mask_rate(self, tensordict: TensorDict) -> torch.Tensor:
         device = tensordict.device
@@ -755,21 +674,18 @@ class DistillVQPAEModel(BaseModel):
             )
             actor_latent = raw_prior_latent
             privileged_latent = posterior_latent
-        actor_condition_residual = None
-        privileged_condition_residual = None
+        actor_text_residual = None
+        privileged_text_residual = None
         if external_actor_latent is not None:
             actor_latent = external_actor_latent
         else:
-            actor_latent, actor_condition_residual = self._apply_actor_conditioning(
+            actor_latent, actor_text_residual = self._apply_text_conditioning(
                 actor_latent, tensordict
             )
         if external_privileged_latent is not None:
             privileged_latent = external_privileged_latent
         else:
-            (
-                privileged_latent,
-                privileged_condition_residual,
-            ) = self._apply_privileged_conditioning(
+            privileged_latent, privileged_text_residual = self._apply_text_conditioning(
                 privileged_latent, tensordict
             )
 
@@ -791,24 +707,8 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_commitment_loss"] = posterior["commitment_loss"]
         tensordict["vq_pae_prior_commitment_loss"] = prior["commitment_loss"]
         tensordict["vq_pae_prior_alignment_loss"] = F.mse_loss(
-            raw_prior_latent, posterior_latent.detach(), reduction="none"
-        ).mean(dim=-1)
-        tensordict["vq_pae_decoder_alignment_loss"] = F.mse_loss(
             actor_latent, privileged_latent.detach(), reduction="none"
         ).mean(dim=-1)
-        if (
-            actor_condition_residual is not None
-            and privileged_condition_residual is not None
-        ):
-            tensordict["vq_pae_condition_alignment_loss"] = F.mse_loss(
-                actor_condition_residual,
-                privileged_condition_residual.detach(),
-                reduction="none",
-            ).mean(dim=-1)
-        else:
-            tensordict["vq_pae_condition_alignment_loss"] = torch.zeros(
-                tensordict.batch_size[0], device=actor_latent.device
-            )
         tensordict["vq_pae_phase_alignment_loss"] = F.mse_loss(
             prior["phase"], posterior["phase"].detach(), reduction="none"
         ).mean(dim=-1)
@@ -834,16 +734,16 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_actor_latent_norm"] = actor_latent.norm(dim=-1)
         tensordict["vq_pae_posterior_latent_norm"] = posterior_latent.norm(dim=-1)
         tensordict["vq_pae_privileged_latent_norm"] = privileged_latent.norm(dim=-1)
-        if actor_condition_residual is not None:
-            text_delta_norm = actor_condition_residual.norm(dim=-1)
+        if actor_text_residual is not None:
+            text_delta_norm = actor_text_residual.norm(dim=-1)
             raw_prior_norm = raw_prior_latent.norm(dim=-1)
             tensordict["vq_pae_text_delta_norm"] = text_delta_norm
             tensordict["vq_pae_text_delta_ratio"] = text_delta_norm / (
                 raw_prior_norm + 1e-8
             )
-        if privileged_condition_residual is not None:
+        if privileged_text_residual is not None:
             tensordict["vq_pae_privileged_text_delta_norm"] = (
-                privileged_condition_residual.norm(dim=-1)
+                privileged_text_residual.norm(dim=-1)
             )
         if self.reconstruction_head is not None:
             reconstructed_window = self.reconstruction_head(posterior["manifold"]).transpose(1, 2)
@@ -893,14 +793,6 @@ class DistillVQPAEModel(BaseModel):
             tensordict["vq_pae_prior_alignment_loss"].mean()
             * losses.prior_alignment_weight
         )
-        decoder_alignment = (
-            tensordict["vq_pae_decoder_alignment_loss"].mean()
-            * losses.decoder_alignment_weight
-        )
-        condition_alignment = (
-            tensordict["vq_pae_condition_alignment_loss"].mean()
-            * losses.condition_alignment_weight
-        )
         phase_alignment = (
             tensordict["vq_pae_phase_alignment_loss"].mean()
             * losses.phase_alignment_weight
@@ -921,8 +813,6 @@ class DistillVQPAEModel(BaseModel):
             commitment
             + prior_commitment
             + prior_alignment
-            + decoder_alignment
-            + condition_alignment
             + phase_alignment
             + frequency_alignment
             + reconstruction
@@ -931,8 +821,6 @@ class DistillVQPAEModel(BaseModel):
             "distill/vq_commitment_loss": commitment.detach(),
             "distill/vq_prior_commitment_loss": prior_commitment.detach(),
             "distill/vq_prior_alignment_loss": prior_alignment.detach(),
-            "distill/vq_decoder_alignment_loss": decoder_alignment.detach(),
-            "distill/vq_condition_alignment_loss": condition_alignment.detach(),
             "distill/vq_phase_alignment_loss": phase_alignment.detach(),
             "distill/vq_frequency_alignment_loss": frequency_alignment.detach(),
             "distill/vq_perplexity": tensordict["vq_pae_perplexity"].mean().detach(),
