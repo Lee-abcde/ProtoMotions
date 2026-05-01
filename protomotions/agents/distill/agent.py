@@ -44,6 +44,12 @@ class DistillAgent(BaseAgent):
     def _uses_vae(self) -> bool:
         return hasattr(self.config.model, "vae") and self.config.model.vae is not None
 
+    def _uses_vq_prior_phase_accumulator(self) -> bool:
+        return (
+            getattr(self.config.model, "prior_phase_accumulator_alpha", None)
+            is not None
+        )
+
     def setup(self):
         # Initialize VAE noise for each environment.
         # Create vae_noise tensor before super().setup() to ensure it can be used to initialize the lazy linear layers in the model.
@@ -52,6 +58,18 @@ class DistillAgent(BaseAgent):
                 self.num_envs,
                 self.config.model.vae.vae_latent_dim,
                 dtype=torch.float,
+                device=self.device,
+            )
+        if self._uses_vq_prior_phase_accumulator():
+            self.vq_prior_phase_accum = torch.zeros(
+                self.num_envs,
+                self.config.model.n_timing_phases,
+                dtype=torch.float,
+                device=self.device,
+            )
+            self.vq_prior_phase_accum_valid = torch.zeros(
+                self.num_envs,
+                dtype=torch.bool,
                 device=self.device,
             )
         super().setup()
@@ -208,12 +226,28 @@ class DistillAgent(BaseAgent):
         )
         if self._uses_vae():
             self.reset_vae_noise(dones.nonzero(as_tuple=False).squeeze(-1))
+        if self._uses_vq_prior_phase_accumulator():
+            reset_ids = dones.nonzero(as_tuple=False).squeeze(-1)
+            if reset_ids.numel() > 0:
+                self.vq_prior_phase_accum[reset_ids] = 0.0
+                self.vq_prior_phase_accum_valid[reset_ids] = False
         return dones, terminated, extras
 
     def add_agent_info_to_obs(self, obs):
         """Add agent-specific observations to the environment observations."""
         if self._uses_vae():
             obs["vae_noise"] = self.vae_noise.clone()
+        if self._uses_vq_prior_phase_accumulator():
+            obs["vq_prior_phase_accum"] = self.vq_prior_phase_accum.clone()
+            obs["vq_prior_phase_accum_valid"] = (
+                self.vq_prior_phase_accum_valid.clone()
+            )
+            obs["vq_prior_phase_blend_alpha"] = torch.full(
+                (self.num_envs,),
+                float(self.config.model.prior_phase_accumulator_alpha),
+                dtype=torch.float,
+                device=self.device,
+            )
         return obs
 
     def load_parameters(self, state_dict):
@@ -235,6 +269,14 @@ class DistillAgent(BaseAgent):
 
         # Convert to TensorDict and run student model (with encoder)
         output_td = self.model(obs_td)
+        if (
+            self._uses_vq_prior_phase_accumulator()
+            and "vq_pae_prior_phase_accum_next" in output_td.keys()
+        ):
+            self.vq_prior_phase_accum.copy_(
+                output_td["vq_pae_prior_phase_accum_next"].detach()
+            )
+            self.vq_prior_phase_accum_valid[:] = True
 
         # Get student action
         if "privileged_action" in output_td:

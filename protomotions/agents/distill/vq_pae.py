@@ -513,6 +513,142 @@ class DistillVQPAEModel(BaseModel):
         manifold, _ = self.get_phase_manifold(quantized_state, angles)
         return manifold
 
+    def _phase_to_angle(self, phase: torch.Tensor) -> torch.Tensor:
+        return self.two_pi.to(device=phase.device, dtype=phase.dtype) * phase
+
+    def _angle_to_phase(self, angle: torch.Tensor) -> torch.Tensor:
+        two_pi = self.two_pi.to(device=angle.device, dtype=angle.dtype)
+        return torch.atan2(torch.sin(angle), torch.cos(angle)) / two_pi
+
+    def _phase_to_unit(self, phase: torch.Tensor) -> torch.Tensor:
+        angle = self._phase_to_angle(phase)
+        return torch.stack([torch.cos(angle), torch.sin(angle)], dim=-1)
+
+    def _unit_to_phase(self, unit: torch.Tensor) -> torch.Tensor:
+        two_pi = self.two_pi.to(device=unit.device, dtype=unit.dtype)
+        return torch.atan2(unit[..., 1], unit[..., 0]) / two_pi
+
+    def _circular_phase_error(
+        self, source_phase: torch.Tensor, target_phase: torch.Tensor
+    ) -> torch.Tensor:
+        source_angle = self._phase_to_angle(source_phase)
+        target_angle = self._phase_to_angle(target_phase)
+        delta_angle = torch.atan2(
+            torch.sin(source_angle - target_angle),
+            torch.cos(source_angle - target_angle),
+        )
+        return delta_angle / self.two_pi.to(
+            device=delta_angle.device, dtype=delta_angle.dtype
+        )
+
+    def _expand_phase_control(
+        self, value: torch.Tensor, reference: torch.Tensor
+    ) -> torch.Tensor:
+        value = value.to(device=reference.device, dtype=reference.dtype)
+        if value.ndim == 0:
+            return value.view(1, 1).expand_as(reference)
+        if value.ndim == 1:
+            return value.unsqueeze(-1).expand_as(reference)
+        return value.expand_as(reference)
+
+    def _circular_blend_phase(
+        self,
+        source_phase: torch.Tensor,
+        target_phase: torch.Tensor,
+        alpha: torch.Tensor,
+    ) -> torch.Tensor:
+        source_unit = self._phase_to_unit(source_phase)
+        target_unit = self._phase_to_unit(target_phase)
+        dot = (source_unit * target_unit).sum(dim=-1)
+        cross = (
+            source_unit[..., 0] * target_unit[..., 1]
+            - source_unit[..., 1] * target_unit[..., 0]
+        )
+        delta_angle = torch.atan2(cross, dot)
+        theta = alpha * delta_angle
+        cos_theta = torch.cos(theta)
+        sin_theta = torch.sin(theta)
+        x = source_unit[..., 0]
+        y = source_unit[..., 1]
+        blended_unit = torch.stack(
+            [
+                cos_theta * x - sin_theta * y,
+                sin_theta * x + cos_theta * y,
+            ],
+            dim=-1,
+        )
+        return self._unit_to_phase(blended_unit)
+
+    def _advance_phase(
+        self,
+        phase: torch.Tensor,
+        frequency: torch.Tensor,
+        speed_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if speed_scale is not None:
+            frequency = frequency * self._expand_phase_control(speed_scale, frequency)
+        phase_unit = self._phase_to_unit(phase)
+        theta = (
+            self.two_pi.to(device=phase.device, dtype=phase.dtype)
+            * frequency
+            * self.config.time_step
+        )
+        cos_theta = torch.cos(theta)
+        sin_theta = torch.sin(theta)
+        x = phase_unit[..., 0]
+        y = phase_unit[..., 1]
+        rotated_unit = torch.stack(
+            [
+                cos_theta * x - sin_theta * y,
+                sin_theta * x + cos_theta * y,
+            ],
+            dim=-1,
+        )
+        return self._unit_to_phase(rotated_unit)
+
+    def _decode_prior_with_phase_accumulator(
+        self,
+        prior: Dict[str, torch.Tensor],
+        phase_accum: torch.Tensor,
+        phase_accum_valid: torch.Tensor | None,
+        blend_alpha: torch.Tensor,
+        speed_scale: torch.Tensor | None = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        predicted_phase = prior["phase"]
+        phase_accum = self._expand_phase_control(phase_accum, predicted_phase)
+        blend_alpha = self._expand_phase_control(blend_alpha, predicted_phase).clamp(
+            0.0, 1.0
+        )
+
+        if phase_accum_valid is None:
+            valid = torch.ones_like(predicted_phase, dtype=torch.bool)
+        else:
+            valid = phase_accum_valid.to(
+                device=predicted_phase.device, dtype=torch.bool
+            )
+            if valid.ndim == 1:
+                valid = valid.unsqueeze(-1)
+            valid = valid.expand_as(predicted_phase)
+
+        base_phase = torch.where(valid, phase_accum, predicted_phase)
+        used_phase = self._circular_blend_phase(
+            source_phase=base_phase,
+            target_phase=predicted_phase,
+            alpha=blend_alpha,
+        )
+        accumulated_branch = {**prior, "phase": used_phase}
+        next_step = self._decode_next_step(
+            branch=accumulated_branch,
+            args=self.prior_args,
+            speed_scale=speed_scale,
+        )
+        next_accum_phase = self._advance_phase(
+            phase=used_phase,
+            frequency=prior["frequency"],
+            speed_scale=speed_scale,
+        )
+        return next_step, used_phase, next_accum_phase, blend_alpha
+
     def _decode_next_step(
         self,
         branch: Dict[str, torch.Tensor],
@@ -632,6 +768,13 @@ class DistillVQPAEModel(BaseModel):
             "vq_external_privileged_vae_latent", None
         )
         speed_scale = tensordict.get("vq_speed_scale", None)
+        prior_phase_accum = tensordict.get("vq_prior_phase_accum", None)
+        prior_phase_accum_valid = tensordict.get(
+            "vq_prior_phase_accum_valid", None
+        )
+        prior_phase_blend_alpha = tensordict.get(
+            "vq_prior_phase_blend_alpha", None
+        )
         update_codebook = tensordict.get("vq_pae_update_codebook", self.training)
         if torch.is_tensor(update_codebook):
             update_codebook = bool(update_codebook.any().item())
@@ -670,18 +813,40 @@ class DistillVQPAEModel(BaseModel):
         posterior_latent = posterior["next_step"]
         actor_latent = raw_prior_latent
         privileged_latent = posterior_latent
-        if speed_scale is not None:
+        prior_phase_used = prior["phase"]
+        prior_phase_accum_next = None
+        prior_phase_accum_alpha = None
+        if prior_phase_accum is not None:
+            if prior_phase_blend_alpha is None:
+                prior_phase_blend_alpha = torch.tensor(
+                    0.0, device=prior["phase"].device, dtype=prior["phase"].dtype
+                )
+            (
+                raw_prior_latent,
+                prior_phase_used,
+                prior_phase_accum_next,
+                prior_phase_accum_alpha,
+            ) = self._decode_prior_with_phase_accumulator(
+                prior=prior,
+                phase_accum=prior_phase_accum,
+                phase_accum_valid=prior_phase_accum_valid,
+                blend_alpha=prior_phase_blend_alpha,
+                speed_scale=speed_scale,
+            )
+            actor_latent = raw_prior_latent
+        elif speed_scale is not None:
             raw_prior_latent = self._decode_next_step(
                 branch=prior,
                 args=self.prior_args,
                 speed_scale=speed_scale,
             )
+            actor_latent = raw_prior_latent
+        if speed_scale is not None:
             posterior_latent = self._decode_next_step(
                 branch=posterior,
                 args=self.posterior_args,
                 speed_scale=speed_scale,
             )
-            actor_latent = raw_prior_latent
             privileged_latent = posterior_latent
         actor_text_residual = None
         actor_raw_text_residual = None
@@ -724,9 +889,17 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_prior_alignment_loss"] = F.mse_loss(
             actor_latent, privileged_latent.detach(), reduction="none"
         ).mean(dim=-1)
-        tensordict["vq_pae_phase_alignment_loss"] = F.mse_loss(
-            prior["phase"], posterior["phase"].detach(), reduction="none"
-        ).mean(dim=-1)
+        tensordict["vq_pae_phase_alignment_loss"] = self._circular_phase_error(
+            prior["phase"], posterior["phase"].detach()
+        ).pow(2).mean(dim=-1)
+        if prior_phase_accum_next is not None:
+            tensordict["vq_pae_accumulated_phase_alignment_loss"] = (
+                self._circular_phase_error(
+                    prior_phase_used, posterior["phase"]
+                )
+                .pow(2)
+                .mean(dim=-1)
+            )
         tensordict["vq_pae_frequency_alignment_loss"] = F.mse_loss(
             prior["frequency"], posterior["frequency"].detach(), reduction="none"
         ).mean(dim=-1)
@@ -742,6 +915,11 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_posterior_frequency"] = posterior["frequency"]
         tensordict["vq_pae_prior_phase"] = prior["phase"]
         tensordict["vq_pae_prior_frequency"] = prior["frequency"]
+        tensordict["vq_pae_prior_phase_used"] = prior_phase_used
+        if prior_phase_accum_next is not None:
+            tensordict["vq_pae_prior_phase_accum_next"] = prior_phase_accum_next
+        if prior_phase_accum_alpha is not None:
+            tensordict["vq_pae_prior_phase_accum_alpha"] = prior_phase_accum_alpha
         tensordict["vq_pae_actor_latent"] = actor_latent
         tensordict["vq_pae_prior_next_step"] = prior["next_step"]
         tensordict["vq_pae_privileged_latent"] = privileged_latent
@@ -822,6 +1000,22 @@ class DistillVQPAEModel(BaseModel):
             tensordict["vq_pae_phase_alignment_loss"].mean()
             * losses.phase_alignment_weight
         )
+        accumulated_phase_alignment = torch.tensor(0.0, device=commitment.device)
+        accumulated_phase_alignment_raw = torch.tensor(0.0, device=commitment.device)
+        accumulated_phase_alignment_weight = float(
+            getattr(losses, "accumulated_phase_alignment_weight", 0.0)
+        )
+        if (
+            accumulated_phase_alignment_weight > 0.0
+            and "vq_pae_accumulated_phase_alignment_loss" in tensordict.keys()
+        ):
+            accumulated_phase_alignment_raw = tensordict[
+                "vq_pae_accumulated_phase_alignment_loss"
+            ].mean()
+            accumulated_phase_alignment = (
+                accumulated_phase_alignment_raw
+                * accumulated_phase_alignment_weight
+            )
         frequency_alignment = (
             tensordict["vq_pae_frequency_alignment_loss"].mean()
             * losses.frequency_alignment_weight
@@ -855,6 +1049,7 @@ class DistillVQPAEModel(BaseModel):
             + prior_commitment
             + prior_alignment
             + phase_alignment
+            + accumulated_phase_alignment
             + frequency_alignment
             + reconstruction
             + text_delta_ratio_penalty
@@ -864,6 +1059,12 @@ class DistillVQPAEModel(BaseModel):
             "distill/vq_prior_commitment_loss": prior_commitment.detach(),
             "distill/vq_prior_alignment_loss": prior_alignment.detach(),
             "distill/vq_phase_alignment_loss": phase_alignment.detach(),
+            "distill/vq_accumulated_phase_alignment_loss": (
+                accumulated_phase_alignment_raw.detach()
+            ),
+            "distill/vq_accumulated_phase_alignment_loss_weighted": (
+                accumulated_phase_alignment.detach()
+            ),
             "distill/vq_frequency_alignment_loss": frequency_alignment.detach(),
             "distill/vq_perplexity": tensordict["vq_pae_perplexity"].mean().detach(),
             "distill/vq_raw_prior_latent_norm": (

@@ -131,6 +131,15 @@ def create_parser():
         ),
     )
     parser.add_argument(
+        "--vq-prior-phase-accumulator-alpha",
+        type=float,
+        default=None,
+        help=(
+            "Enable VQ-PAE prior phase accumulation with this blend alpha in [0, 1]. "
+            "0 uses only accumulated phase, 1 uses only model-predicted phase."
+        ),
+    )
+    parser.add_argument(
         "--vq-latent-loop-frames",
         type=int,
         default=0,
@@ -435,6 +444,18 @@ def main():
             agent.evaluator,
             "vq_prior_frequency_scale",
             args.vq_prior_frequency_scale,
+        )
+        prior_phase_accumulator_alpha = args.vq_prior_phase_accumulator_alpha
+        if prior_phase_accumulator_alpha is None:
+            prior_phase_accumulator_alpha = getattr(
+                agent_config.model,
+                "prior_phase_accumulator_alpha",
+                None,
+            )
+        setattr(
+            agent.evaluator,
+            "vq_prior_phase_accumulator_alpha",
+            prior_phase_accumulator_alpha,
         )
         setattr(agent.evaluator, "vq_latent_loop_frames", args.vq_latent_loop_frames)
         if hasattr(agent.evaluator, "interactive_edit_text_prompt"):

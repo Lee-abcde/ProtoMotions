@@ -25,6 +25,8 @@ class DistillEvaluator(MimicEvaluator):
         self._privileged_eval_state: Optional[Dict[str, Any]] = None
         self._vq_latent_capture: Optional[torch.Tensor] = None
         self._vq_latent_loop_phase: Optional[torch.Tensor] = None
+        self._vq_prior_phase_accum: Optional[torch.Tensor] = None
+        self._vq_prior_phase_accum_valid: Optional[torch.Tensor] = None
 
     def _reset_vq_latent_loop(self, env_ids: Optional[torch.Tensor] = None) -> None:
         """Reset latent-loop playback phase for selected environments."""
@@ -75,6 +77,46 @@ class DistillEvaluator(MimicEvaluator):
             self._vq_latent_loop_phase + float(speed_scale),
             float(num_frames),
         )
+
+    def _ensure_vq_prior_phase_accumulator(
+        self,
+        batch_size: int,
+        num_phases: int,
+        device: torch.device,
+    ) -> None:
+        if (
+            self._vq_prior_phase_accum is not None
+            and self._vq_prior_phase_accum.shape == (batch_size, num_phases)
+            and self._vq_prior_phase_accum.device == device
+        ):
+            return
+
+        self._vq_prior_phase_accum = torch.zeros(
+            batch_size,
+            num_phases,
+            device=device,
+            dtype=torch.float32,
+        )
+        self._vq_prior_phase_accum_valid = torch.zeros(
+            batch_size,
+            device=device,
+            dtype=torch.bool,
+        )
+
+    def _reset_vq_prior_phase_accumulator(
+        self, env_ids: Optional[torch.Tensor] = None
+    ) -> None:
+        if self._vq_prior_phase_accum_valid is None:
+            return
+        if env_ids is None:
+            self._vq_prior_phase_accum_valid.zero_()
+            if self._vq_prior_phase_accum is not None:
+                self._vq_prior_phase_accum.zero_()
+            return
+        if env_ids.numel() > 0:
+            self._vq_prior_phase_accum_valid[env_ids] = False
+            if self._vq_prior_phase_accum is not None:
+                self._vq_prior_phase_accum[env_ids] = 0.0
 
     def interactive_edit_text_prompt(self) -> None:
         """Pause interactive inference and switch the live text-conditioning prompt."""
@@ -445,6 +487,8 @@ class DistillEvaluator(MimicEvaluator):
         )
         self._vq_latent_capture = None
         self._vq_latent_loop_phase = None
+        self._vq_prior_phase_accum = None
+        self._vq_prior_phase_accum_valid = None
         capture_step = 0
 
         metric_sums: Dict[str, float] = {}
@@ -471,6 +515,9 @@ class DistillEvaluator(MimicEvaluator):
                 )
                 configured_prior_frequency_scale = getattr(
                     self, "vq_prior_frequency_scale", 1.0
+                )
+                configured_prior_phase_accum_alpha = getattr(
+                    self, "vq_prior_phase_accumulator_alpha", None
                 )
                 # Decide if record/replay Mode
                 is_loop_playback_active = self._vq_latent_loop_phase is not None
@@ -519,8 +566,52 @@ class DistillEvaluator(MimicEvaluator):
                         float(model_frequency_scale),
                         device=self.device,
                     )
+                use_prior_phase_accumulator = (
+                    is_vq_pae_model
+                    and action_key == "prior_action"
+                    and configured_prior_phase_accum_alpha is not None
+                )
+                if use_prior_phase_accumulator:
+                    prior_phase_accum_alpha = float(configured_prior_phase_accum_alpha)
+                    if not 0.0 <= prior_phase_accum_alpha <= 1.0:
+                        raise ValueError(
+                            "vq_prior_phase_accumulator_alpha must be in [0, 1], "
+                            f"got {prior_phase_accum_alpha}"
+                        )
+                    self._ensure_vq_prior_phase_accumulator(
+                        batch_size=obs_td.batch_size[0],
+                        num_phases=model_module.config.n_timing_phases,
+                        device=self.device,
+                    )
+                    obs_td["vq_prior_phase_accum"] = (
+                        self._vq_prior_phase_accum.clone()
+                    )
+                    obs_td["vq_prior_phase_accum_valid"] = (
+                        self._vq_prior_phase_accum_valid.clone()
+                    )
+                    obs_td["vq_prior_phase_blend_alpha"] = torch.full(
+                        (obs_td.batch_size[0],),
+                        prior_phase_accum_alpha,
+                        device=self.device,
+                    )
 
                 model_outs = self.agent.model(obs_td)
+                if (
+                    use_prior_phase_accumulator
+                    and "vq_pae_prior_phase_accum_next" in model_outs
+                ):
+                    next_phase_accum = model_outs[
+                        "vq_pae_prior_phase_accum_next"
+                    ].detach()
+                    if self._vq_prior_phase_accum is None:
+                        self._vq_prior_phase_accum = next_phase_accum.clone()
+                    else:
+                        self._vq_prior_phase_accum.copy_(next_phase_accum)
+                    self._vq_prior_phase_accum_valid = torch.ones(
+                        next_phase_accum.shape[0],
+                        device=next_phase_accum.device,
+                        dtype=torch.bool,
+                    )
 
                 if "vq_pae_indices" in model_outs:
                     env_idx = 0
@@ -545,9 +636,17 @@ class DistillEvaluator(MimicEvaluator):
                     frequency = model_outs.get(
                         frequency_key, model_outs.get("vq_pae_frequency", None)
                     )
+                    used_phase = None
+                    if action_key == "prior_action":
+                        used_phase = model_outs.get("vq_pae_prior_phase_used", None)
                     phase_str = (
                         f"{phase[env_idx].detach().cpu().tolist()}"
                         if phase is not None
+                        else "N/A"
+                    )
+                    used_phase_str = (
+                        f"{used_phase[env_idx].detach().cpu().tolist()}"
+                        if used_phase is not None
                         else "N/A"
                     )
                     frequency_str = (
@@ -556,9 +655,15 @@ class DistillEvaluator(MimicEvaluator):
                         else "N/A"
                     )
                     next_phase_wrapped_str = "N/A"
-                    if phase is not None and frequency is not None:
+                    accum_next = model_outs.get("vq_pae_prior_phase_accum_next", None)
+                    if action_key == "prior_action" and accum_next is not None:
+                        next_phase_wrapped_str = (
+                            f"{accum_next[env_idx].detach().cpu().tolist()}"
+                        )
+                    elif phase is not None and frequency is not None:
                         dt = float(model_module.config.time_step)
-                        phase_env = phase[env_idx].detach()
+                        phase_source = used_phase if used_phase is not None else phase
+                        phase_env = phase_source[env_idx].detach()
                         frequency_env = frequency[env_idx].detach()
                         next_phase = (
                             phase_env
@@ -570,9 +675,11 @@ class DistillEvaluator(MimicEvaluator):
                         "[vq-pae-debug] "
                         f"step={step} env=0 manifold_idx={manifold_idx} "
                         f"action_key={action_key} "
-                        f"phase={phase_str} frequency={frequency_str} "
+                        f"phase={phase_str} used_phase={used_phase_str} "
+                        f"frequency={frequency_str} "
                         f"next_phase_wrapped={next_phase_wrapped_str} "
                         f"prior_frequency_scale={model_frequency_scale:.3f} "
+                        f"prior_phase_accum_alpha={configured_prior_phase_accum_alpha} "
                         f"motion_speed_scale={active_motion_speed_scale:.3f}"
                     )
                 actor_latent = model_outs.get(latent_key, None) if latent_key is not None else None
@@ -629,6 +736,7 @@ class DistillEvaluator(MimicEvaluator):
                 done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
                 if done_indices.numel() > 0:
                     self._reset_vq_latent_loop(done_indices)
+                    self._reset_vq_prior_phase_accumulator(done_indices)
                     terminated_indices = terminated.nonzero(as_tuple=False).squeeze(-1)
                     print(f"\n[reset-debug] step={step}")
                     print(f"  done_envs={done_indices.tolist()}")
