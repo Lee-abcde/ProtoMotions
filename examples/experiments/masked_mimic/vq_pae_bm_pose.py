@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The ProtoMotions Developers
 # SPDX-License-Identifier: Apache-2.0
 #
-"""VQ-PAE BM variant with pose-only encoder observations."""
+"""VQ-PAE BM variant with pose-only PAE inputs and full trunk observations."""
 
 import importlib.util
 from pathlib import Path
@@ -27,6 +27,16 @@ for _name in dir(_base):
 
 ENCODER_INCLUDE_DOF_VEL = False
 ENCODER_INCLUDE_ROOT_ANG_VEL = False
+
+PAE_CURRENT_OBS_KEY = "pae_pose_current_obs"
+PAE_CLEAN_CURRENT_OBS_KEY = "clean_pae_pose_current_obs"
+PAE_HISTORICAL_OBS_KEY = "pae_pose_historical_obs"
+PAE_CLEAN_HISTORICAL_OBS_KEY = "clean_pae_pose_historical_obs"
+PAE_FUTURE_OBS_KEY = "pae_pose_future_target_obs"
+
+PAE_CURRENT_OBS_NORM_KEY = "pae_pose_current_obs_norm"
+PAE_HISTORICAL_OBS_NORM_KEY = "pae_pose_historical_obs_norm"
+PAE_FUTURE_OBS_NORM_KEY = "pae_pose_future_target_obs_norm"
 
 
 def _encoder_core_obs_dim(num_dofs: int) -> int:
@@ -62,14 +72,14 @@ def _history_static_params(history_steps: int) -> dict:
     }
 
 
-def _install_pose_only_encoder_obs(env_cfg, future_steps, *, noisy: bool) -> None:
+def _install_pose_only_pae_obs(env_cfg, future_steps, *, noisy: bool) -> None:
     from protomotions.envs.context_views import EnvContext
     from protomotions.envs.mdp_component import MdpComponent
 
     current_state = EnvContext.noisy if noisy else EnvContext.current
     historical_state = EnvContext.noisy_historical if noisy else EnvContext.historical
 
-    env_cfg.observation_components["encoder_current_obs"] = MdpComponent(
+    env_cfg.observation_components[PAE_CURRENT_OBS_KEY] = MdpComponent(
         compute_func=build_reduced_core_obs,
         dynamic_vars={
             "dof_pos": current_state.dof_pos,
@@ -79,7 +89,7 @@ def _install_pose_only_encoder_obs(env_cfg, future_steps, *, noisy: bool) -> Non
         },
         static_params=_core_static_params(),
     )
-    env_cfg.observation_components["clean_encoder_current_obs"] = MdpComponent(
+    env_cfg.observation_components[PAE_CLEAN_CURRENT_OBS_KEY] = MdpComponent(
         compute_func=build_reduced_core_obs,
         dynamic_vars={
             "dof_pos": EnvContext.current.dof_pos,
@@ -89,7 +99,7 @@ def _install_pose_only_encoder_obs(env_cfg, future_steps, *, noisy: bool) -> Non
         },
         static_params=_core_static_params(),
     )
-    env_cfg.observation_components["encoder_future_target_obs"] = MdpComponent(
+    env_cfg.observation_components[PAE_FUTURE_OBS_KEY] = MdpComponent(
         compute_func=build_reduced_future_core_target_poses,
         dynamic_vars={
             "mimic_ref_root_rot": EnvContext.mimic.future_root_rot,
@@ -100,7 +110,7 @@ def _install_pose_only_encoder_obs(env_cfg, future_steps, *, noisy: bool) -> Non
         },
         static_params=_future_static_params(future_steps),
     )
-    env_cfg.observation_components["historical_pose_obs"] = MdpComponent(
+    env_cfg.observation_components[PAE_HISTORICAL_OBS_KEY] = MdpComponent(
         compute_func=build_historical_reduced_core_obs,
         dynamic_vars={
             "historical_dof_pos": historical_state.dof_pos,
@@ -110,7 +120,7 @@ def _install_pose_only_encoder_obs(env_cfg, future_steps, *, noisy: bool) -> Non
         },
         static_params=_history_static_params(_base.TOTAL_STORED_HISTORICAL_STEPS),
     )
-    env_cfg.observation_components["clean_historical_pose_obs"] = MdpComponent(
+    env_cfg.observation_components[PAE_CLEAN_HISTORICAL_OBS_KEY] = MdpComponent(
         compute_func=build_historical_reduced_core_obs,
         dynamic_vars={
             "historical_dof_pos": EnvContext.historical.dof_pos,
@@ -122,9 +132,73 @@ def _install_pose_only_encoder_obs(env_cfg, future_steps, *, noisy: bool) -> Non
     )
 
 
+def _replace_preprocessor_io(preprocessor_cfg, old_out_key, new_in_key, new_out_key):
+    for model_cfg in preprocessor_cfg.models:
+        if old_out_key in getattr(model_cfg, "out_keys", []):
+            model_cfg.in_keys = [new_in_key]
+            model_cfg.out_keys = [new_out_key]
+            return
+    raise KeyError(f"Could not find preprocessor output key '{old_out_key}'")
+
+
+def _configure_pose_only_pae_inputs(cfg) -> None:
+    preprocessor_cfg = cfg.model.preprocessor
+    input_key_map = {
+        "encoder_current_obs": PAE_CURRENT_OBS_KEY,
+        "historical_pose_obs": PAE_HISTORICAL_OBS_KEY,
+        "encoder_future_target_obs": PAE_FUTURE_OBS_KEY,
+    }
+    output_key_map = {
+        "max_coords_obs_norm": PAE_CURRENT_OBS_NORM_KEY,
+        "historical_pose_obs_norm": PAE_HISTORICAL_OBS_NORM_KEY,
+        "vq_pae_target_poses_norm": PAE_FUTURE_OBS_NORM_KEY,
+    }
+    preprocessor_cfg.in_keys = [
+        input_key_map.get(key, key) for key in preprocessor_cfg.in_keys
+    ]
+    preprocessor_cfg.out_keys = [
+        output_key_map.get(key, key) for key in preprocessor_cfg.out_keys
+    ]
+    _replace_preprocessor_io(
+        preprocessor_cfg,
+        "max_coords_obs_norm",
+        PAE_CURRENT_OBS_KEY,
+        PAE_CURRENT_OBS_NORM_KEY,
+    )
+    _replace_preprocessor_io(
+        preprocessor_cfg,
+        "historical_pose_obs_norm",
+        PAE_HISTORICAL_OBS_KEY,
+        PAE_HISTORICAL_OBS_NORM_KEY,
+    )
+    _replace_preprocessor_io(
+        preprocessor_cfg,
+        "vq_pae_target_poses_norm",
+        PAE_FUTURE_OBS_KEY,
+        PAE_FUTURE_OBS_NORM_KEY,
+    )
+
+    cfg.model.prior_in_keys = [
+        PAE_CURRENT_OBS_NORM_KEY,
+        PAE_HISTORICAL_OBS_NORM_KEY,
+        "text_embedding_obs_norm",
+    ]
+    cfg.model.posterior_in_keys = [
+        PAE_CURRENT_OBS_NORM_KEY,
+        PAE_FUTURE_OBS_NORM_KEY,
+        PAE_HISTORICAL_OBS_NORM_KEY,
+    ]
+    cfg.model.current_obs_key = PAE_CURRENT_OBS_NORM_KEY
+    cfg.model.historical_obs_key = PAE_HISTORICAL_OBS_NORM_KEY
+    cfg.model.future_obs_key = PAE_FUTURE_OBS_NORM_KEY
+    cfg.model.reconstruction_current_obs_key = PAE_CLEAN_CURRENT_OBS_KEY
+    cfg.model.reconstruction_historical_obs_key = PAE_CLEAN_HISTORICAL_OBS_KEY
+    cfg.model.reconstruction_future_obs_key = PAE_FUTURE_OBS_NORM_KEY
+
+
 def env_config(robot_cfg, args):
     cfg = _base.env_config(robot_cfg, args)
-    _install_pose_only_encoder_obs(
+    _install_pose_only_pae_obs(
         cfg,
         list(range(1, _base.NUM_FUTURE_STEPS + 1)),
         noisy=True,
@@ -135,6 +209,7 @@ def env_config(robot_cfg, args):
 def agent_config(robot_config, env_config, args):
     cfg = _base.agent_config(robot_config, env_config, args)
     encoder_obs_dim = _encoder_core_obs_dim(robot_config.kinematic_info.num_dofs)
+    _configure_pose_only_pae_inputs(cfg)
     cfg.model.current_obs_dim = encoder_obs_dim
     cfg.model.historical_obs_dim = encoder_obs_dim
     cfg.model.future_obs_dim = encoder_obs_dim
@@ -162,7 +237,7 @@ def apply_inference_overrides(
         scene_lib_cfg,
         args,
     )
-    _install_pose_only_encoder_obs(
+    _install_pose_only_pae_obs(
         env_cfg,
         _base.resolve_student_future_steps(
             env_cfg.control_components["mimic"].future_steps,
