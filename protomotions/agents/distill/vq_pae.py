@@ -606,15 +606,15 @@ class DistillVQPAEModel(BaseModel):
         )
         return self._unit_to_phase(rotated_unit)
 
-    def _decode_prior_with_phase_accumulator(
+    def _apply_phase_accumulator(
         self,
-        prior: Dict[str, torch.Tensor],
+        branch: Dict[str, torch.Tensor],
         phase_accum: torch.Tensor,
         phase_accum_valid: torch.Tensor | None,
         blend_alpha: torch.Tensor,
         speed_scale: torch.Tensor | None = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        predicted_phase = prior["phase"]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        predicted_phase = branch["phase"]
         phase_accum = self._expand_phase_control(phase_accum, predicted_phase)
         blend_alpha = self._expand_phase_control(blend_alpha, predicted_phase).clamp(
             0.0, 1.0
@@ -624,30 +624,34 @@ class DistillVQPAEModel(BaseModel):
             valid = torch.ones_like(predicted_phase, dtype=torch.bool)
         else:
             valid = phase_accum_valid.to(
-                device=predicted_phase.device, dtype=torch.bool
+                device=predicted_phase.device,
+                dtype=torch.bool,
             )
             if valid.ndim == 1:
                 valid = valid.unsqueeze(-1)
             valid = valid.expand_as(predicted_phase)
 
-        base_phase = torch.where(valid, phase_accum, predicted_phase)
+        base_phase = torch.where(valid, phase_accum.detach(), predicted_phase)
         used_phase = self._circular_blend_phase(
             source_phase=base_phase,
             target_phase=predicted_phase,
             alpha=blend_alpha,
         )
-        accumulated_branch = {**prior, "phase": used_phase}
-        next_step = self._decode_next_step(
-            branch=accumulated_branch,
-            args=self.prior_args,
-            speed_scale=speed_scale,
+        phase_consistency = self._circular_phase_error(
+            predicted_phase,
+            phase_accum.detach(),
+        ).pow(2)
+        phase_consistency = torch.where(
+            valid,
+            phase_consistency,
+            torch.zeros_like(phase_consistency),
         )
         next_accum_phase = self._advance_phase(
             phase=used_phase,
-            frequency=prior["frequency"],
+            frequency=branch["frequency"],
             speed_scale=speed_scale,
         )
-        return next_step, used_phase, next_accum_phase, blend_alpha
+        return used_phase, next_accum_phase, phase_consistency, valid, blend_alpha
 
     def _decode_next_step(
         self,
@@ -818,23 +822,34 @@ class DistillVQPAEModel(BaseModel):
         actor_latent = raw_prior_latent
         privileged_latent = posterior_latent
         prior_phase_used = prior["phase"]
+        posterior_phase_used = posterior["phase"]
         prior_phase_accum_next = None
         prior_phase_accum_alpha = None
+        posterior_phase_accum_next = None
+        posterior_phase_accum_alpha = None
+        posterior_phase_consistency_loss = None
         if prior_phase_accum is not None:
             if prior_phase_blend_alpha is None:
                 prior_phase_blend_alpha = torch.tensor(
                     0.0, device=prior["phase"].device, dtype=prior["phase"].dtype
                 )
             (
-                raw_prior_latent,
                 prior_phase_used,
                 prior_phase_accum_next,
+                _prior_phase_consistency,
+                _prior_phase_valid,
                 prior_phase_accum_alpha,
-            ) = self._decode_prior_with_phase_accumulator(
-                prior=prior,
+            ) = self._apply_phase_accumulator(
+                branch=prior,
                 phase_accum=prior_phase_accum,
                 phase_accum_valid=prior_phase_accum_valid,
                 blend_alpha=prior_phase_blend_alpha,
+                speed_scale=speed_scale,
+            )
+            prior_decode_branch = {**prior, "phase": prior_phase_used}
+            raw_prior_latent = self._decode_next_step(
+                branch=prior_decode_branch,
+                args=self.prior_args,
                 speed_scale=speed_scale,
             )
             actor_latent = raw_prior_latent
@@ -848,6 +863,34 @@ class DistillVQPAEModel(BaseModel):
         if speed_scale is not None:
             posterior_latent = self._decode_next_step(
                 branch=posterior,
+                args=self.posterior_args,
+                speed_scale=speed_scale,
+            )
+            privileged_latent = posterior_latent
+        if posterior_phase_accum is not None:
+            posterior_phase_blend_alpha = torch.full(
+                (posterior["phase"].shape[0],),
+                float(self.config.posterior_phase_accumulator_alpha),
+                device=posterior["phase"].device,
+                dtype=posterior["phase"].dtype,
+            )
+            (
+                posterior_phase_used,
+                posterior_phase_accum_next,
+                posterior_phase_consistency_per_phase,
+                posterior_valid,
+                posterior_phase_accum_alpha,
+            ) = self._apply_phase_accumulator(
+                branch=posterior,
+                phase_accum=posterior_phase_accum,
+                phase_accum_valid=posterior_phase_accum_valid,
+                blend_alpha=posterior_phase_blend_alpha,
+                speed_scale=speed_scale,
+            )
+            posterior_phase_consistency_loss = posterior_phase_consistency_per_phase
+            posterior_decode_branch = {**posterior, "phase": posterior_phase_used}
+            posterior_latent = self._decode_next_step(
+                branch=posterior_decode_branch,
                 args=self.posterior_args,
                 speed_scale=speed_scale,
             )
@@ -896,42 +939,17 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_phase_alignment_loss"] = self._circular_phase_error(
             prior["phase"], posterior["phase"].detach()
         ).pow(2).mean(dim=-1)
-        if posterior_phase_accum is not None:
-            posterior_phase_accum = self._expand_phase_control(
-                posterior_phase_accum,
-                posterior["phase"],
-            )
-            if posterior_phase_accum_valid is None:
-                posterior_valid = torch.ones_like(posterior["phase"], dtype=torch.bool)
-            else:
-                posterior_valid = posterior_phase_accum_valid.to(
-                    device=posterior["phase"].device,
-                    dtype=torch.bool,
-                )
-                if posterior_valid.ndim == 1:
-                    posterior_valid = posterior_valid.unsqueeze(-1)
-                posterior_valid = posterior_valid.expand_as(posterior["phase"])
-            posterior_phase_consistency = self._circular_phase_error(
-                posterior["phase"],
-                posterior_phase_accum.detach(),
-            ).pow(2)
-            posterior_phase_consistency = torch.where(
-                posterior_valid,
-                posterior_phase_consistency,
-                torch.zeros_like(posterior_phase_consistency),
-            )
+        if posterior_phase_consistency_loss is not None:
             valid_count = posterior_valid.float().sum(dim=-1).clamp_min(1.0)
             tensordict["vq_pae_posterior_phase_consistency_loss"] = (
-                posterior_phase_consistency.sum(dim=-1) / valid_count
+                posterior_phase_consistency_loss.sum(dim=-1) / valid_count
             )
-            tensordict["vq_pae_posterior_phase_accum_next"] = self._advance_phase(
-                phase=posterior["phase"],
-                frequency=posterior["frequency"],
-            )
+        if posterior_phase_accum_next is not None:
+            tensordict["vq_pae_posterior_phase_accum_next"] = posterior_phase_accum_next
         if prior_phase_accum_next is not None:
             tensordict["vq_pae_accumulated_phase_alignment_loss"] = (
                 self._circular_phase_error(
-                    prior_phase_used, posterior["phase"]
+                    prior_phase_used, posterior_phase_used.detach()
                 )
                 .pow(2)
                 .mean(dim=-1)
@@ -949,6 +967,7 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_frequency"] = posterior["frequency"]
         tensordict["vq_pae_posterior_phase"] = posterior["phase"]
         tensordict["vq_pae_posterior_frequency"] = posterior["frequency"]
+        tensordict["vq_pae_posterior_phase_used"] = posterior_phase_used
         tensordict["vq_pae_prior_phase"] = prior["phase"]
         tensordict["vq_pae_prior_frequency"] = prior["frequency"]
         tensordict["vq_pae_prior_phase_used"] = prior_phase_used
@@ -956,6 +975,10 @@ class DistillVQPAEModel(BaseModel):
             tensordict["vq_pae_prior_phase_accum_next"] = prior_phase_accum_next
         if prior_phase_accum_alpha is not None:
             tensordict["vq_pae_prior_phase_accum_alpha"] = prior_phase_accum_alpha
+        if posterior_phase_accum_alpha is not None:
+            tensordict["vq_pae_posterior_phase_accum_alpha"] = (
+                posterior_phase_accum_alpha
+            )
         tensordict["vq_pae_actor_latent"] = actor_latent
         tensordict["vq_pae_prior_next_step"] = prior["next_step"]
         tensordict["vq_pae_privileged_latent"] = privileged_latent
