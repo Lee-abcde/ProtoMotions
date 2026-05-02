@@ -31,6 +31,7 @@ class VQPAELossConfig:
     phase_alignment_weight: float = 0.1
     frequency_alignment_weight: float = 0.1
     accumulated_phase_alignment_weight: float = 0.0
+    posterior_phase_consistency_weight: float = 0.0
     reconstruction_weight: float = 0.0
     prior_bc_weight: float = 0.0
     text_delta_ratio_penalty_weight: float = 0.0

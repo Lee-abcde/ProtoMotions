@@ -50,6 +50,13 @@ class DistillAgent(BaseAgent):
             is not None
         )
 
+    def _uses_vq_posterior_phase_consistency(self) -> bool:
+        losses = getattr(self.config.model, "losses", None)
+        return (
+            losses is not None
+            and getattr(losses, "posterior_phase_consistency_weight", 0.0) > 0.0
+        )
+
     def setup(self):
         # Initialize VAE noise for each environment.
         # Create vae_noise tensor before super().setup() to ensure it can be used to initialize the lazy linear layers in the model.
@@ -68,6 +75,18 @@ class DistillAgent(BaseAgent):
                 device=self.device,
             )
             self.vq_prior_phase_accum_valid = torch.zeros(
+                self.num_envs,
+                dtype=torch.bool,
+                device=self.device,
+            )
+        if self._uses_vq_posterior_phase_consistency():
+            self.vq_posterior_phase_accum = torch.zeros(
+                self.num_envs,
+                self.config.model.n_timing_phases,
+                dtype=torch.float,
+                device=self.device,
+            )
+            self.vq_posterior_phase_accum_valid = torch.zeros(
                 self.num_envs,
                 dtype=torch.bool,
                 device=self.device,
@@ -231,6 +250,11 @@ class DistillAgent(BaseAgent):
             if reset_ids.numel() > 0:
                 self.vq_prior_phase_accum[reset_ids] = 0.0
                 self.vq_prior_phase_accum_valid[reset_ids] = False
+        if self._uses_vq_posterior_phase_consistency():
+            reset_ids = dones.nonzero(as_tuple=False).squeeze(-1)
+            if reset_ids.numel() > 0:
+                self.vq_posterior_phase_accum[reset_ids] = 0.0
+                self.vq_posterior_phase_accum_valid[reset_ids] = False
         return dones, terminated, extras
 
     def add_agent_info_to_obs(self, obs):
@@ -247,6 +271,13 @@ class DistillAgent(BaseAgent):
                 float(self.config.model.prior_phase_accumulator_alpha),
                 dtype=torch.float,
                 device=self.device,
+            )
+        if self._uses_vq_posterior_phase_consistency():
+            obs["vq_posterior_phase_accum"] = (
+                self.vq_posterior_phase_accum.clone()
+            )
+            obs["vq_posterior_phase_accum_valid"] = (
+                self.vq_posterior_phase_accum_valid.clone()
             )
         return obs
 
@@ -277,6 +308,14 @@ class DistillAgent(BaseAgent):
                 output_td["vq_pae_prior_phase_accum_next"].detach()
             )
             self.vq_prior_phase_accum_valid[:] = True
+        if (
+            self._uses_vq_posterior_phase_consistency()
+            and "vq_pae_posterior_phase_accum_next" in output_td.keys()
+        ):
+            self.vq_posterior_phase_accum.copy_(
+                output_td["vq_pae_posterior_phase_accum_next"].detach()
+            )
+            self.vq_posterior_phase_accum_valid[:] = True
 
         # Get student action
         if "privileged_action" in output_td:

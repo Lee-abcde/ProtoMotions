@@ -775,6 +775,10 @@ class DistillVQPAEModel(BaseModel):
         prior_phase_blend_alpha = tensordict.get(
             "vq_prior_phase_blend_alpha", None
         )
+        posterior_phase_accum = tensordict.get("vq_posterior_phase_accum", None)
+        posterior_phase_accum_valid = tensordict.get(
+            "vq_posterior_phase_accum_valid", None
+        )
         update_codebook = tensordict.get("vq_pae_update_codebook", self.training)
         if torch.is_tensor(update_codebook):
             update_codebook = bool(update_codebook.any().item())
@@ -892,6 +896,38 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_phase_alignment_loss"] = self._circular_phase_error(
             prior["phase"], posterior["phase"].detach()
         ).pow(2).mean(dim=-1)
+        if posterior_phase_accum is not None:
+            posterior_phase_accum = self._expand_phase_control(
+                posterior_phase_accum,
+                posterior["phase"],
+            )
+            if posterior_phase_accum_valid is None:
+                posterior_valid = torch.ones_like(posterior["phase"], dtype=torch.bool)
+            else:
+                posterior_valid = posterior_phase_accum_valid.to(
+                    device=posterior["phase"].device,
+                    dtype=torch.bool,
+                )
+                if posterior_valid.ndim == 1:
+                    posterior_valid = posterior_valid.unsqueeze(-1)
+                posterior_valid = posterior_valid.expand_as(posterior["phase"])
+            posterior_phase_consistency = self._circular_phase_error(
+                posterior["phase"],
+                posterior_phase_accum.detach(),
+            ).pow(2)
+            posterior_phase_consistency = torch.where(
+                posterior_valid,
+                posterior_phase_consistency,
+                torch.zeros_like(posterior_phase_consistency),
+            )
+            valid_count = posterior_valid.float().sum(dim=-1).clamp_min(1.0)
+            tensordict["vq_pae_posterior_phase_consistency_loss"] = (
+                posterior_phase_consistency.sum(dim=-1) / valid_count
+            )
+            tensordict["vq_pae_posterior_phase_accum_next"] = self._advance_phase(
+                phase=posterior["phase"],
+                frequency=posterior["frequency"],
+            )
         if prior_phase_accum_next is not None:
             tensordict["vq_pae_accumulated_phase_alignment_loss"] = (
                 self._circular_phase_error(
@@ -1016,6 +1052,22 @@ class DistillVQPAEModel(BaseModel):
                 accumulated_phase_alignment_raw
                 * accumulated_phase_alignment_weight
             )
+        posterior_phase_consistency = torch.tensor(0.0, device=commitment.device)
+        posterior_phase_consistency_raw = torch.tensor(0.0, device=commitment.device)
+        posterior_phase_consistency_weight = float(
+            getattr(losses, "posterior_phase_consistency_weight", 0.0)
+        )
+        if (
+            posterior_phase_consistency_weight > 0.0
+            and "vq_pae_posterior_phase_consistency_loss" in tensordict.keys()
+        ):
+            posterior_phase_consistency_raw = tensordict[
+                "vq_pae_posterior_phase_consistency_loss"
+            ].mean()
+            posterior_phase_consistency = (
+                posterior_phase_consistency_raw
+                * posterior_phase_consistency_weight
+            )
         frequency_alignment = (
             tensordict["vq_pae_frequency_alignment_loss"].mean()
             * losses.frequency_alignment_weight
@@ -1050,6 +1102,7 @@ class DistillVQPAEModel(BaseModel):
             + prior_alignment
             + phase_alignment
             + accumulated_phase_alignment
+            + posterior_phase_consistency
             + frequency_alignment
             + reconstruction
             + text_delta_ratio_penalty
@@ -1064,6 +1117,12 @@ class DistillVQPAEModel(BaseModel):
             ),
             "distill/vq_accumulated_phase_alignment_loss_weighted": (
                 accumulated_phase_alignment.detach()
+            ),
+            "distill/vq_posterior_phase_consistency_loss": (
+                posterior_phase_consistency_raw.detach()
+            ),
+            "distill/vq_posterior_phase_consistency_loss_weighted": (
+                posterior_phase_consistency.detach()
             ),
             "distill/vq_frequency_alignment_loss": frequency_alignment.detach(),
             "distill/vq_perplexity": tensordict["vq_pae_perplexity"].mean().detach(),
