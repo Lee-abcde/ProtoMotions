@@ -828,6 +828,7 @@ class DistillVQPAEModel(BaseModel):
         posterior_phase_accum_next = None
         posterior_phase_accum_alpha = None
         posterior_phase_consistency_loss = None
+        posterior_valid = None
         if prior_phase_accum is not None:
             if prior_phase_blend_alpha is None:
                 prior_phase_blend_alpha = torch.tensor(
@@ -868,12 +869,22 @@ class DistillVQPAEModel(BaseModel):
             )
             privileged_latent = posterior_latent
         if posterior_phase_accum is not None:
-            posterior_phase_blend_alpha = torch.full(
-                (posterior["phase"].shape[0],),
-                float(self.config.posterior_phase_accumulator_alpha),
-                device=posterior["phase"].device,
-                dtype=posterior["phase"].dtype,
+            posterior_uses_phase_accumulator = (
+                self.config.posterior_phase_accumulator_alpha is not None
             )
+            if posterior_uses_phase_accumulator:
+                posterior_phase_blend_alpha = torch.full(
+                    (posterior["phase"].shape[0],),
+                    float(self.config.posterior_phase_accumulator_alpha),
+                    device=posterior["phase"].device,
+                    dtype=posterior["phase"].dtype,
+                )
+            else:
+                posterior_phase_blend_alpha = torch.ones(
+                    posterior["phase"].shape[0],
+                    device=posterior["phase"].device,
+                    dtype=posterior["phase"].dtype,
+                )
             (
                 posterior_phase_used,
                 posterior_phase_accum_next,
@@ -888,13 +899,14 @@ class DistillVQPAEModel(BaseModel):
                 speed_scale=speed_scale,
             )
             posterior_phase_consistency_loss = posterior_phase_consistency_per_phase
-            posterior_decode_branch = {**posterior, "phase": posterior_phase_used}
-            posterior_latent = self._decode_next_step(
-                branch=posterior_decode_branch,
-                args=self.posterior_args,
-                speed_scale=speed_scale,
-            )
-            privileged_latent = posterior_latent
+            if posterior_uses_phase_accumulator:
+                posterior_decode_branch = {**posterior, "phase": posterior_phase_used}
+                posterior_latent = self._decode_next_step(
+                    branch=posterior_decode_branch,
+                    args=self.posterior_args,
+                    speed_scale=speed_scale,
+                )
+                privileged_latent = posterior_latent
         actor_text_residual = None
         actor_raw_text_residual = None
         privileged_text_residual = None
@@ -939,7 +951,7 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_phase_alignment_loss"] = self._circular_phase_error(
             prior["phase"], posterior["phase"].detach()
         ).pow(2).mean(dim=-1)
-        if posterior_phase_consistency_loss is not None:
+        if posterior_phase_consistency_loss is not None and posterior_valid is not None:
             valid_count = posterior_valid.float().sum(dim=-1).clamp_min(1.0)
             tensordict["vq_pae_posterior_phase_consistency_loss"] = (
                 posterior_phase_consistency_loss.sum(dim=-1) / valid_count

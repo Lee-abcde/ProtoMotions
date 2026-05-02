@@ -74,7 +74,7 @@ class DistillVQPAEModelConfig(BaseModelConfig):
     text_conditioning_scale: float = 0.25
     text_delta_max_ratio: Optional[float] = None
     prior_phase_accumulator_alpha: Optional[float] = None
-    posterior_phase_accumulator_alpha: float = 0.1
+    posterior_phase_accumulator_alpha: Optional[float] = 0.1
     prior_trunk_mask_keys: List[str] = field(default_factory=list)
     prior_trunk_mask_prob: float = 0.0
     prior_trunk_mask_eval: bool = False
