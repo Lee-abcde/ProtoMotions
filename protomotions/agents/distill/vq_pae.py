@@ -606,6 +606,21 @@ class DistillVQPAEModel(BaseModel):
         )
         return self._unit_to_phase(rotated_unit)
 
+    def _predict_frequency(
+        self, d1_per_second: torch.Tensor, frequency_head: nn.Module
+    ) -> torch.Tensor:
+        raw_frequency = frequency_head(d1_per_second).squeeze(-1)
+        if getattr(self.config, "signed_frequency", False):
+            max_signed_frequency = float(
+                getattr(self.config, "max_signed_frequency", 3.0)
+            )
+            if max_signed_frequency <= 0.0:
+                raise ValueError(
+                    "max_signed_frequency must be > 0 when signed_frequency=True"
+                )
+            return torch.tanh(raw_frequency) * max_signed_frequency
+        return F.softplus(raw_frequency) + 1e-4
+
     def _apply_phase_accumulator(
         self,
         branch: Dict[str, torch.Tensor],
@@ -725,7 +740,7 @@ class DistillVQPAEModel(BaseModel):
         # all valid temporal-change information available in its window.
         d1 = latent_1d[:, :, 1:] - latent_1d[:, :, :-1]
         d1_per_second = d1 / self.config.time_step
-        frequency = F.softplus(frequency_head(d1_per_second).squeeze(-1)) + 1e-4
+        frequency = self._predict_frequency(d1_per_second, frequency_head)
         offset = latent_1d.mean(dim=2)
         phase = self.analytical_phase(latent_1d, frequency, offset, args)
 
