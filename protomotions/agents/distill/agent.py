@@ -45,9 +45,14 @@ class DistillAgent(BaseAgent):
         return hasattr(self.config.model, "vae") and self.config.model.vae is not None
 
     def _uses_vq_prior_phase_accumulator(self) -> bool:
+        losses = getattr(self.config.model, "losses", None)
         return (
             getattr(self.config.model, "prior_phase_accumulator_alpha", None)
             is not None
+            or (
+                losses is not None
+                and getattr(losses, "prior_phase_consistency_weight", 0.0) > 0.0
+            )
         )
 
     def _uses_vq_posterior_phase_consistency(self) -> bool:
@@ -266,12 +271,16 @@ class DistillAgent(BaseAgent):
             obs["vq_prior_phase_accum_valid"] = (
                 self.vq_prior_phase_accum_valid.clone()
             )
-            obs["vq_prior_phase_blend_alpha"] = torch.full(
-                (self.num_envs,),
-                float(self.config.model.prior_phase_accumulator_alpha),
-                dtype=torch.float,
-                device=self.device,
+            prior_phase_accumulator_alpha = (
+                self.config.model.prior_phase_accumulator_alpha
             )
+            if prior_phase_accumulator_alpha is not None:
+                obs["vq_prior_phase_blend_alpha"] = torch.full(
+                    (self.num_envs,),
+                    float(prior_phase_accumulator_alpha),
+                    dtype=torch.float,
+                    device=self.device,
+                )
         if self._uses_vq_posterior_phase_consistency():
             obs["vq_posterior_phase_accum"] = (
                 self.vq_posterior_phase_accum.clone()

@@ -31,7 +31,10 @@ class VQPAELossConfig:
     phase_alignment_weight: float = 0.1
     frequency_alignment_weight: float = 0.1
     accumulated_phase_alignment_weight: float = 0.0
+    prior_phase_consistency_weight: float = 0.0
+    prior_phase_consistency_horizon: int = 1
     posterior_phase_consistency_weight: float = 0.0
+    posterior_phase_consistency_horizon: int = 1
     reconstruction_weight: float = 0.0
     prior_bc_weight: float = 0.0
     text_delta_ratio_penalty_weight: float = 0.0
@@ -74,7 +77,7 @@ class DistillVQPAEModelConfig(BaseModelConfig):
     text_conditioning_scale: float = 0.25
     text_delta_max_ratio: Optional[float] = None
     prior_phase_accumulator_alpha: Optional[float] = None
-    posterior_phase_accumulator_alpha: Optional[float] = 0.1
+    posterior_phase_accumulator_alpha: Optional[float] = None
     prior_trunk_mask_keys: List[str] = field(default_factory=list)
     prior_trunk_mask_prob: float = 0.0
     prior_trunk_mask_eval: bool = False
