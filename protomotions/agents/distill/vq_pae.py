@@ -689,8 +689,16 @@ class DistillVQPAEModel(BaseModel):
         blend_alpha: float,
         args: torch.Tensor,
         speed_scale: torch.Tensor | None = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        predicted_state = branch["quantized_state"]
+        update_codebook: bool = False,
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        predicted_state = branch["state"]
         state_accum = state_accum.to(
             device=predicted_state.device,
             dtype=predicted_state.dtype,
@@ -705,13 +713,26 @@ class DistillVQPAEModel(BaseModel):
         valid_expanded = valid.unsqueeze(-1).expand_as(predicted_state)
         base_state = torch.where(valid_expanded, state_accum.detach(), predicted_state)
         used_state = base_state + alpha * (predicted_state - base_state)
-        decode_branch = {**branch, "quantized_state": used_state}
+        (
+            quantized_state,
+            commitment_loss,
+            indices,
+            perplexity,
+        ) = self._quantize(used_state, update_codebook=update_codebook)
+        decode_branch = {**branch, "quantized_state": quantized_state}
         next_step = self._decode_next_step(
             branch=decode_branch,
             args=args,
             speed_scale=speed_scale,
         )
-        return used_state, next_step, valid, alpha.squeeze(-1)
+        return (
+            used_state,
+            quantized_state,
+            commitment_loss,
+            indices,
+            perplexity,
+            next_step,
+        )
 
     def _decode_next_step(
         self,
@@ -975,9 +996,11 @@ class DistillVQPAEModel(BaseModel):
             if prior_uses_state_accumulator:
                 (
                     prior_state_accum_next,
+                    prior_quantized_state,
+                    prior_commitment_loss,
+                    prior_indices,
+                    prior_perplexity,
                     raw_prior_latent,
-                    _prior_state_valid,
-                    prior_state_accum_alpha,
                 ) = self._apply_state_accumulator(
                     branch={**prior, "phase": prior_phase_used},
                     state_accum=prior_state_accum,
@@ -985,10 +1008,25 @@ class DistillVQPAEModel(BaseModel):
                     blend_alpha=self.config.prior_state_accumulator_alpha,
                     args=self.prior_args,
                     speed_scale=speed_scale,
+                    update_codebook=False,
+                )
+                prior = {
+                    **prior,
+                    "state": prior_state_accum_next,
+                    "quantized_state": prior_quantized_state,
+                    "commitment_loss": prior_commitment_loss,
+                    "indices": prior_indices,
+                    "perplexity": prior_perplexity,
+                }
+                prior_state_accum_alpha = torch.full(
+                    (prior["state"].shape[0],),
+                    float(self.config.prior_state_accumulator_alpha),
+                    device=prior["state"].device,
+                    dtype=prior["state"].dtype,
                 )
                 actor_latent = raw_prior_latent
             else:
-                prior_state_accum_next = prior["quantized_state"]
+                prior_state_accum_next = prior["state"]
         if speed_scale is not None:
             posterior_latent = self._decode_next_step(
                 branch=posterior,
@@ -1039,9 +1077,11 @@ class DistillVQPAEModel(BaseModel):
             if posterior_uses_state_accumulator:
                 (
                     posterior_state_accum_next,
+                    posterior_quantized_state,
+                    posterior_commitment_loss,
+                    posterior_indices,
+                    posterior_perplexity,
                     posterior_latent,
-                    _posterior_state_valid,
-                    posterior_state_accum_alpha,
                 ) = self._apply_state_accumulator(
                     branch={**posterior, "phase": posterior_phase_used},
                     state_accum=posterior_state_accum,
@@ -1049,10 +1089,25 @@ class DistillVQPAEModel(BaseModel):
                     blend_alpha=self.config.posterior_state_accumulator_alpha,
                     args=self.posterior_args,
                     speed_scale=speed_scale,
+                    update_codebook=update_codebook,
+                )
+                posterior = {
+                    **posterior,
+                    "state": posterior_state_accum_next,
+                    "quantized_state": posterior_quantized_state,
+                    "commitment_loss": posterior_commitment_loss,
+                    "indices": posterior_indices,
+                    "perplexity": posterior_perplexity,
+                }
+                posterior_state_accum_alpha = torch.full(
+                    (posterior["state"].shape[0],),
+                    float(self.config.posterior_state_accumulator_alpha),
+                    device=posterior["state"].device,
+                    dtype=posterior["state"].dtype,
                 )
                 privileged_latent = posterior_latent
             else:
-                posterior_state_accum_next = posterior["quantized_state"]
+                posterior_state_accum_next = posterior["state"]
         actor_text_residual = None
         actor_raw_text_residual = None
         privileged_text_residual = None
