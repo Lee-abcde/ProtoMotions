@@ -39,6 +39,10 @@ from protomotions.agents.distill.latent_velocity_config import (
     DistillLatentVelocityModelConfig,
     LatentVelocityLossConfig,
 )
+from protomotions.agents.distill.flow_policy_config import (
+    DistillFlowPolicyModelConfig,
+    FlowPolicyLossConfig,
+)
 from protomotions.agents.distill.ae_config import (
     DistillAEModelConfig,
 )
@@ -175,6 +179,7 @@ class DistillAgentConfig(BaseAgentConfig):
         DistillPAEModelConfig,
         DistillGeometricModelConfig,
         DistillLatentVelocityModelConfig,
+        DistillFlowPolicyModelConfig,
         DistillAEModelConfig,
     ] = field(
         default_factory=DistillModelConfig,
