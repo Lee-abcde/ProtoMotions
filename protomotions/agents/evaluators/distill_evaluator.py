@@ -516,6 +516,9 @@ class DistillEvaluator(MimicEvaluator):
                 configured_prior_frequency_scale = getattr(
                     self, "vq_prior_frequency_scale", 1.0
                 )
+                configured_prior_frequency_override = getattr(
+                    self, "vq_prior_frequency_override", None
+                )
                 configured_prior_phase_accum_alpha = getattr(
                     self, "vq_prior_phase_accumulator_alpha", None
                 )
@@ -564,6 +567,16 @@ class DistillEvaluator(MimicEvaluator):
                     obs_td["vq_speed_scale"] = torch.full(
                         (obs_td.batch_size[0],),
                         float(model_frequency_scale),
+                        device=self.device,
+                    )
+                if (
+                    configured_prior_frequency_override is not None
+                    and is_vq_pae_model
+                    and action_key == "prior_action"
+                ):
+                    obs_td["vq_prior_frequency_override"] = torch.full(
+                        (obs_td.batch_size[0],),
+                        float(configured_prior_frequency_override),
                         device=self.device,
                     )
                 use_prior_phase_accumulator = (

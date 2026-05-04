@@ -131,6 +131,15 @@ def create_parser():
         ),
     )
     parser.add_argument(
+        "--vq-prior-frequency-override",
+        type=float,
+        default=None,
+        help=(
+            "Override the VQ-PAE prior predicted frequency with a fixed value "
+            "during interactive inference."
+        ),
+    )
+    parser.add_argument(
         "--vq-prior-phase-accumulator-alpha",
         type=float,
         default=None,
@@ -444,6 +453,11 @@ def main():
             agent.evaluator,
             "vq_prior_frequency_scale",
             args.vq_prior_frequency_scale,
+        )
+        setattr(
+            agent.evaluator,
+            "vq_prior_frequency_override",
+            args.vq_prior_frequency_override,
         )
         prior_phase_accumulator_alpha = args.vq_prior_phase_accumulator_alpha
         if prior_phase_accumulator_alpha is None:

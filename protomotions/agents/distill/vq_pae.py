@@ -790,6 +790,7 @@ class DistillVQPAEModel(BaseModel):
             "vq_external_privileged_vae_latent", None
         )
         speed_scale = tensordict.get("vq_speed_scale", None)
+        prior_frequency_override = tensordict.get("vq_prior_frequency_override", None)
         prior_phase_accum = tensordict.get("vq_prior_phase_accum", None)
         prior_phase_accum_valid = tensordict.get(
             "vq_prior_phase_accum_valid", None
@@ -834,6 +835,19 @@ class DistillVQPAEModel(BaseModel):
             args=self.prior_args,
             update_codebook=False,
         )
+        if prior_frequency_override is not None:
+            prior_frequency_override = self._expand_phase_control(
+                prior_frequency_override, prior["frequency"]
+            )
+            prior = {**prior, "frequency": prior_frequency_override}
+            prior = {
+                **prior,
+                "next_step": self._decode_next_step(
+                    branch=prior,
+                    args=self.prior_args,
+                    speed_scale=speed_scale,
+                ),
+            }
 
         raw_prior_latent = prior["next_step"]
         posterior_latent = posterior["next_step"]
