@@ -433,6 +433,8 @@ def agent_config(
         text_delta_max_ratio=None,
         prior_phase_accumulator_alpha=None,
         posterior_phase_accumulator_alpha=None,
+        prior_state_accumulator_alpha=None,
+        posterior_state_accumulator_alpha=None,
         prior_trunk_mask_keys=["trunk_target_relative_rot_norm"],
         prior_trunk_mask_prob=1.0,
         prior_trunk_mask_eval=True,
