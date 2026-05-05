@@ -68,9 +68,21 @@ class DistillAgent(BaseAgent):
             is not None
         )
 
+    def _uses_vq_prior_offset_accumulator(self) -> bool:
+        return (
+            getattr(self.config.model, "prior_offset_accumulator_alpha", None)
+            is not None
+        )
+
     def _uses_vq_posterior_state_accumulator(self) -> bool:
         return (
             getattr(self.config.model, "posterior_state_accumulator_alpha", None)
+            is not None
+        )
+
+    def _uses_vq_posterior_offset_accumulator(self) -> bool:
+        return (
+            getattr(self.config.model, "posterior_offset_accumulator_alpha", None)
             is not None
         )
 
@@ -120,6 +132,18 @@ class DistillAgent(BaseAgent):
                 dtype=torch.bool,
                 device=self.device,
             )
+        if self._uses_vq_prior_offset_accumulator():
+            self.vq_prior_offset_accum = torch.zeros(
+                self.num_envs,
+                self.config.model.n_timing_phases,
+                dtype=torch.float,
+                device=self.device,
+            )
+            self.vq_prior_offset_accum_valid = torch.zeros(
+                self.num_envs,
+                dtype=torch.bool,
+                device=self.device,
+            )
         if self._uses_vq_posterior_state_accumulator():
             self.vq_posterior_state_accum = torch.zeros(
                 self.num_envs,
@@ -128,6 +152,18 @@ class DistillAgent(BaseAgent):
                 device=self.device,
             )
             self.vq_posterior_state_accum_valid = torch.zeros(
+                self.num_envs,
+                dtype=torch.bool,
+                device=self.device,
+            )
+        if self._uses_vq_posterior_offset_accumulator():
+            self.vq_posterior_offset_accum = torch.zeros(
+                self.num_envs,
+                self.config.model.n_timing_phases,
+                dtype=torch.float,
+                device=self.device,
+            )
+            self.vq_posterior_offset_accum_valid = torch.zeros(
                 self.num_envs,
                 dtype=torch.bool,
                 device=self.device,
@@ -301,11 +337,21 @@ class DistillAgent(BaseAgent):
             if reset_ids.numel() > 0:
                 self.vq_prior_state_accum[reset_ids] = 0.0
                 self.vq_prior_state_accum_valid[reset_ids] = False
+        if self._uses_vq_prior_offset_accumulator():
+            reset_ids = dones.nonzero(as_tuple=False).squeeze(-1)
+            if reset_ids.numel() > 0:
+                self.vq_prior_offset_accum[reset_ids] = 0.0
+                self.vq_prior_offset_accum_valid[reset_ids] = False
         if self._uses_vq_posterior_state_accumulator():
             reset_ids = dones.nonzero(as_tuple=False).squeeze(-1)
             if reset_ids.numel() > 0:
                 self.vq_posterior_state_accum[reset_ids] = 0.0
                 self.vq_posterior_state_accum_valid[reset_ids] = False
+        if self._uses_vq_posterior_offset_accumulator():
+            reset_ids = dones.nonzero(as_tuple=False).squeeze(-1)
+            if reset_ids.numel() > 0:
+                self.vq_posterior_offset_accum[reset_ids] = 0.0
+                self.vq_posterior_offset_accum_valid[reset_ids] = False
         return dones, terminated, extras
 
     def add_agent_info_to_obs(self, obs):
@@ -339,12 +385,24 @@ class DistillAgent(BaseAgent):
             obs["vq_prior_state_accum_valid"] = (
                 self.vq_prior_state_accum_valid.clone()
             )
+        if self._uses_vq_prior_offset_accumulator():
+            obs["vq_prior_offset_accum"] = self.vq_prior_offset_accum.clone()
+            obs["vq_prior_offset_accum_valid"] = (
+                self.vq_prior_offset_accum_valid.clone()
+            )
         if self._uses_vq_posterior_state_accumulator():
             obs["vq_posterior_state_accum"] = (
                 self.vq_posterior_state_accum.clone()
             )
             obs["vq_posterior_state_accum_valid"] = (
                 self.vq_posterior_state_accum_valid.clone()
+            )
+        if self._uses_vq_posterior_offset_accumulator():
+            obs["vq_posterior_offset_accum"] = (
+                self.vq_posterior_offset_accum.clone()
+            )
+            obs["vq_posterior_offset_accum_valid"] = (
+                self.vq_posterior_offset_accum_valid.clone()
             )
         return obs
 
@@ -392,6 +450,14 @@ class DistillAgent(BaseAgent):
             )
             self.vq_prior_state_accum_valid[:] = True
         if (
+            self._uses_vq_prior_offset_accumulator()
+            and "vq_pae_prior_offset_accum_next" in output_td.keys()
+        ):
+            self.vq_prior_offset_accum.copy_(
+                output_td["vq_pae_prior_offset_accum_next"].detach()
+            )
+            self.vq_prior_offset_accum_valid[:] = True
+        if (
             self._uses_vq_posterior_state_accumulator()
             and "vq_pae_posterior_state_accum_next" in output_td.keys()
         ):
@@ -399,6 +465,14 @@ class DistillAgent(BaseAgent):
                 output_td["vq_pae_posterior_state_accum_next"].detach()
             )
             self.vq_posterior_state_accum_valid[:] = True
+        if (
+            self._uses_vq_posterior_offset_accumulator()
+            and "vq_pae_posterior_offset_accum_next" in output_td.keys()
+        ):
+            self.vq_posterior_offset_accum.copy_(
+                output_td["vq_pae_posterior_offset_accum_next"].detach()
+            )
+            self.vq_posterior_offset_accum_valid[:] = True
 
         # Get student action
         if "privileged_action" in output_td:

@@ -681,6 +681,32 @@ class DistillVQPAEModel(BaseModel):
             valid = valid.reshape(valid.shape[0], -1).any(dim=-1)
         return valid
 
+    def _apply_offset_accumulator(
+        self,
+        latent: torch.Tensor,
+        predicted_offset: torch.Tensor,
+        frequency: torch.Tensor,
+        args: torch.Tensor,
+        offset_accum: torch.Tensor,
+        offset_accum_valid: torch.Tensor | None,
+        blend_alpha: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        offset_accum = self._expand_phase_control(offset_accum, predicted_offset)
+        valid = self._expand_state_valid(offset_accum_valid, predicted_offset)
+        alpha = torch.full(
+            (predicted_offset.shape[0], 1),
+            float(blend_alpha),
+            device=predicted_offset.device,
+            dtype=predicted_offset.dtype,
+        ).clamp(0.0, 1.0)
+        valid_expanded = valid.unsqueeze(-1).expand_as(predicted_offset)
+        base_offset = torch.where(
+            valid_expanded, offset_accum.detach(), predicted_offset
+        )
+        used_offset = base_offset + alpha * (predicted_offset - base_offset)
+        used_phase = self.analytical_phase(latent, frequency, used_offset, args)
+        return used_offset, used_phase, used_offset
+
     def _apply_state_accumulator(
         self,
         branch: Dict[str, torch.Tensor],
@@ -821,6 +847,7 @@ class DistillVQPAEModel(BaseModel):
 
         return {
             "encoded": encoded,
+            "phase_latent": latent_1d,
             "frequency": frequency,
             "offset": offset,
             "phase": phase,
@@ -865,6 +892,10 @@ class DistillVQPAEModel(BaseModel):
         prior_state_accum_valid = tensordict.get(
             "vq_prior_state_accum_valid", None
         )
+        prior_offset_accum = tensordict.get("vq_prior_offset_accum", None)
+        prior_offset_accum_valid = tensordict.get(
+            "vq_prior_offset_accum_valid", None
+        )
         posterior_phase_accum = tensordict.get("vq_posterior_phase_accum", None)
         posterior_phase_accum_valid = tensordict.get(
             "vq_posterior_phase_accum_valid", None
@@ -872,6 +903,10 @@ class DistillVQPAEModel(BaseModel):
         posterior_state_accum = tensordict.get("vq_posterior_state_accum", None)
         posterior_state_accum_valid = tensordict.get(
             "vq_posterior_state_accum_valid", None
+        )
+        posterior_offset_accum = tensordict.get("vq_posterior_offset_accum", None)
+        posterior_offset_accum_valid = tensordict.get(
+            "vq_posterior_offset_accum_valid", None
         )
         update_codebook = tensordict.get("vq_pae_update_codebook", self.training)
         if torch.is_tensor(update_codebook):
@@ -928,10 +963,14 @@ class DistillVQPAEModel(BaseModel):
         posterior_phase_used = posterior["phase"]
         prior_phase_accum_next = None
         prior_phase_accum_alpha = None
+        prior_offset_accum_next = None
+        prior_offset_accum_alpha = None
         prior_state_accum_next = None
         prior_state_accum_alpha = None
         posterior_phase_accum_next = None
         posterior_phase_accum_alpha = None
+        posterior_offset_accum_next = None
+        posterior_offset_accum_alpha = None
         posterior_state_accum_next = None
         posterior_state_accum_alpha = None
         prior_uses_phase_accumulator = (
@@ -943,8 +982,14 @@ class DistillVQPAEModel(BaseModel):
         prior_uses_state_accumulator = (
             self.config.prior_state_accumulator_alpha is not None
         )
+        prior_uses_offset_accumulator = (
+            self.config.prior_offset_accumulator_alpha is not None
+        )
         posterior_uses_state_accumulator = (
             self.config.posterior_state_accumulator_alpha is not None
+        )
+        posterior_uses_offset_accumulator = (
+            self.config.posterior_offset_accumulator_alpha is not None
         )
         prior_phase_consistency_loss = None
         prior_valid = None
@@ -992,6 +1037,40 @@ class DistillVQPAEModel(BaseModel):
                 speed_scale=speed_scale,
             )
             actor_latent = raw_prior_latent
+        if prior_offset_accum is not None:
+            if prior_uses_offset_accumulator:
+                (
+                    prior_offset_accum_next,
+                    prior_phase_used,
+                    prior_offset_used,
+                ) = self._apply_offset_accumulator(
+                    latent=prior["phase_latent"],
+                    predicted_offset=prior["offset"],
+                    frequency=prior["frequency"],
+                    args=self.prior_args,
+                    offset_accum=prior_offset_accum,
+                    offset_accum_valid=prior_offset_accum_valid,
+                    blend_alpha=self.config.prior_offset_accumulator_alpha,
+                )
+                prior = {
+                    **prior,
+                    "offset": prior_offset_used,
+                    "phase": prior_phase_used,
+                }
+                prior_offset_accum_alpha = torch.full(
+                    (prior["offset"].shape[0],),
+                    float(self.config.prior_offset_accumulator_alpha),
+                    device=prior["offset"].device,
+                    dtype=prior["offset"].dtype,
+                )
+                raw_prior_latent = self._decode_next_step(
+                    branch={**prior, "phase": prior_phase_used},
+                    args=self.prior_args,
+                    speed_scale=speed_scale,
+                )
+                actor_latent = raw_prior_latent
+            else:
+                prior_offset_accum_next = prior["offset"]
         if prior_state_accum is not None:
             if prior_uses_state_accumulator:
                 (
@@ -1073,6 +1152,40 @@ class DistillVQPAEModel(BaseModel):
                 privileged_latent = posterior_latent
             else:
                 posterior_phase_accum_alpha = None
+        if posterior_offset_accum is not None:
+            if posterior_uses_offset_accumulator:
+                (
+                    posterior_offset_accum_next,
+                    posterior_phase_used,
+                    posterior_offset_used,
+                ) = self._apply_offset_accumulator(
+                    latent=posterior["phase_latent"],
+                    predicted_offset=posterior["offset"],
+                    frequency=posterior["frequency"],
+                    args=self.posterior_args,
+                    offset_accum=posterior_offset_accum,
+                    offset_accum_valid=posterior_offset_accum_valid,
+                    blend_alpha=self.config.posterior_offset_accumulator_alpha,
+                )
+                posterior = {
+                    **posterior,
+                    "offset": posterior_offset_used,
+                    "phase": posterior_phase_used,
+                }
+                posterior_offset_accum_alpha = torch.full(
+                    (posterior["offset"].shape[0],),
+                    float(self.config.posterior_offset_accumulator_alpha),
+                    device=posterior["offset"].device,
+                    dtype=posterior["offset"].dtype,
+                )
+                posterior_latent = self._decode_next_step(
+                    branch={**posterior, "phase": posterior_phase_used},
+                    args=self.posterior_args,
+                    speed_scale=speed_scale,
+                )
+                privileged_latent = posterior_latent
+            else:
+                posterior_offset_accum_next = posterior["offset"]
         if posterior_state_accum is not None:
             if posterior_uses_state_accumulator:
                 (
@@ -1164,6 +1277,10 @@ class DistillVQPAEModel(BaseModel):
             )
         if posterior_phase_accum_next is not None:
             tensordict["vq_pae_posterior_phase_accum_next"] = posterior_phase_accum_next
+        if posterior_offset_accum_next is not None:
+            tensordict["vq_pae_posterior_offset_accum_next"] = (
+                posterior_offset_accum_next
+            )
         if posterior_state_accum_next is not None:
             tensordict["vq_pae_posterior_state_accum_next"] = posterior_state_accum_next
         if prior_phase_accum_next is not None and prior_uses_phase_accumulator:
@@ -1193,6 +1310,8 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_prior_phase_used"] = prior_phase_used
         if prior_phase_accum_next is not None:
             tensordict["vq_pae_prior_phase_accum_next"] = prior_phase_accum_next
+        if prior_offset_accum_next is not None:
+            tensordict["vq_pae_prior_offset_accum_next"] = prior_offset_accum_next
         if prior_state_accum_next is not None:
             tensordict["vq_pae_prior_state_accum_next"] = prior_state_accum_next
         tensordict["vq_pae_prior_next_phase_from_raw"] = self._advance_phase(
@@ -1210,6 +1329,12 @@ class DistillVQPAEModel(BaseModel):
         if posterior_phase_accum_alpha is not None:
             tensordict["vq_pae_posterior_phase_accum_alpha"] = (
                 posterior_phase_accum_alpha
+            )
+        if prior_offset_accum_alpha is not None:
+            tensordict["vq_pae_prior_offset_accum_alpha"] = prior_offset_accum_alpha
+        if posterior_offset_accum_alpha is not None:
+            tensordict["vq_pae_posterior_offset_accum_alpha"] = (
+                posterior_offset_accum_alpha
             )
         if prior_state_accum_alpha is not None:
             tensordict["vq_pae_prior_state_accum_alpha"] = prior_state_accum_alpha

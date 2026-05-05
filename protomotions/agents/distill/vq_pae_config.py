@@ -80,6 +80,8 @@ class DistillVQPAEModelConfig(BaseModelConfig):
     max_signed_frequency: float = 3.0
     prior_phase_accumulator_alpha: Optional[float] = None
     posterior_phase_accumulator_alpha: Optional[float] = None
+    prior_offset_accumulator_alpha: Optional[float] = None
+    posterior_offset_accumulator_alpha: Optional[float] = None
     prior_state_accumulator_alpha: Optional[float] = None
     posterior_state_accumulator_alpha: Optional[float] = None
     prior_trunk_mask_keys: List[str] = field(default_factory=list)
