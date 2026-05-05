@@ -60,6 +60,7 @@ def _freq_mlp(in_length: int) -> nn.Sequential:
         nn.Linear(in_length, max(16, in_length // 2)),
         nn.GELU(),
         nn.Linear(max(16, in_length // 2), 1),
+        nn.ELU(),
     )
 
 
@@ -205,8 +206,8 @@ class DistillVQPAEModel(BaseModel):
             "posterior_args",
             torch.cat([history_offsets, future_offsets], dim=0),
         )
-        self.prior_frequency_head = _freq_mlp(prior_seq_len - 1)
-        self.posterior_frequency_head = _freq_mlp(posterior_seq_len - 1)
+        self.prior_frequency_head = _freq_mlp(prior_seq_len // 2 + 1)
+        self.posterior_frequency_head = _freq_mlp(posterior_seq_len // 2 + 1)
         self.reconstruction_head: nn.Module | None = None
         if self.config.losses.reconstruction_weight > 0.0:
             if not (
@@ -607,19 +608,13 @@ class DistillVQPAEModel(BaseModel):
         return self._unit_to_phase(rotated_unit)
 
     def _predict_frequency(
-        self, d1_per_second: torch.Tensor, frequency_head: nn.Module
+        self, spectral_power: torch.Tensor, frequency_head: nn.Module
     ) -> torch.Tensor:
-        raw_frequency = frequency_head(d1_per_second).squeeze(-1)
         if getattr(self.config, "signed_frequency", False):
-            max_signed_frequency = float(
-                getattr(self.config, "max_signed_frequency", 3.0)
+            raise ValueError(
+                "signed_frequency=True is not supported with FFT-power frequency prediction"
             )
-            if max_signed_frequency <= 0.0:
-                raise ValueError(
-                    "max_signed_frequency must be > 0 when signed_frequency=True"
-                )
-            return torch.tanh(raw_frequency) * max_signed_frequency
-        return F.softplus(raw_frequency) + 1e-4
+        return frequency_head(spectral_power).squeeze(-1) + 1.0
 
     def _apply_phase_accumulator(
         self,
@@ -852,14 +847,12 @@ class DistillVQPAEModel(BaseModel):
         latent_1d = phase_conv(encoded)
         if latent_1d.shape[2] < 2:
             raise ValueError(
-                f"Need sequence length >= 2 for d1-based frequency prediction, got {latent_1d.shape[2]}"
+                f"Need sequence length >= 2 for FFT-based frequency prediction, got {latent_1d.shape[2]}"
             )
 
-        # Predict frequency from the full first-order delta sequence so each branch uses
-        # all valid temporal-change information available in its window.
-        d1 = latent_1d[:, :, 1:] - latent_1d[:, :, :-1]
-        d1_per_second = d1 / self.config.time_step
-        frequency = self._predict_frequency(d1_per_second, frequency_head)
+        rfft = torch.fft.rfft(latent_1d, dim=2) / latent_1d.shape[2] * 2
+        spectral_power = rfft.abs().pow(2)
+        frequency = self._predict_frequency(spectral_power, frequency_head)
         offset = latent_1d.mean(dim=2)
         phase = self.analytical_phase(latent_1d, frequency, offset, args)
 
