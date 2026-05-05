@@ -1302,11 +1302,14 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_prior_indices"] = prior["indices"]
         tensordict["vq_pae_phase"] = posterior["phase"]
         tensordict["vq_pae_frequency"] = posterior["frequency"]
+        tensordict["vq_pae_offset"] = posterior["offset"]
         tensordict["vq_pae_posterior_phase"] = posterior["phase"]
         tensordict["vq_pae_posterior_frequency"] = posterior["frequency"]
+        tensordict["vq_pae_posterior_offset"] = posterior["offset"]
         tensordict["vq_pae_posterior_phase_used"] = posterior_phase_used
         tensordict["vq_pae_prior_phase"] = prior["phase"]
         tensordict["vq_pae_prior_frequency"] = prior["frequency"]
+        tensordict["vq_pae_prior_offset"] = prior["offset"]
         tensordict["vq_pae_prior_phase_used"] = prior_phase_used
         if prior_phase_accum_next is not None:
             tensordict["vq_pae_prior_phase_accum_next"] = prior_phase_accum_next
