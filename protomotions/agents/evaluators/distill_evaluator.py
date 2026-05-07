@@ -1,5 +1,6 @@
 import math
 import logging
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -25,6 +26,8 @@ class DistillEvaluator(MimicEvaluator):
         super().__init__(agent, fabric, config)
         self._privileged_eval_state: Optional[Dict[str, Any]] = None
         self._vq_latent_capture: Optional[torch.Tensor] = None
+        self._vq_manifold_index_capture: Optional[torch.Tensor] = None
+        self._vq_phase_capture: Optional[torch.Tensor] = None
         self._vq_latent_loop_phase: Optional[torch.Tensor] = None
         self._vq_prior_phase_accum: Optional[torch.Tensor] = None
         self._vq_prior_phase_accum_valid: Optional[torch.Tensor] = None
@@ -148,6 +151,501 @@ class DistillEvaluator(MimicEvaluator):
             accum_valid[env_ids] = False
             if accum is not None:
                 accum[env_ids] = 0.0
+
+    def _decode_vq_codebook_manifold(
+        self,
+        model_module: DistillVQPAEModel,
+        num_phase_samples: int,
+    ) -> Optional[torch.Tensor]:
+        """Decode every VQ state over one phase cycle."""
+        codebook = getattr(model_module.quantizer, "_codebook", None)
+        if codebook is None or codebook.numel() == 0:
+            return None
+
+        codebook = codebook.detach()
+        num_phase_samples = max(int(num_phase_samples), 2)
+        phase_grid = torch.linspace(
+            -0.5,
+            0.5,
+            num_phase_samples + 1,
+            device=codebook.device,
+            dtype=codebook.dtype,
+        )
+        angles = (
+            model_module.two_pi.to(device=codebook.device, dtype=codebook.dtype)
+            * phase_grid.view(1, 1, -1)
+        )
+        angles = angles.expand(
+            codebook.shape[0],
+            model_module.config.n_timing_phases,
+            -1,
+        )
+        manifold, _ = model_module.get_phase_manifold(codebook, angles)
+        return manifold.permute(0, 2, 1).contiguous()
+
+    def _project_latent_manifold_to_2d(
+        self,
+        background_curves: torch.Tensor,
+        trajectory: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Project high-dimensional latent manifold points with torch PCA."""
+        latent_dim = background_curves.shape[-1]
+        if latent_dim == 1:
+            background_2d = torch.cat(
+                [background_curves, torch.zeros_like(background_curves)],
+                dim=-1,
+            )
+            trajectory_2d = torch.cat(
+                [trajectory, torch.zeros_like(trajectory)],
+                dim=-1,
+            )
+            return background_2d, trajectory_2d
+
+        background_flat = background_curves.reshape(-1, latent_dim)
+        all_points = torch.cat([background_flat, trajectory], dim=0).float()
+        mean = all_points.mean(dim=0, keepdim=True)
+        centered = all_points - mean
+        denom = max(centered.shape[0] - 1, 1)
+        covariance = centered.t().matmul(centered) / denom
+        _, eigenvectors = torch.linalg.eigh(covariance)
+        components = eigenvectors[:, [-1, -2]]
+
+        background_2d = (background_flat - mean).matmul(components)
+        trajectory_2d = (trajectory.float() - mean).matmul(components)
+        return (
+            background_2d.reshape(*background_curves.shape[:-1], 2),
+            trajectory_2d,
+        )
+
+    def _decode_vq_phase_points(
+        self,
+        model_module: DistillVQPAEModel,
+        indices: torch.Tensor,
+        phases: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """Decode points selected by recorded VQ code indices and phases."""
+        codebook = getattr(model_module.quantizer, "_codebook", None)
+        if codebook is None or codebook.numel() == 0:
+            return None
+
+        indices = indices.to(device=codebook.device, dtype=torch.long)
+        if indices.numel() == 0:
+            return None
+        valid = (0 <= indices) & (indices < codebook.shape[0])
+        if not valid.all():
+            return None
+
+        phases = phases.to(device=codebook.device, dtype=codebook.dtype)
+        if not torch.isfinite(phases).all():
+            return None
+        if phases.ndim == 1:
+            phases = phases.unsqueeze(-1)
+        angles = (
+            model_module.two_pi.to(device=codebook.device, dtype=codebook.dtype)
+            * phases.unsqueeze(-1)
+        )
+        selected_states = codebook[indices]
+        manifold, _ = model_module.get_phase_manifold(selected_states, angles)
+        return manifold[:, :, 0]
+
+    def _get_vq_latent_manifold_plot_path(
+        self,
+        action_key: str,
+        env_idx: int,
+    ) -> Path:
+        root_dir = Path(self.root_dir) if self.root_dir is not None else Path(".")
+        configured_path = getattr(self, "vq_latent_manifold_plot_path", None)
+        if configured_path:
+            plot_path = Path(configured_path)
+            if plot_path.suffix:
+                return plot_path if plot_path.is_absolute() else root_dir / plot_path
+            plot_dir = plot_path if plot_path.is_absolute() else root_dir / plot_path
+            return plot_dir / f"vq_latent_manifold_{action_key}_env{env_idx}.png"
+
+        return root_dir / f"vq_latent_manifold_{action_key}_env{env_idx}.png"
+
+    def _save_vq_latent_manifold_gif(
+        self,
+        plot_path: Path,
+        background_np,
+        trajectory_np,
+        phase_indices,
+        frame_count: int,
+        plot_mode: str,
+        action_key: str,
+        env_idx: int,
+        latent_key: Optional[str],
+        plt,
+        np,
+        LineCollection,
+        Normalize,
+    ) -> None:
+        gif_fps = int(getattr(self, "vq_latent_manifold_gif_fps", 20))
+        if gif_fps <= 0 or frame_count == 0:
+            return
+        gif_dpi = int(getattr(self, "vq_latent_manifold_gif_dpi", 120))
+
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            print("[vq-latent-loop] GIF writer unavailable; skipping manifold GIF")
+            return
+
+        gif_path = plot_path.with_suffix(".gif")
+        fig, ax = plt.subplots(figsize=(8, 8), dpi=gif_dpi)
+        background_lines = LineCollection(
+            background_np,
+            colors=[(0.45, 0.45, 0.45, 0.14)],
+            linewidths=0.6,
+            zorder=1,
+        )
+        ax.add_collection(background_lines)
+        ax.scatter(
+            trajectory_np[:, 0],
+            trajectory_np[:, 1],
+            color=(0.05, 0.05, 0.05, 0.16),
+            s=14,
+            edgecolors="none",
+            zorder=2,
+        )
+
+        norm = Normalize(vmin=0, vmax=max(frame_count - 1, 1))
+        cmap = plt.get_cmap("viridis")
+        draw_segment = np.ones(max(frame_count - 1, 0), dtype=bool)
+        if frame_count > 1:
+            if phase_indices is not None:
+                draw_segment = phase_indices[:-1].cpu().numpy() == phase_indices[
+                    1:
+                ].cpu().numpy()
+            colorbar = fig.colorbar(
+                plt.cm.ScalarMappable(norm=norm, cmap=cmap),
+                ax=ax,
+                pad=0.02,
+            )
+            colorbar.set_label("Capture frame")
+        else:
+            ax.scatter(
+                trajectory_np[:, 0],
+                trajectory_np[:, 1],
+                color="tab:blue",
+                s=28,
+                edgecolors="none",
+                zorder=4,
+            )
+        ax.scatter(
+            trajectory_np[0, 0],
+            trajectory_np[0, 1],
+            color="limegreen",
+            edgecolors="black",
+            linewidths=0.8,
+            marker="o",
+            s=90,
+            label="start",
+            zorder=5,
+        )
+        ax.scatter(
+            trajectory_np[-1, 0],
+            trajectory_np[-1, 1],
+            color="crimson",
+            edgecolors="black",
+            linewidths=0.8,
+            marker="X",
+            s=110,
+            label="end",
+            zorder=5,
+        )
+        ax.set_title(
+            f"VQ-PAE manifold {plot_mode} ({action_key}, env {env_idx}, {latent_key})"
+        )
+        ax.set_xlabel("Latent PC 1")
+        ax.set_ylabel("Latent PC 2")
+        ax.grid(True, alpha=0.2)
+        ax.autoscale()
+        ax.set_aspect("equal", adjustable="box")
+        ax.legend(loc="best")
+        fig.tight_layout()
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
+
+        try:
+            fig.canvas.draw()
+            width, height = fig.canvas.get_width_height()
+            base_rgba = np.asarray(fig.canvas.buffer_rgba()).copy()
+            base_image = Image.fromarray(base_rgba, mode="RGBA")
+            pixel_positions = ax.transData.transform(trajectory_np)
+            pixel_positions[:, 1] = height - pixel_positions[:, 1]
+            label_xy = ax.transAxes.transform((0.02, 0.98))
+            label_x = int(round(label_xy[0]))
+            label_y = int(round(height - label_xy[1]))
+            marker_radius = max(5, int(round(math.sqrt(130) * gif_dpi / 144)))
+            outline_width = max(1, int(round(gif_dpi / 120)))
+            label_padding = max(3, int(round(gif_dpi / 40)))
+            duration_ms = max(1, int(round(1000 / gif_fps)))
+            path_width = max(2, int(round(2.8 * gif_dpi / 72)))
+            path_point_radius = max(2, int(round(math.sqrt(24) * gif_dpi / 144)))
+            path_layer = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
+            path_draw = ImageDraw.Draw(path_layer, "RGBA")
+            frames = []
+            for frame_idx in range(frame_count):
+                x, y = pixel_positions[frame_idx]
+                x = int(round(x))
+                y = int(round(y))
+                path_color = tuple(
+                    int(round(channel * 255))
+                    for channel in cmap(norm(frame_idx))[:3]
+                )
+                if frame_idx > 0 and draw_segment[frame_idx - 1]:
+                    prev_x, prev_y = pixel_positions[frame_idx - 1]
+                    path_draw.line(
+                        (
+                            int(round(prev_x)),
+                            int(round(prev_y)),
+                            x,
+                            y,
+                        ),
+                        fill=(*path_color, 255),
+                        width=path_width,
+                    )
+                path_draw.ellipse(
+                    (
+                        x - path_point_radius,
+                        y - path_point_radius,
+                        x + path_point_radius,
+                        y + path_point_radius,
+                    ),
+                    fill=(*path_color, 255),
+                )
+                frame = Image.alpha_composite(base_image, path_layer)
+                draw = ImageDraw.Draw(frame, "RGBA")
+                draw.ellipse(
+                    (
+                        x - marker_radius,
+                        y - marker_radius,
+                        x + marker_radius,
+                        y + marker_radius,
+                    ),
+                    fill=(*path_color, 255),
+                    outline=(0, 0, 0, 255),
+                    width=outline_width,
+                )
+                label = f"frame {frame_idx + 1}/{frame_count}"
+                text_bbox = draw.textbbox((label_x, label_y), label)
+                draw.rectangle(
+                    (
+                        text_bbox[0] - label_padding,
+                        text_bbox[1] - label_padding,
+                        text_bbox[2] + label_padding,
+                        text_bbox[3] + label_padding,
+                    ),
+                    fill=(255, 255, 255, 200),
+                )
+                draw.text((label_x, label_y), label, fill=(0, 0, 0, 255))
+                frames.append(frame)
+
+            frames[0].save(
+                gif_path,
+                save_all=True,
+                append_images=frames[1:],
+                duration=duration_ms,
+                loop=0,
+                optimize=False,
+            )
+            print(f"[vq-latent-loop] latent manifold GIF saved to: {gif_path}")
+        except Exception as exc:
+            print(f"[vq-latent-loop] failed to save manifold GIF: {exc}")
+        finally:
+            plt.close(fig)
+
+    def _save_vq_latent_manifold_plot(
+        self,
+        model_module: DistillVQPAEModel,
+        captured_latents: torch.Tensor,
+        action_key: str,
+        latent_key: Optional[str],
+        captured_indices: Optional[torch.Tensor] = None,
+        captured_phases: Optional[torch.Tensor] = None,
+        env_idx: int = 0,
+    ) -> None:
+        """Save a 2D figure of the learned VQ manifold and recorded trajectory."""
+        if captured_latents.ndim != 3 or captured_latents.shape[0] == 0:
+            return
+        env_idx = min(max(int(env_idx), 0), captured_latents.shape[1] - 1)
+        trajectory = captured_latents[:, env_idx].detach()
+        phase_indices = None
+        if captured_indices is not None and captured_phases is not None:
+            captured_phase_indices = captured_indices[:, env_idx].detach()
+            phase_values = captured_phases[:, env_idx].detach()
+            phase_trajectory = self._decode_vq_phase_points(
+                model_module,
+                captured_phase_indices,
+                phase_values,
+            )
+            if phase_trajectory is not None:
+                trajectory = phase_trajectory.detach()
+                phase_indices = captured_phase_indices
+        if trajectory.shape[0] == 0:
+            return
+        if not torch.isfinite(trajectory).all():
+            print(
+                "[vq-latent-loop] skipping manifold plot; captured latents "
+                "contain NaN/Inf"
+            )
+            return
+
+        num_phase_samples = int(getattr(self, "vq_latent_manifold_phase_samples", 512))
+        background_curves = self._decode_vq_codebook_manifold(
+            model_module,
+            num_phase_samples=num_phase_samples,
+        )
+        if background_curves is None:
+            print(
+                "[vq-latent-loop] skipping manifold plot; VQ codebook was "
+                "unavailable"
+            )
+            return
+        finite_curves = torch.isfinite(background_curves).all(dim=(1, 2))
+        background_curves = background_curves[finite_curves]
+        if background_curves.shape[0] == 0:
+            print(
+                "[vq-latent-loop] skipping manifold plot; decoded manifold "
+                "was invalid"
+            )
+            return
+        if background_curves.shape[-1] != trajectory.shape[-1]:
+            print(
+                "[vq-latent-loop] skipping manifold plot; latent dimensions differ "
+                f"(manifold={background_curves.shape[-1]}, "
+                f"capture={trajectory.shape[-1]})"
+            )
+            return
+
+        try:
+            import os
+
+            matplotlib_config_dir = "/tmp/protomotions_matplotlib"
+            Path(matplotlib_config_dir).mkdir(parents=True, exist_ok=True)
+            os.environ["MPLCONFIGDIR"] = matplotlib_config_dir
+            import matplotlib
+
+            matplotlib.use("Agg", force=True)
+            import matplotlib.pyplot as plt
+            import numpy as np
+            from matplotlib.collections import LineCollection
+            from matplotlib.colors import Normalize
+        except ImportError:
+            print("[vq-latent-loop] matplotlib not available; skipping manifold plot")
+            return
+
+        background_2d, trajectory_2d = self._project_latent_manifold_to_2d(
+            background_curves.detach().cpu(),
+            trajectory.detach().cpu(),
+        )
+        background_np = background_2d.numpy()
+        trajectory_np = trajectory_2d.numpy()
+
+        fig, ax = plt.subplots(figsize=(8, 8))
+        background_lines = LineCollection(
+            background_np,
+            colors=[(0.45, 0.45, 0.45, 0.18)],
+            linewidths=0.6,
+            zorder=1,
+        )
+        ax.add_collection(background_lines)
+
+        frame_count = trajectory_np.shape[0]
+        if frame_count > 1:
+            segments = np.stack([trajectory_np[:-1], trajectory_np[1:]], axis=1)
+            if phase_indices is not None:
+                same_code = phase_indices[:-1].cpu().numpy() == phase_indices[
+                    1:
+                ].cpu().numpy()
+                segments = segments[same_code]
+                segment_frames = np.arange(frame_count - 1)[same_code]
+            else:
+                segment_frames = np.arange(frame_count - 1)
+            trajectory_lines = LineCollection(
+                segments,
+                cmap="viridis",
+                norm=Normalize(vmin=0, vmax=max(frame_count - 1, 1)),
+                linewidths=2.5,
+                zorder=3,
+            )
+            trajectory_lines.set_array(segment_frames)
+            if len(segments) > 0:
+                ax.add_collection(trajectory_lines)
+
+        point_plot = ax.scatter(
+            trajectory_np[:, 0],
+            trajectory_np[:, 1],
+            c=np.arange(frame_count),
+            cmap="viridis",
+            norm=Normalize(vmin=0, vmax=max(frame_count - 1, 1)),
+            s=24,
+            edgecolors="none",
+            zorder=4,
+        )
+        if frame_count > 1:
+            colorbar = fig.colorbar(point_plot, ax=ax, pad=0.02)
+            colorbar.set_label("Capture frame")
+        else:
+            point_plot.set_color("tab:blue")
+
+        ax.scatter(
+            trajectory_np[0, 0],
+            trajectory_np[0, 1],
+            color="limegreen",
+            edgecolors="black",
+            linewidths=0.8,
+            marker="o",
+            s=90,
+            label="start",
+            zorder=4,
+        )
+        ax.scatter(
+            trajectory_np[-1, 0],
+            trajectory_np[-1, 1],
+            color="crimson",
+            edgecolors="black",
+            linewidths=0.8,
+            marker="X",
+            s=110,
+            label="end",
+            zorder=5,
+        )
+        plot_mode = "phase points" if phase_indices is not None else "latent PCA"
+        ax.set_title(
+            f"VQ-PAE manifold {plot_mode} ({action_key}, env {env_idx}, {latent_key})"
+        )
+        ax.set_xlabel("Latent PC 1")
+        ax.set_ylabel("Latent PC 2")
+        ax.grid(True, alpha=0.2)
+        ax.legend(loc="best")
+        ax.autoscale()
+        ax.set_aspect("equal", adjustable="box")
+        fig.tight_layout()
+
+        plot_path = self._get_vq_latent_manifold_plot_path(action_key, env_idx)
+        plot_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(plot_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[vq-latent-loop] latent manifold plot saved to: {plot_path}")
+        self._save_vq_latent_manifold_gif(
+            plot_path=plot_path,
+            background_np=background_np,
+            trajectory_np=trajectory_np,
+            phase_indices=phase_indices,
+            frame_count=frame_count,
+            plot_mode=plot_mode,
+            action_key=action_key,
+            env_idx=env_idx,
+            latent_key=latent_key,
+            plt=plt,
+            np=np,
+            LineCollection=LineCollection,
+            Normalize=Normalize,
+        )
 
     def interactive_edit_text_prompt(self) -> None:
         """Pause interactive inference and switch the live text-conditioning prompt."""
@@ -558,6 +1056,8 @@ class DistillEvaluator(MimicEvaluator):
             getattr(self, "record_frames_nums", getattr(self, "vq_latent_loop_frames", 0))
         )
         self._vq_latent_capture = None
+        self._vq_manifold_index_capture = None
+        self._vq_phase_capture = None
         self._vq_latent_loop_phase = None
         self._vq_prior_phase_accum = None
         self._vq_prior_phase_accum_valid = None
@@ -877,6 +1377,42 @@ class DistillEvaluator(MimicEvaluator):
                         )
                     if self._vq_latent_capture is not None:
                         self._vq_latent_capture[capture_step].copy_(actor_latent.detach())
+                    phase_for_capture = (
+                        selected_phase_used
+                        if selected_phase_used is not None
+                        else selected_phase
+                    )
+                    if selected_indices is not None and phase_for_capture is not None:
+                        phase_for_capture = phase_for_capture.reshape(
+                            phase_for_capture.shape[0],
+                            -1,
+                        )
+                        if self._vq_manifold_index_capture is None:
+                            self._vq_manifold_index_capture = torch.full(
+                                (
+                                    record_frames_nums,
+                                    selected_indices.shape[0],
+                                ),
+                                -1,
+                                device=selected_indices.device,
+                                dtype=torch.long,
+                            )
+                            self._vq_phase_capture = torch.full(
+                                (
+                                    record_frames_nums,
+                                    phase_for_capture.shape[0],
+                                    phase_for_capture.shape[1],
+                                ),
+                                float("nan"),
+                                device=phase_for_capture.device,
+                                dtype=phase_for_capture.dtype,
+                            )
+                        self._vq_manifold_index_capture[capture_step].copy_(
+                            selected_indices.detach().long()
+                        )
+                        self._vq_phase_capture[capture_step].copy_(
+                            phase_for_capture.detach()
+                        )
                     capture_step += 1
                     if capture_step >= record_frames_nums:
                         if self._vq_latent_capture is None:
@@ -896,6 +1432,14 @@ class DistillEvaluator(MimicEvaluator):
                             "[vq-latent-loop] capture complete; loop playback enabled "
                             f"(action_key={action_key}, frames={record_frames_nums}, "
                             f"speed_scale={configured_motion_speed_scale:.3f})"
+                        )
+                        self._save_vq_latent_manifold_plot(
+                            model_module=model_module,
+                            captured_latents=self._vq_latent_capture,
+                            action_key=action_key,
+                            latent_key=latent_key,
+                            captured_indices=self._vq_manifold_index_capture,
+                            captured_phases=self._vq_phase_capture,
                         )
                 actions = self._select_actions(model_outs, action_key)
 

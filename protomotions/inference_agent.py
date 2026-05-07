@@ -146,6 +146,27 @@ def create_parser():
         help="Capture this many VQ-PAE actor latents at runtime, then loop them with time warping.",
     )
     parser.add_argument(
+        "--vq-latent-manifold-plot-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional file or directory for the VQ-PAE latent manifold plot. "
+            "Relative paths are resolved under the checkpoint directory."
+        ),
+    )
+    parser.add_argument(
+        "--vq-latent-manifold-phase-samples",
+        type=int,
+        default=512,
+        help="Number of phase samples per VQ codebook entry in the manifold plot.",
+    )
+    parser.add_argument(
+        "--vq-latent-manifold-gif-fps",
+        type=int,
+        default=20,
+        help="FPS for the VQ-PAE latent manifold GIF. Set to 0 to disable.",
+    )
+    parser.add_argument(
         "--repeat-eval",
         type=int,
         default=1,
@@ -465,6 +486,21 @@ def main():
                     get_vq_accumulator_alpha(branch, component),
                 )
         setattr(agent.evaluator, "vq_latent_loop_frames", args.vq_latent_loop_frames)
+        setattr(
+            agent.evaluator,
+            "vq_latent_manifold_plot_path",
+            args.vq_latent_manifold_plot_path,
+        )
+        setattr(
+            agent.evaluator,
+            "vq_latent_manifold_phase_samples",
+            args.vq_latent_manifold_phase_samples,
+        )
+        setattr(
+            agent.evaluator,
+            "vq_latent_manifold_gif_fps",
+            args.vq_latent_manifold_gif_fps,
+        )
         if hasattr(agent.evaluator, "interactive_edit_text_prompt"):
             custom_key_handler_targets["F8"] = (
                 agent.evaluator.interactive_edit_text_prompt
