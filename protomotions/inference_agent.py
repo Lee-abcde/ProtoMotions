@@ -140,15 +140,6 @@ def create_parser():
         ),
     )
     parser.add_argument(
-        "--vq-prior-phase-accumulator-alpha",
-        type=float,
-        default=None,
-        help=(
-            "Enable VQ-PAE prior phase accumulation with this blend alpha in [0, 1]. "
-            "0 uses only accumulated phase, 1 uses only model-predicted phase."
-        ),
-    )
-    parser.add_argument(
         "--vq-latent-loop-frames",
         type=int,
         default=0,
@@ -459,18 +450,20 @@ def main():
             "vq_prior_frequency_override",
             args.vq_prior_frequency_override,
         )
-        prior_phase_accumulator_alpha = args.vq_prior_phase_accumulator_alpha
-        if prior_phase_accumulator_alpha is None:
-            prior_phase_accumulator_alpha = getattr(
+        def get_vq_accumulator_alpha(branch: str, component: str):
+            return getattr(
                 agent_config.model,
-                "prior_phase_accumulator_alpha",
+                f"{branch}_{component}_accumulator_alpha",
                 None,
             )
-        setattr(
-            agent.evaluator,
-            "vq_prior_phase_accumulator_alpha",
-            prior_phase_accumulator_alpha,
-        )
+
+        for branch in ("prior", "posterior"):
+            for component in ("phase", "frequency", "offset", "state"):
+                setattr(
+                    agent.evaluator,
+                    f"vq_{branch}_{component}_accumulator_alpha",
+                    get_vq_accumulator_alpha(branch, component),
+                )
         setattr(agent.evaluator, "vq_latent_loop_frames", args.vq_latent_loop_frames)
         if hasattr(agent.evaluator, "interactive_edit_text_prompt"):
             custom_key_handler_targets["F8"] = (
