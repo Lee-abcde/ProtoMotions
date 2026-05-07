@@ -14,16 +14,21 @@
 # limitations under the License.
 #
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDict
 from protomotions.utils.hydra_replacement import get_class
 from protomotions.agents.common.common import ModuleContainer
+from protomotions.agents.common.vqvae import VectorQuantizer, GradientVectorQuantizer
 from protomotions.agents.base_agent.model import BaseModel
 
 # Import for type annotations - using TYPE_CHECKING to avoid circular imports
 from typing import TYPE_CHECKING, Dict, Tuple
 
 if TYPE_CHECKING:
-    from protomotions.agents.distill.config import DistillModelConfig
+    from protomotions.agents.distill.config import (
+        DistillModelConfig,
+        VQDistillModelConfig,
+    )
 
 
 class FeedForwardModel(BaseModel):
@@ -257,3 +262,177 @@ class DetachedEncoderKLDistillModel(DistillModel):
             + (encoder_mu - prior_mu) ** 2 / prior_var
             - 1
         )
+
+
+class VQDistillModel(BaseModel):
+    """PULSE distill model with a shared VQ codebook instead of Gaussian latents."""
+
+    config: "VQDistillModelConfig"
+
+    def __init__(self, config: "VQDistillModelConfig"):
+        super().__init__(config)
+        self.config = config
+
+        EncoderClass = get_class(self.config.encoder._target_)
+        self._encoder: ModuleContainer = EncoderClass(config=self.config.encoder)
+        PriorClass = get_class(self.config.prior._target_)
+        self._prior: ModuleContainer = PriorClass(config=self.config.prior)
+        TrunkClass = get_class(self.config.trunk._target_)
+        self._trunk: ModuleContainer = TrunkClass(config=self.config.trunk)
+
+        if self.config.codebook_update_mode not in ["ema", "gradient"]:
+            raise ValueError(
+                "codebook_update_mode must be one of ['ema', 'gradient'], "
+                f"got {self.config.codebook_update_mode!r}"
+            )
+
+        if self.config.codebook_update_mode == "gradient":
+            self.quantizer = GradientVectorQuantizer(
+                num_embeddings=self.config.num_embeddings,
+                embedding_dim=self.config.latent_dim,
+                commitment_cost=self.config.commitment_cost,
+            )
+        else:
+            self.quantizer = VectorQuantizer(
+                num_embeddings=self.config.num_embeddings,
+                embedding_dim=self.config.latent_dim,
+                commitment_cost=self.config.commitment_cost,
+                ema_decay=self.config.ema_decay,
+                dead_code_threshold=self.config.dead_code_threshold,
+            )
+        self._forward_count = 0
+
+        trunk_in_keys_without_latents = [
+            key for key in self._trunk.in_keys if key not in ["vae_latent"]
+        ]
+        self.in_keys = list(
+            set(self._prior.in_keys + self._encoder.in_keys + trunk_in_keys_without_latents)
+        )
+        self.out_keys = ["action", "prior_action", "privileged_action"]
+
+    def _quantize(self, latent: torch.Tensor, update_codebook: bool):
+        if self.config.codebook_update_mode == "gradient":
+            quantized, commitment_loss, codebook_loss, indices, perplexity = self.quantizer(
+                latent
+            )
+            if not update_codebook:
+                codebook_loss = torch.zeros_like(codebook_loss)
+            return quantized, commitment_loss, codebook_loss, indices, perplexity
+
+        original_training = self.quantizer.training
+        self.quantizer.train(update_codebook and self.training)
+        try:
+            quantized, commitment_loss, indices, perplexity = self.quantizer(latent)
+        finally:
+            self.quantizer.train(original_training)
+        codebook_loss = torch.zeros_like(commitment_loss)
+        return quantized, commitment_loss, codebook_loss, indices, perplexity
+
+    def forward(self, tensordict: TensorDict) -> TensorDict:
+        external_actor_latent = tensordict.get("distill_external_vae_latent", None)
+        external_privileged_latent = tensordict.get(
+            "distill_external_privileged_vae_latent", None
+        )
+
+        tensordict = self._encoder(tensordict)
+        encoder_latent = tensordict[self._encoder.out_keys[0]]
+        privileged_latent, commitment_loss, codebook_loss, indices, perplexity = self._quantize(
+            encoder_latent, update_codebook=True
+        )
+        if external_privileged_latent is not None:
+            privileged_latent = external_privileged_latent
+
+        if self.training:
+            self._forward_count += 1
+            if (
+                self.config.codebook_update_mode == "ema"
+                and self._forward_count % self.config.dead_code_revive_every == 0
+            ):
+                self.quantizer.revive_dead_codes(encoder_latent.detach())
+
+        tensordict = self._prior(tensordict)
+        prior_latent = tensordict[self._prior.out_keys[0]]
+        actor_latent, prior_commitment_loss, prior_codebook_loss, prior_indices, prior_perplexity = self._quantize(
+            prior_latent, update_codebook=False
+        )
+        if external_actor_latent is not None:
+            actor_latent = external_actor_latent
+
+        tensordict["vae_latent"] = actor_latent
+        tensordict = self._trunk(tensordict)
+        action = tensordict[self._trunk.out_keys[0]]
+
+        tensordict["vae_latent"] = privileged_latent
+        tensordict = self._trunk(tensordict)
+        privileged_action = tensordict[self._trunk.out_keys[0]]
+
+        prior_alignment_loss = F.mse_loss(
+            prior_latent, privileged_latent.detach(), reduction="none"
+        ).mean(dim=-1)
+
+        tensordict["distill_actor_latent"] = actor_latent
+        tensordict["distill_privileged_latent"] = privileged_latent
+        tensordict["action"] = action
+        tensordict["prior_action"] = action
+        tensordict["privileged_action"] = privileged_action
+        tensordict["vq_encoder_latent"] = encoder_latent
+        tensordict["vq_prior_latent"] = prior_latent
+        tensordict["vq_commitment_loss"] = commitment_loss
+        tensordict["vq_codebook_loss"] = codebook_loss
+        tensordict["vq_prior_commitment_loss"] = prior_commitment_loss
+        tensordict["vq_prior_codebook_loss"] = prior_codebook_loss
+        tensordict["vq_prior_alignment_loss"] = prior_alignment_loss
+        tensordict["vq_indices"] = indices
+        tensordict["vq_prior_indices"] = prior_indices
+        tensordict["vq_perplexity"] = perplexity.expand(encoder_latent.shape[0])
+        tensordict["vq_prior_perplexity"] = prior_perplexity.expand(prior_latent.shape[0])
+        return tensordict
+
+    def forward_inference(self, tensordict: TensorDict) -> TensorDict:
+        tensordict = self._prior(tensordict)
+        prior_latent = tensordict[self._prior.out_keys[0]]
+        actor_latent, _, _, prior_indices, _ = self._quantize(
+            prior_latent, update_codebook=False
+        )
+        tensordict["vae_latent"] = actor_latent
+        tensordict = self._trunk(tensordict)
+        action = tensordict[self._trunk.out_keys[0]]
+        tensordict["action"] = action
+        tensordict["prior_action"] = action
+        tensordict["distill_actor_latent"] = actor_latent
+        tensordict["vq_prior_latent"] = prior_latent
+        tensordict["vq_prior_indices"] = prior_indices
+        return tensordict
+
+    def get_inference_in_keys(self) -> list:
+        trunk_in_keys_without_latents = [
+            key for key in self._trunk.in_keys if key not in ["vae_latent"]
+        ]
+        return list(set(self._prior.in_keys + trunk_in_keys_without_latents))
+
+    def calculate_aux_losses(
+        self, tensordict: TensorDict
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        losses = self.config.losses
+        commitment = tensordict["vq_commitment_loss"].mean() * losses.commitment_weight
+        codebook = tensordict["vq_codebook_loss"].mean()
+        prior_commitment = (
+            tensordict["vq_prior_commitment_loss"].mean()
+            * losses.prior_commitment_weight
+        )
+        prior_alignment = (
+            tensordict["vq_prior_alignment_loss"].mean()
+            * losses.prior_alignment_weight
+        )
+        total = commitment + codebook + prior_commitment + prior_alignment
+
+        return total, {
+            "distill/vq_commitment_loss": commitment.detach(),
+            "distill/vq_codebook_loss": codebook.detach(),
+            "distill/vq_prior_commitment_loss": prior_commitment.detach(),
+            "distill/vq_prior_alignment_loss": prior_alignment.detach(),
+            "distill/vq_perplexity": tensordict["vq_perplexity"].mean().detach(),
+            "distill/vq_prior_match_rate": (
+                tensordict["vq_prior_indices"] == tensordict["vq_indices"]
+            ).float().mean().detach(),
+        }

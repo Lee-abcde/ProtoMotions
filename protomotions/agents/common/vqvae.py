@@ -156,6 +156,48 @@ class VectorQuantizer(nn.Module):
         self._usage_count.zero_()
 
 
+class GradientVectorQuantizer(nn.Module):
+    """Vector Quantization layer with gradient-updated codebook entries.
+
+    This variant keeps the codebook as a learnable parameter and optimizes it
+    through the standard VQ-VAE codebook loss instead of EMA updates.
+    """
+
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        commitment_cost: float = 0.25,
+    ):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.commitment_cost = commitment_cost
+
+        codebook = torch.empty(num_embeddings, embedding_dim)
+        nn.init.uniform_(codebook, -1.0 / num_embeddings, 1.0 / num_embeddings)
+        self.codebook = nn.Parameter(codebook)
+
+    def forward(self, z_e: torch.Tensor):
+        distances = (
+            z_e.pow(2).sum(dim=-1, keepdim=True)
+            - 2 * z_e @ self.codebook.t()
+            + self.codebook.pow(2).sum(dim=-1, keepdim=True).t()
+        )
+
+        indices = distances.argmin(dim=-1)
+        z_q = F.embedding(indices, self.codebook)
+        z_q_st = z_e + (z_q - z_e).detach()
+
+        commitment_loss = self.commitment_cost * (z_e - z_q.detach()).pow(2).sum(dim=-1)
+        codebook_loss = (z_q - z_e.detach()).pow(2).sum(dim=-1)
+
+        avg_probs = F.one_hot(indices, self.num_embeddings).float().mean(dim=0)
+        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+
+        return z_q_st, commitment_loss, codebook_loss, indices, perplexity
+
+
 class VQVAE(TensorDictModuleBase):
     """VQ-VAE Module: deterministic quantized latent space, PPO-compatible.
 

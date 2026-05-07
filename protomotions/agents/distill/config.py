@@ -167,6 +167,50 @@ class DistillModelConfig(BaseModelConfig):
 
 
 @dataclass
+class VQDistillLossConfig:
+    """Auxiliary losses for the simple codebook-based distill model."""
+
+    commitment_weight: float = 1.0
+    prior_commitment_weight: float = 0.25
+    prior_alignment_weight: float = 1.0
+    prior_bc_weight: float = 0.0
+
+
+@dataclass
+class VQDistillModelConfig(BaseModelConfig):
+    """Distill model that replaces VAE sampling with a shared VQ codebook."""
+
+    _target_: str = "protomotions.agents.distill.model.VQDistillModel"
+
+    encoder: ModuleContainerConfig = field(
+        default_factory=ModuleContainerConfig,
+        metadata={"help": "Encoder network that maps privileged observations to a latent vector."},
+    )
+    prior: ModuleContainerConfig = field(
+        default_factory=ModuleContainerConfig,
+        metadata={"help": "Prior network that maps deployable observations to a latent vector."},
+    )
+    trunk: ModuleContainerConfig = field(
+        default_factory=ModuleContainerConfig,
+        metadata={"help": "Decoder trunk network (quantized latent to actions)."},
+    )
+
+    latent_dim: int = 64
+    num_embeddings: int = 512
+    commitment_cost: float = 0.25
+    codebook_update_mode: str = "gradient"
+    ema_decay: float = 0.99
+    dead_code_threshold: int = 2
+    dead_code_revive_every: int = 100
+
+    losses: VQDistillLossConfig = field(default_factory=VQDistillLossConfig)
+    optimizer: OptimizerConfig = field(
+        default_factory=lambda: OptimizerConfig(lr=2e-5),
+        metadata={"help": "Optimizer settings for model training."},
+    )
+
+
+@dataclass
 class DistillAgentConfig(BaseAgentConfig):
     """Main configuration class for MaskedMimic Agent."""
 
@@ -174,6 +218,7 @@ class DistillAgentConfig(BaseAgentConfig):
 
     model: Union[
         DistillModelConfig,
+        VQDistillModelConfig,
         FeedForwardModelConfig,
         DistillVQPAEModelConfig,
         DistillPAEModelConfig,
