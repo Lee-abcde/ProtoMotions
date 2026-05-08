@@ -137,6 +137,13 @@ class FeedForwardModelConfig(BaseModelConfig):
 
 
 @dataclass
+class DistillLossConfig:
+    """Auxiliary losses for distill models."""
+
+    prior_bc_weight: float = 0.0
+
+
+@dataclass
 class DistillModelConfig(BaseModelConfig):
     """Configuration for MaskedMimic Model (VAE-based imitation learning)."""
 
@@ -158,6 +165,10 @@ class DistillModelConfig(BaseModelConfig):
     vae: VaeConfig = field(
         default_factory=VaeConfig,
         metadata={"help": "VAE configuration (latent dim, KLD schedule, etc)."}
+    )
+    losses: DistillLossConfig = field(
+        default_factory=DistillLossConfig,
+        metadata={"help": "Auxiliary loss weights."}
     )
 
     optimizer: OptimizerConfig = field(

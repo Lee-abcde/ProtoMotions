@@ -39,6 +39,7 @@ from protomotions.components.motion_lib import MotionLibConfig
 from protomotions.agents.distill.config import (
     KLDScheduleConfig,
     DistillAgentConfig,
+    DistillLossConfig,
     DistillModelConfig,
     VaeConfig,
     VaeNoiseType,
@@ -387,6 +388,7 @@ def agent_config(
                 end_kld_coeff=0.001,
             ),
         ),
+        losses=DistillLossConfig(prior_bc_weight=0.0),
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
 
