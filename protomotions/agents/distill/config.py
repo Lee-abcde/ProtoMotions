@@ -170,6 +170,10 @@ class DistillModelConfig(BaseModelConfig):
         default_factory=DistillLossConfig,
         metadata={"help": "Auxiliary loss weights."}
     )
+    use_text_conditioning: bool = False
+    text_obs_key: Optional[str] = None
+    text_obs_dim: int = 0
+    text_conditioning_scale: float = 0.25
 
     optimizer: OptimizerConfig = field(
         default_factory=lambda: OptimizerConfig(lr=2e-5),
@@ -213,6 +217,10 @@ class VQDistillModelConfig(BaseModelConfig):
     ema_decay: float = 0.99
     dead_code_threshold: int = 2
     dead_code_revive_every: int = 100
+    use_text_conditioning: bool = False
+    text_obs_key: Optional[str] = None
+    text_obs_dim: int = 0
+    text_conditioning_scale: float = 0.25
 
     losses: VQDistillLossConfig = field(default_factory=VQDistillLossConfig)
     optimizer: OptimizerConfig = field(

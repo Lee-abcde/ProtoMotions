@@ -16,13 +16,14 @@
 import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
+from torch import nn
 from protomotions.utils.hydra_replacement import get_class
 from protomotions.agents.common.common import ModuleContainer
 from protomotions.agents.common.vqvae import VectorQuantizer, GradientVectorQuantizer
 from protomotions.agents.base_agent.model import BaseModel
 
 # Import for type annotations - using TYPE_CHECKING to avoid circular imports
-from typing import TYPE_CHECKING, Dict, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 if TYPE_CHECKING:
     from protomotions.agents.distill.config import (
@@ -61,7 +62,75 @@ class FeedForwardModel(BaseModel):
         return tensordict
 
 
-class DistillModel(BaseModel):
+class TextResidualMixin:
+    """Optional VQ-PAE-style text residual for distill latents."""
+
+    def _init_text_residual(self, latent_dim: int) -> None:
+        if getattr(self.config, "use_text_conditioning", False):
+            if not self.config.text_obs_key or self.config.text_obs_dim <= 0:
+                raise ValueError(
+                    "Text conditioning requires text_obs_key and positive text_obs_dim."
+                )
+            self.text_projector = nn.Linear(self.config.text_obs_dim, latent_dim)
+            self.text_gate = nn.Linear(self.config.text_obs_dim, latent_dim)
+        else:
+            self.text_projector = None
+            self.text_gate = None
+
+    def _text_input_keys(self) -> list:
+        if getattr(self.config, "use_text_conditioning", False):
+            return [self.config.text_obs_key]
+        return []
+
+    def _apply_text_residual(
+        self,
+        latent: torch.Tensor,
+        tensordict: TensorDict,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if not getattr(self.config, "use_text_conditioning", False):
+            return latent, None
+
+        text_obs = tensordict[self.config.text_obs_key]
+        text_delta = self.text_projector(text_obs)
+        text_gate = torch.sigmoid(self.text_gate(text_obs))
+        text_residual = self.config.text_conditioning_scale * text_gate * text_delta
+        return latent + text_residual, text_residual
+
+    def _record_text_residual_stats(
+        self,
+        tensordict: TensorDict,
+        prefix: str,
+        text_residual: Optional[torch.Tensor],
+        base_latent: torch.Tensor,
+    ) -> None:
+        if text_residual is None:
+            return
+
+        delta_norm = text_residual.norm(dim=-1)
+        base_norm = base_latent.detach().norm(dim=-1)
+        tensordict[f"{prefix}_text_delta_norm"] = delta_norm
+        tensordict[f"{prefix}_text_delta_ratio"] = delta_norm / (base_norm + 1e-8)
+
+    def _add_text_residual_log_dict(
+        self, tensordict: TensorDict, log_dict: Dict[str, torch.Tensor]
+    ) -> None:
+        if "distill_text_delta_norm" in tensordict.keys():
+            log_dict["distill/text_delta_norm"] = (
+                tensordict["distill_text_delta_norm"].mean().detach()
+            )
+            log_dict["distill/text_delta_ratio"] = (
+                tensordict["distill_text_delta_ratio"].mean().detach()
+            )
+        if "distill_privileged_text_delta_norm" in tensordict.keys():
+            log_dict["distill/privileged_text_delta_norm"] = (
+                tensordict["distill_privileged_text_delta_norm"].mean().detach()
+            )
+            log_dict["distill/privileged_text_delta_ratio"] = (
+                tensordict["distill_privileged_text_delta_ratio"].mean().detach()
+            )
+
+
+class DistillModel(TextResidualMixin, BaseModel):
 
     config: "DistillModelConfig"
 
@@ -75,6 +144,7 @@ class DistillModel(BaseModel):
         self._prior: ModuleContainer = PriorClass(config=self.config.prior)
         TrunkClass = get_class(self.config.trunk._target_)
         self._trunk: ModuleContainer = TrunkClass(config=self.config.trunk)
+        self._init_text_residual(self.config.vae.vae_latent_dim)
 
         # Set TensorDict keys (collect from all components)
         # Include vae_noise as an input requirement
@@ -87,6 +157,7 @@ class DistillModel(BaseModel):
                 + self._encoder.in_keys
                 + ["vae_noise"]
                 + trunk_in_keys_without_latents
+                + self._text_input_keys()
             )
         )
         self.out_keys = ["action", "prior_action", "privileged_action"]
@@ -125,8 +196,12 @@ class DistillModel(BaseModel):
         z = self.reparameterization(
             prior_mu, std, vae_noise
         )  # z is the latent code for the action
+        raw_z = z
         if external_actor_latent is not None:
             z = external_actor_latent
+            actor_text_residual = None
+        else:
+            z, actor_text_residual = self._apply_text_residual(z, tensordict)
         tensordict["vae_latent"] = z
 
         # Compute non-privileged action (prior path)
@@ -145,8 +220,15 @@ class DistillModel(BaseModel):
         # Combine privileged mu and logvar to get privileged z
         privileged_std = torch.exp(0.5 * privileged_logvar)
         privileged_z = self.reparameterization(privileged_mu, privileged_std, vae_noise)
+        raw_privileged_z = privileged_z
         if external_privileged_latent is not None:
             privileged_z = external_privileged_latent
+            privileged_text_residual = None
+        else:
+            (
+                privileged_z,
+                privileged_text_residual,
+            ) = self._apply_text_residual(privileged_z, tensordict)
 
         # Compute privileged action (prior + encoder path)
         tensordict["vae_latent"] = privileged_z
@@ -158,6 +240,15 @@ class DistillModel(BaseModel):
         tensordict["action"] = action
         tensordict["prior_action"] = action
         tensordict["privileged_action"] = privileged_action
+        self._record_text_residual_stats(
+            tensordict, "distill", actor_text_residual, raw_z
+        )
+        self._record_text_residual_stats(
+            tensordict,
+            "distill_privileged",
+            privileged_text_residual,
+            raw_privileged_z,
+        )
         return tensordict
 
     def forward_inference(self, tensordict: TensorDict) -> TensorDict:
@@ -182,6 +273,8 @@ class DistillModel(BaseModel):
         std = torch.exp(0.5 * prior_logvar)
         vae_noise = tensordict["vae_noise"]
         z = self.reparameterization(prior_mu, std, vae_noise)
+        raw_z = z
+        z, actor_text_residual = self._apply_text_residual(z, tensordict)
         tensordict["vae_latent"] = z
 
         # Compute action from trunk
@@ -190,6 +283,9 @@ class DistillModel(BaseModel):
 
         tensordict["action"] = action
         tensordict["prior_action"] = action
+        self._record_text_residual_stats(
+            tensordict, "distill", actor_text_residual, raw_z
+        )
         return tensordict
 
     def get_inference_in_keys(self) -> list:
@@ -197,7 +293,14 @@ class DistillModel(BaseModel):
         trunk_in_keys_without_latents = [
             key for key in self._trunk.in_keys if key not in ["vae_latent"]
         ]
-        return list(set(self._prior.in_keys + ["vae_noise"] + trunk_in_keys_without_latents))
+        return list(
+            set(
+                self._prior.in_keys
+                + ["vae_noise"]
+                + trunk_in_keys_without_latents
+                + self._text_input_keys()
+            )
+        )
 
     def kl_loss(self, tensordict: TensorDict):
         encoder_mu = tensordict["encoder_mu"]
@@ -221,7 +324,10 @@ class DistillModel(BaseModel):
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         vae_config = getattr(self.config, "vae", None)
         if vae_config is None or vae_config.prior_regu_weight <= 0:
-            return torch.tensor(0.0, device=tensordict.device), {}
+            total = torch.tensor(0.0, device=tensordict.device)
+            log_dict = {}
+            self._add_text_residual_log_dict(tensordict, log_dict)
+            return total, log_dict
 
         prior_mu = tensordict["prior_mu"]
         encoder_mu = tensordict["encoder_mu"]
@@ -238,11 +344,13 @@ class DistillModel(BaseModel):
         )
         total = (mean_regu + logvar_regu) * vae_config.prior_regu_weight
 
-        return total, {
+        log_dict = {
             "distill/prior_mean_regu": mean_regu.detach(),
             "distill/prior_logvar_regu": logvar_regu.detach(),
             "distill/prior_regu_loss": total.detach(),
         }
+        self._add_text_residual_log_dict(tensordict, log_dict)
+        return total, log_dict
 
 
 class DetachedEncoderKLDistillModel(DistillModel):
@@ -264,7 +372,7 @@ class DetachedEncoderKLDistillModel(DistillModel):
         )
 
 
-class VQDistillModel(BaseModel):
+class VQDistillModel(TextResidualMixin, BaseModel):
     """PULSE distill model with a shared VQ codebook instead of Gaussian latents."""
 
     config: "VQDistillModelConfig"
@@ -300,13 +408,19 @@ class VQDistillModel(BaseModel):
                 ema_decay=self.config.ema_decay,
                 dead_code_threshold=self.config.dead_code_threshold,
             )
+        self._init_text_residual(self.config.latent_dim)
         self._forward_count = 0
 
         trunk_in_keys_without_latents = [
             key for key in self._trunk.in_keys if key not in ["vae_latent"]
         ]
         self.in_keys = list(
-            set(self._prior.in_keys + self._encoder.in_keys + trunk_in_keys_without_latents)
+            set(
+                self._prior.in_keys
+                + self._encoder.in_keys
+                + trunk_in_keys_without_latents
+                + self._text_input_keys()
+            )
         )
         self.out_keys = ["action", "prior_action", "privileged_action"]
 
@@ -339,8 +453,15 @@ class VQDistillModel(BaseModel):
         privileged_latent, commitment_loss, codebook_loss, indices, perplexity = self._quantize(
             encoder_latent, update_codebook=True
         )
+        raw_privileged_latent = privileged_latent
         if external_privileged_latent is not None:
             privileged_latent = external_privileged_latent
+            privileged_text_residual = None
+        else:
+            (
+                privileged_latent,
+                privileged_text_residual,
+            ) = self._apply_text_residual(privileged_latent, tensordict)
 
         if self.training:
             self._forward_count += 1
@@ -355,8 +476,14 @@ class VQDistillModel(BaseModel):
         actor_latent, prior_commitment_loss, prior_codebook_loss, prior_indices, prior_perplexity = self._quantize(
             prior_latent, update_codebook=False
         )
+        raw_actor_latent = actor_latent
         if external_actor_latent is not None:
             actor_latent = external_actor_latent
+            actor_text_residual = None
+        else:
+            actor_latent, actor_text_residual = self._apply_text_residual(
+                actor_latent, tensordict
+            )
 
         tensordict["vae_latent"] = actor_latent
         tensordict = self._trunk(tensordict)
@@ -367,7 +494,7 @@ class VQDistillModel(BaseModel):
         privileged_action = tensordict[self._trunk.out_keys[0]]
 
         prior_alignment_loss = F.mse_loss(
-            prior_latent, privileged_latent.detach(), reduction="none"
+            actor_latent, privileged_latent.detach(), reduction="none"
         ).mean(dim=-1)
 
         tensordict["distill_actor_latent"] = actor_latent
@@ -386,6 +513,15 @@ class VQDistillModel(BaseModel):
         tensordict["vq_prior_indices"] = prior_indices
         tensordict["vq_perplexity"] = perplexity.expand(encoder_latent.shape[0])
         tensordict["vq_prior_perplexity"] = prior_perplexity.expand(prior_latent.shape[0])
+        self._record_text_residual_stats(
+            tensordict, "distill", actor_text_residual, raw_actor_latent
+        )
+        self._record_text_residual_stats(
+            tensordict,
+            "distill_privileged",
+            privileged_text_residual,
+            raw_privileged_latent,
+        )
         return tensordict
 
     def forward_inference(self, tensordict: TensorDict) -> TensorDict:
@@ -393,6 +529,10 @@ class VQDistillModel(BaseModel):
         prior_latent = tensordict[self._prior.out_keys[0]]
         actor_latent, _, _, prior_indices, _ = self._quantize(
             prior_latent, update_codebook=False
+        )
+        raw_actor_latent = actor_latent
+        actor_latent, actor_text_residual = self._apply_text_residual(
+            actor_latent, tensordict
         )
         tensordict["vae_latent"] = actor_latent
         tensordict = self._trunk(tensordict)
@@ -402,13 +542,22 @@ class VQDistillModel(BaseModel):
         tensordict["distill_actor_latent"] = actor_latent
         tensordict["vq_prior_latent"] = prior_latent
         tensordict["vq_prior_indices"] = prior_indices
+        self._record_text_residual_stats(
+            tensordict, "distill", actor_text_residual, raw_actor_latent
+        )
         return tensordict
 
     def get_inference_in_keys(self) -> list:
         trunk_in_keys_without_latents = [
             key for key in self._trunk.in_keys if key not in ["vae_latent"]
         ]
-        return list(set(self._prior.in_keys + trunk_in_keys_without_latents))
+        return list(
+            set(
+                self._prior.in_keys
+                + trunk_in_keys_without_latents
+                + self._text_input_keys()
+            )
+        )
 
     def calculate_aux_losses(
         self, tensordict: TensorDict
@@ -426,7 +575,7 @@ class VQDistillModel(BaseModel):
         )
         total = commitment + codebook + prior_commitment + prior_alignment
 
-        return total, {
+        log_dict = {
             "distill/vq_commitment_loss": commitment.detach(),
             "distill/vq_codebook_loss": codebook.detach(),
             "distill/vq_prior_commitment_loss": prior_commitment.detach(),
@@ -436,3 +585,5 @@ class VQDistillModel(BaseModel):
                 tensordict["vq_prior_indices"] == tensordict["vq_indices"]
             ).float().mean().detach(),
         }
+        self._add_text_residual_log_dict(tensordict, log_dict)
+        return total, log_dict

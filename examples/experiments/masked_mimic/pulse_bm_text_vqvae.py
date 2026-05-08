@@ -249,7 +249,6 @@ def agent_config(
             "noisy_reduced_coords_obs",
             "noisy_mimic_reduced_coords_target_poses",
             "historical_previous_processed_actions",
-            "text_embedding_obs",
         ],
         out_keys=["encoder_latent"],
         models=[
@@ -267,7 +266,6 @@ def agent_config(
             MLPWithConcatConfig(
                 in_keys=[
                     "encoder_motion_obs_norm",
-                    "text_embedding_obs",
                 ],
                 out_keys=["encoder_trunk_out"],
                 num_out=512,
@@ -290,7 +288,6 @@ def agent_config(
         in_keys=[
             "noisy_reduced_coords_obs",
             "historical_previous_processed_actions",
-            "text_embedding_obs",
         ],
         out_keys=["prior_latent"],
         models=[
@@ -307,7 +304,6 @@ def agent_config(
             MLPWithConcatConfig(
                 in_keys=[
                     "prior_motion_obs_norm",
-                    "text_embedding_obs",
                 ],
                 out_keys=["prior_trunk_out"],
                 num_out=512,
@@ -367,6 +363,10 @@ def agent_config(
             prior_alignment_weight=1.0,
             prior_bc_weight=0.0,
         ),
+        use_text_conditioning=True,
+        text_obs_key="text_embedding_obs",
+        text_obs_dim=512,
+        text_conditioning_scale=0.25,
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
 
