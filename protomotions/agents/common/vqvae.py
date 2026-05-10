@@ -63,7 +63,7 @@ class VectorQuantizer(nn.Module):
         self.register_buffer("_ema_dw", codebook.clone())
         self.register_buffer("_usage_count", torch.zeros(num_embeddings))
 
-    def forward(self, z_e: torch.Tensor):
+    def forward(self, z_e: torch.Tensor, track_usage: bool = True):
         """Quantize encoder output to nearest codebook entry.
 
         Args:
@@ -93,7 +93,7 @@ class VectorQuantizer(nn.Module):
         commitment_loss = self.commitment_cost * (z_e - z_q.detach()).pow(2).sum(dim=-1)
 
         # EMA codebook update (training only, no gradient)
-        if self.training:
+        if self.training and track_usage:
             with torch.no_grad():
                 encodings = F.one_hot(indices, self.num_embeddings).float()
                 batch_cluster_size = encodings.sum(0)
@@ -168,17 +168,24 @@ class GradientVectorQuantizer(nn.Module):
         num_embeddings: int,
         embedding_dim: int,
         commitment_cost: float = 0.25,
+        dead_code_threshold: int = 2,
     ):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.commitment_cost = commitment_cost
+        self.dead_code_threshold = dead_code_threshold
 
         codebook = torch.empty(num_embeddings, embedding_dim)
         nn.init.uniform_(codebook, -1.0 / num_embeddings, 1.0 / num_embeddings)
         self.codebook = nn.Parameter(codebook)
+        self.register_buffer("_usage_count", torch.zeros(num_embeddings))
 
-    def forward(self, z_e: torch.Tensor):
+    @property
+    def _codebook(self) -> torch.Tensor:
+        return self.codebook
+
+    def forward(self, z_e: torch.Tensor, track_usage: bool = True):
         distances = (
             z_e.pow(2).sum(dim=-1, keepdim=True)
             - 2 * z_e @ self.codebook.t()
@@ -195,7 +202,34 @@ class GradientVectorQuantizer(nn.Module):
         avg_probs = F.one_hot(indices, self.num_embeddings).float().mean(dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
 
+        if self.training and track_usage:
+            with torch.no_grad():
+                batch_cluster_size = F.one_hot(
+                    indices, self.num_embeddings
+                ).float().sum(0)
+                self._usage_count.add_(batch_cluster_size)
+
         return z_q_st, commitment_loss, codebook_loss, indices, perplexity
+
+    def revive_dead_codes(self, z_e: torch.Tensor):
+        """Replace unused codebook entries with random encoder outputs."""
+        if not self.training or z_e.shape[0] == 0:
+            return
+
+        dead_mask = self._usage_count < self.dead_code_threshold
+        num_dead = dead_mask.sum().item()
+
+        if num_dead > 0:
+            replace_count = min(num_dead, z_e.shape[0])
+            random_indices = torch.randperm(z_e.shape[0], device=z_e.device)[
+                :replace_count
+            ]
+            dead_indices = dead_mask.nonzero(as_tuple=True)[0][:replace_count]
+
+            with torch.no_grad():
+                self.codebook[dead_indices] = z_e[random_indices].detach()
+
+        self._usage_count.zero_()
 
 
 class VQVAE(TensorDictModuleBase):

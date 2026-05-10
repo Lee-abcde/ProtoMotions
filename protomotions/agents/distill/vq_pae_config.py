@@ -36,6 +36,7 @@ class VQPAELossConfig:
     posterior_phase_consistency_weight: float = 0.0
     posterior_phase_consistency_horizon: int = 1
     reconstruction_weight: float = 0.0
+    codebook_weight: float = 1.0
     prior_bc_weight: float = 0.0
     text_delta_ratio_penalty_weight: float = 0.0
     text_delta_ratio_penalty_target: float = 1.0
@@ -126,6 +127,7 @@ class DistillVQPAEModelConfig(BaseModelConfig):
 
     num_embeddings: int = 512
     commitment_cost: float = 0.25
+    codebook_update_mode: str = "ema"
     ema_decay: float = 0.99
     dead_code_threshold: int = 2
     dead_code_revive_every: int = 100

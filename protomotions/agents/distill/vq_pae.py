@@ -26,7 +26,7 @@ from torch import nn
 
 from protomotions.agents.base_agent.model import BaseModel
 from protomotions.agents.common.common import ModuleContainer
-from protomotions.agents.common.vqvae import VectorQuantizer
+from protomotions.agents.common.vqvae import GradientVectorQuantizer, VectorQuantizer
 from protomotions.agents.common.vae import build_sequential_layers
 from protomotions.utils.hydra_replacement import get_class
 
@@ -162,13 +162,27 @@ class DistillVQPAEModel(BaseModel):
         )
         self.prior_state_head = nn.Linear(prior_state_out_dim, self.config.phase_state_dim)
 
-        self.quantizer = VectorQuantizer(
-            num_embeddings=self.config.num_embeddings,
-            embedding_dim=self.config.phase_state_dim,
-            commitment_cost=self.config.commitment_cost,
-            ema_decay=self.config.ema_decay,
-            dead_code_threshold=self.config.dead_code_threshold,
-        )
+        if self.config.codebook_update_mode not in ["ema", "gradient"]:
+            raise ValueError(
+                "codebook_update_mode must be one of ['ema', 'gradient'], "
+                f"got {self.config.codebook_update_mode!r}"
+            )
+
+        if self.config.codebook_update_mode == "gradient":
+            self.quantizer = GradientVectorQuantizer(
+                num_embeddings=self.config.num_embeddings,
+                embedding_dim=self.config.phase_state_dim,
+                commitment_cost=self.config.commitment_cost,
+                dead_code_threshold=self.config.dead_code_threshold,
+            )
+        else:
+            self.quantizer = VectorQuantizer(
+                num_embeddings=self.config.num_embeddings,
+                embedding_dim=self.config.phase_state_dim,
+                commitment_cost=self.config.commitment_cost,
+                ema_decay=self.config.ema_decay,
+                dead_code_threshold=self.config.dead_code_threshold,
+            )
         self._forward_count = 0
 
         self.manifold_channels = (
@@ -839,6 +853,7 @@ class DistillVQPAEModel(BaseModel):
         (
             quantized_state,
             commitment_loss,
+            codebook_loss,
             indices,
             perplexity,
         ) = self._quantize(used_state, update_codebook=update_codebook)
@@ -852,6 +867,7 @@ class DistillVQPAEModel(BaseModel):
             used_state,
             quantized_state,
             commitment_loss,
+            codebook_loss,
             indices,
             perplexity,
             next_step,
@@ -885,9 +901,23 @@ class DistillVQPAEModel(BaseModel):
 
     def _quantize(
         self, state: torch.Tensor, update_codebook: bool
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.config.codebook_update_mode == "gradient":
+            (
+                quantized,
+                commitment_loss,
+                codebook_loss,
+                indices,
+                perplexity,
+            ) = self.quantizer(state, track_usage=update_codebook)
+            if not update_codebook:
+                codebook_loss = torch.zeros_like(codebook_loss)
+            return quantized, commitment_loss, codebook_loss, indices, perplexity
+
         if update_codebook:
-            return self.quantizer(state)
+            quantized, commitment_loss, indices, perplexity = self.quantizer(state)
+            codebook_loss = torch.zeros_like(commitment_loss)
+            return quantized, commitment_loss, codebook_loss, indices, perplexity
 
         distances = (
             state.pow(2).sum(dim=-1, keepdim=True)
@@ -902,7 +932,8 @@ class DistillVQPAEModel(BaseModel):
         ).pow(2).sum(dim=-1)
         avg_probs = F.one_hot(indices, self.quantizer.num_embeddings).float().mean(dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
-        return quantized_st, commitment, indices, perplexity
+        codebook_loss = torch.zeros_like(commitment)
+        return quantized_st, commitment, codebook_loss, indices, perplexity
 
     def _run_branch(
         self,
@@ -930,7 +961,13 @@ class DistillVQPAEModel(BaseModel):
 
         pooled = encoded.mean(dim=-1)
         state = state_head(state_backbone(pooled))
-        quantized_state, commitment_loss, indices, perplexity = self._quantize(
+        (
+            quantized_state,
+            commitment_loss,
+            codebook_loss,
+            indices,
+            perplexity,
+        ) = self._quantize(
             state, update_codebook=update_codebook
         )
         manifold = self._decode_manifold_at_args(
@@ -949,6 +986,7 @@ class DistillVQPAEModel(BaseModel):
             "state": state,
             "quantized_state": quantized_state,
             "commitment_loss": commitment_loss,
+            "codebook_loss": codebook_loss,
             "indices": indices,
             "perplexity": perplexity,
             "manifold": manifold,
@@ -1226,6 +1264,7 @@ class DistillVQPAEModel(BaseModel):
                     prior_state_accum_next,
                     prior_quantized_state,
                     prior_commitment_loss,
+                    prior_codebook_loss,
                     prior_indices,
                     prior_perplexity,
                     raw_prior_latent,
@@ -1243,6 +1282,7 @@ class DistillVQPAEModel(BaseModel):
                     "state": prior_state_accum_next,
                     "quantized_state": prior_quantized_state,
                     "commitment_loss": prior_commitment_loss,
+                    "codebook_loss": prior_codebook_loss,
                     "indices": prior_indices,
                     "perplexity": prior_perplexity,
                 }
@@ -1375,6 +1415,7 @@ class DistillVQPAEModel(BaseModel):
                     posterior_state_accum_next,
                     posterior_quantized_state,
                     posterior_commitment_loss,
+                    posterior_codebook_loss,
                     posterior_indices,
                     posterior_perplexity,
                     posterior_latent,
@@ -1392,6 +1433,7 @@ class DistillVQPAEModel(BaseModel):
                     "state": posterior_state_accum_next,
                     "quantized_state": posterior_quantized_state,
                     "commitment_loss": posterior_commitment_loss,
+                    "codebook_loss": posterior_codebook_loss,
                     "indices": posterior_indices,
                     "perplexity": posterior_perplexity,
                 }
@@ -1441,6 +1483,7 @@ class DistillVQPAEModel(BaseModel):
         tensordict["privileged_action"] = tensordict[self._trunk.out_keys[0]]
 
         tensordict["vq_pae_commitment_loss"] = posterior["commitment_loss"]
+        tensordict["vq_pae_codebook_loss"] = posterior["codebook_loss"]
         tensordict["vq_pae_prior_commitment_loss"] = prior["commitment_loss"]
         tensordict["vq_pae_prior_alignment_loss"] = F.mse_loss(
             raw_prior_latent,
@@ -1612,6 +1655,10 @@ class DistillVQPAEModel(BaseModel):
     def calculate_aux_losses(self, tensordict: TensorDict) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         losses = self.config.losses
         commitment = tensordict["vq_pae_commitment_loss"].mean() * losses.commitment_weight
+        codebook = (
+            tensordict["vq_pae_codebook_loss"].mean()
+            * getattr(losses, "codebook_weight", 1.0)
+        )
         prior_commitment = (
             tensordict["vq_pae_prior_commitment_loss"].mean()
             * losses.prior_commitment_weight
@@ -1701,6 +1748,7 @@ class DistillVQPAEModel(BaseModel):
             )
         total = (
             commitment
+            + codebook
             + prior_commitment
             + prior_alignment
             + phase_alignment
@@ -1713,6 +1761,7 @@ class DistillVQPAEModel(BaseModel):
         )
         log_dict = {
             "distill/vq_commitment_loss": commitment.detach(),
+            "distill/vq_codebook_loss": codebook.detach(),
             "distill/vq_prior_commitment_loss": prior_commitment.detach(),
             "distill/vq_prior_alignment_loss": prior_alignment.detach(),
             "distill/vq_phase_alignment_loss": phase_alignment.detach(),
