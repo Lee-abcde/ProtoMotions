@@ -76,6 +76,10 @@ class DistillVQPAEModelConfig(BaseModelConfig):
     text_obs_dim: int = 0
     text_conditioning_scale: float = 0.25
     text_delta_max_ratio: Optional[float] = None
+    use_prior_text_conditioning: bool = False
+    use_posterior_text_conditioning: bool = False
+    prior_text_conditioning_scale: float = 0.25
+    prior_text_delta_max_ratio: Optional[float] = None
     signed_frequency: bool = False
     max_signed_frequency: float = 3.0
     prior_phase_accumulator_alpha: Optional[float] = None

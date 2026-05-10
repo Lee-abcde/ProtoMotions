@@ -16,7 +16,6 @@
 """VQ-PAE distillation config with BM-style domain randomization for sim2real."""
 
 import argparse
-import torch
 
 from protomotions.robot_configs.base import RobotConfig
 from protomotions.simulator.base_simulator.config import (
@@ -96,7 +95,6 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     from protomotions.envs.control.mimic_control import MimicControlConfig
     from protomotions.envs.component_factories import (
         reduced_coords_obs_factory,
-        mimic_target_poses_reduced_coords_factory,
         max_coords_obs_factory,
         previous_actions_factory,
         mimic_target_poses_max_coords_factory,
@@ -431,6 +429,10 @@ def agent_config(
         text_obs_key="text_embedding_obs_norm",
         text_obs_dim=TEXT_EMBEDDING_DIM,
         text_delta_max_ratio=None,
+        use_prior_text_conditioning=True,
+        use_posterior_text_conditioning=True,
+        prior_text_conditioning_scale=0.25,
+        prior_text_delta_max_ratio=0.5,
         prior_phase_accumulator_alpha=None,
         posterior_phase_accumulator_alpha=None,
         prior_state_accumulator_alpha=None,

@@ -236,11 +236,17 @@ class DistillVQPAEModel(BaseModel):
             )
         )
 
-        if self.config.use_text_conditioning:
+        uses_text_conditioning = (
+            self.config.use_text_conditioning
+            or getattr(self.config, "use_prior_text_conditioning", False)
+            or getattr(self.config, "use_posterior_text_conditioning", False)
+        )
+        if uses_text_conditioning:
             if not self.config.text_obs_key or self.config.text_obs_dim <= 0:
                 raise ValueError(
                     "Text conditioning requires text_obs_key and positive text_obs_dim."
                 )
+        if self.config.use_text_conditioning:
             self.text_projector = nn.Linear(
                 self.config.text_obs_dim, self.manifold_channels
             )
@@ -250,6 +256,22 @@ class DistillVQPAEModel(BaseModel):
         else:
             self.text_projector = None
             self.text_gate = None
+
+        uses_sequence_text_conditioning = (
+            getattr(self.config, "use_prior_text_conditioning", False)
+            or getattr(self.config, "use_posterior_text_conditioning", False)
+        )
+        if uses_sequence_text_conditioning:
+            self.prior_text_projector = nn.Linear(
+                self.config.text_obs_dim, self.config.latent_channels
+            )
+            self.prior_text_gate = nn.Linear(
+                self.config.text_obs_dim, self.config.latent_channels
+            )
+        else:
+            self.prior_text_projector = None
+            self.prior_text_gate = None
+
     def _reshape_history(
         self, tensordict: TensorDict, obs_key: str | None = None
     ) -> torch.Tensor:
@@ -328,8 +350,51 @@ class DistillVQPAEModel(BaseModel):
         history = self.history_projector(
             self._reshape_history(tensordict, self.config.historical_obs_key)
         )
-        current = self.current_projector(tensordict[self.config.current_obs_key]).unsqueeze(1)
-        return torch.cat([history, current], dim=1)
+        current = self.current_projector(
+            tensordict[self.config.current_obs_key]
+        ).unsqueeze(1)
+        sequence = torch.cat([history, current], dim=1)
+        if not getattr(self.config, "use_prior_text_conditioning", False):
+            return sequence
+        return self._apply_sequence_text_conditioning(
+            sequence=sequence,
+            tensordict=tensordict,
+            log_prefix="prior",
+        )
+
+    def _apply_sequence_text_conditioning(
+        self, sequence: torch.Tensor, tensordict: TensorDict, log_prefix: str
+    ) -> torch.Tensor:
+        if self.prior_text_projector is None:
+            return sequence
+
+        text_obs = tensordict[self.config.text_obs_key]
+        text_delta = self.prior_text_projector(text_obs)
+        text_gate = torch.sigmoid(self.prior_text_gate(text_obs))
+        text_residual = (
+            self.config.prior_text_conditioning_scale * text_gate * text_delta
+        )
+        if self.config.prior_text_delta_max_ratio is not None:
+            sequence_norm = (
+                sequence.detach()
+                .norm(dim=-1)
+                .mean(dim=1, keepdim=True)
+                .clamp_min(1e-6)
+            )
+            residual_norm = text_residual.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            max_residual_norm = self.config.prior_text_delta_max_ratio * sequence_norm
+            text_residual = text_residual * torch.clamp(
+                max_residual_norm / residual_norm,
+                max=1.0,
+            )
+
+        sequence_norm = sequence.detach().norm(dim=-1).mean(dim=1).clamp_min(1e-8)
+        residual_norm = text_residual.norm(dim=-1)
+        tensordict[f"vq_pae_{log_prefix}_text_delta_norm"] = residual_norm
+        tensordict[f"vq_pae_{log_prefix}_text_delta_ratio"] = (
+            residual_norm / sequence_norm
+        )
+        return sequence + text_residual.unsqueeze(1)
 
     def _apply_text_conditioning(
         self, latent: torch.Tensor, tensordict: TensorDict
@@ -423,7 +488,14 @@ class DistillVQPAEModel(BaseModel):
         current = self.current_projector(tensordict[posterior_current_key]).unsqueeze(1)
         prior_sequence = torch.cat([history, current], dim=1)
         future = self.future_projector(self._reshape_future(tensordict))
-        return torch.cat([prior_sequence, future], dim=1)
+        sequence = torch.cat([prior_sequence, future], dim=1)
+        if not getattr(self.config, "use_posterior_text_conditioning", False):
+            return sequence
+        return self._apply_sequence_text_conditioning(
+            sequence=sequence,
+            tensordict=tensordict,
+            log_prefix="posterior",
+        )
 
     def _build_posterior_reconstruction_target(
         self,
@@ -1691,6 +1763,20 @@ class DistillVQPAEModel(BaseModel):
             )
             log_dict["distill/vq_raw_text_delta_ratio"] = (
                 tensordict["vq_pae_raw_text_delta_ratio"].mean().detach()
+            )
+        if "vq_pae_prior_text_delta_norm" in tensordict.keys():
+            log_dict["distill/vq_prior_text_delta_norm"] = (
+                tensordict["vq_pae_prior_text_delta_norm"].mean().detach()
+            )
+            log_dict["distill/vq_prior_text_delta_ratio"] = (
+                tensordict["vq_pae_prior_text_delta_ratio"].mean().detach()
+            )
+        if "vq_pae_posterior_text_delta_norm" in tensordict.keys():
+            log_dict["distill/vq_posterior_text_delta_norm"] = (
+                tensordict["vq_pae_posterior_text_delta_norm"].mean().detach()
+            )
+            log_dict["distill/vq_posterior_text_delta_ratio"] = (
+                tensordict["vq_pae_posterior_text_delta_ratio"].mean().detach()
             )
         if losses.text_delta_ratio_penalty_weight > 0.0:
             log_dict["distill/vq_text_delta_ratio_penalty"] = (
