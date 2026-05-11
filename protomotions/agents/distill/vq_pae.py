@@ -1486,8 +1486,8 @@ class DistillVQPAEModel(BaseModel):
         tensordict["vq_pae_codebook_loss"] = posterior["codebook_loss"]
         tensordict["vq_pae_prior_commitment_loss"] = prior["commitment_loss"]
         tensordict["vq_pae_prior_alignment_loss"] = F.mse_loss(
-            raw_prior_latent,
-            posterior_latent.detach(),
+            actor_latent,
+            privileged_latent.detach(),
             reduction="none",
         ).mean(dim=-1)
         tensordict["vq_pae_phase_alignment_loss"] = self._circular_phase_error(
