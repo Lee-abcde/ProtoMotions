@@ -254,6 +254,70 @@ class DistillMultiHarmonicPAEModel(BaseModel):
         future = self._reshape_future(tensordict, future_key)
         return torch.cat([history, current, future], dim=1)
 
+    def _empty_mask_rate(self, tensordict: TensorDict) -> torch.Tensor:
+        device = tensordict.device
+        if device is None:
+            for value in tensordict.values():
+                if torch.is_tensor(value):
+                    device = value.device
+                    break
+        return torch.zeros(tensordict.batch_size[0], device=device)
+
+    def _apply_prior_trunk_mask(
+        self, tensordict: TensorDict
+    ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+        mask_keys = getattr(self.config, "prior_trunk_mask_keys", [])
+        if not mask_keys:
+            return {}, self._empty_mask_rate(tensordict)
+
+        if self.training:
+            mask_prob = float(getattr(self.config, "prior_trunk_mask_prob", 0.0))
+        elif getattr(self.config, "prior_trunk_mask_eval", False):
+            mask_prob = 1.0
+        else:
+            mask_prob = 0.0
+
+        originals = {}
+        mask_rates = []
+        for key in mask_keys:
+            if key not in tensordict.keys():
+                continue
+            original = tensordict[key]
+            originals[key] = original
+            if mask_prob <= 0.0:
+                mask = torch.zeros(
+                    original.shape[0], dtype=torch.bool, device=original.device
+                )
+                masked = original
+            elif mask_prob >= 1.0:
+                mask = torch.ones(
+                    original.shape[0], dtype=torch.bool, device=original.device
+                )
+                masked = torch.zeros_like(original)
+            else:
+                mask = torch.rand(original.shape[0], device=original.device) < mask_prob
+                mask_shape = (original.shape[0],) + (1,) * (original.ndim - 1)
+                masked = torch.where(
+                    mask.view(mask_shape),
+                    torch.zeros_like(original),
+                    original,
+                )
+            tensordict[key] = masked
+            mask_rates.append(mask.float())
+
+        if mask_rates:
+            mask_rate = torch.stack(mask_rates, dim=0).mean(dim=0)
+        else:
+            mask_rate = self._empty_mask_rate(tensordict)
+
+        return originals, mask_rate
+
+    def _restore_prior_trunk_mask(
+        self, tensordict: TensorDict, originals: Dict[str, torch.Tensor]
+    ) -> None:
+        for key, value in originals.items():
+            tensordict[key] = value
+
     def _build_prior_window(self, tensordict: TensorDict) -> torch.Tensor:
         history = self._reshape_history(tensordict, self.config.historical_obs_key)
         current = tensordict[self.config.current_obs_key].unsqueeze(1)
@@ -627,10 +691,14 @@ class DistillMultiHarmonicPAEModel(BaseModel):
         ) = self._apply_text_conditioning(raw_posterior_next_latent, tensordict)
 
         tensordict["vae_latent"] = prior_next_latent
+        prior_mask_originals, prior_trunk_mask_rate = self._apply_prior_trunk_mask(
+            tensordict
+        )
         tensordict = self._trunk(tensordict)
-        predicted_action = tensordict[self._trunk.out_keys[0]]
-        tensordict["action"] = predicted_action
-        tensordict["prior_action"] = predicted_action
+        self._restore_prior_trunk_mask(tensordict, prior_mask_originals)
+        tensordict["action"] = tensordict[self._trunk.out_keys[0]]
+        tensordict["prior_action"] = tensordict["action"]
+        tensordict["multi_harmonic_prior_trunk_mask_rate"] = prior_trunk_mask_rate
 
         tensordict["vae_latent"] = posterior_next_latent
         tensordict = self._trunk(tensordict)
@@ -771,10 +839,14 @@ class DistillMultiHarmonicPAEModel(BaseModel):
             tensordict,
         )
         tensordict["vae_latent"] = actor_latent
+        prior_mask_originals, prior_trunk_mask_rate = self._apply_prior_trunk_mask(
+            tensordict
+        )
         tensordict = self._trunk(tensordict)
-        predicted_action = tensordict[self._trunk.out_keys[0]]
-        tensordict["action"] = predicted_action
-        tensordict["prior_action"] = predicted_action
+        self._restore_prior_trunk_mask(tensordict, prior_mask_originals)
+        tensordict["action"] = tensordict[self._trunk.out_keys[0]]
+        tensordict["prior_action"] = tensordict["action"]
+        tensordict["multi_harmonic_prior_trunk_mask_rate"] = prior_trunk_mask_rate
         tensordict["multi_harmonic_prior_next_latent"] = actor_latent
         tensordict["multi_harmonic_prior_frequency"] = prior["frequency"]
         tensordict["multi_harmonic_prior_coeffs"] = prior["coeffs"]
@@ -912,6 +984,10 @@ class DistillMultiHarmonicPAEModel(BaseModel):
                 "multi_harmonic_latent_norm"
             ].mean().detach(),
         }
+        if "multi_harmonic_prior_trunk_mask_rate" in tensordict.keys():
+            log_dict["distill/multi_harmonic_prior_trunk_mask_rate"] = (
+                tensordict["multi_harmonic_prior_trunk_mask_rate"].mean().detach()
+            )
         if "multi_harmonic_reconstruction_history_loss" in tensordict.keys():
             log_dict["distill/multi_harmonic_reconstruction_history_loss"] = (
                 tensordict["multi_harmonic_reconstruction_history_loss"]

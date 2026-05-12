@@ -204,6 +204,9 @@ def agent_config(
         text_obs_key="text_embedding_obs_norm",
         text_obs_dim=TEXT_EMBEDDING_DIM,
         text_delta_max_ratio=None,
+        prior_trunk_mask_keys=["trunk_target_relative_rot_norm"],
+        prior_trunk_mask_prob=1.0,
+        prior_trunk_mask_eval=True,
         reconstruction_current_obs_key="clean_encoder_current_obs",
         reconstruction_historical_obs_key="clean_historical_pose_obs",
         losses=MultiHarmonicPAELossConfig(

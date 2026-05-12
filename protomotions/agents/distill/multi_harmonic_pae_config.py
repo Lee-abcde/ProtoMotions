@@ -74,6 +74,9 @@ class DistillMultiHarmonicPAEModelConfig(BaseModelConfig):
     text_obs_dim: int = 0
     text_conditioning_scale: float = 0.25
     text_delta_max_ratio: Optional[float] = None
+    prior_trunk_mask_keys: List[str] = field(default_factory=list)
+    prior_trunk_mask_prob: float = 0.0
+    prior_trunk_mask_eval: bool = False
 
     losses: MultiHarmonicPAELossConfig = field(
         default_factory=MultiHarmonicPAELossConfig
