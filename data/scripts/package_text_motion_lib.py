@@ -43,11 +43,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from protomotions.components.motion_lib import MotionLib, MotionLibConfig
-from protomotions.simulator.base_simulator.simulator_state import (
+from protomotions.components.motion_lib import MotionLib, MotionLibConfig  # noqa: E402
+from protomotions.simulator.base_simulator.simulator_state import (  # noqa: E402
     RobotState,
     StateConversion,
 )
+from protomotions.utils.motion_interpolation_utils import (  # noqa: E402
+    calc_frame_blend,
+    interpolate_pos,
+    interpolate_quat,
+)
+from protomotions.utils.rotations import quat_to_exp_map  # noqa: E402
+
+DEFAULT_CONVERSION_TARGET_FPS = 30
+FALSE_GAP_FPS_TOLERANCE = 0.5
 
 
 def load_yaml(path: Path) -> dict:
@@ -199,6 +208,174 @@ def save_robot_motion(path: Path, motion: RobotState) -> None:
     torch.save(motion.to_dict(), path)
 
 
+def closest_divisor_larger_than_target(
+    source_fps: float,
+    target_fps: int = DEFAULT_CONVERSION_TARGET_FPS,
+) -> Optional[int]:
+    rounded_fps = int(round(float(source_fps)))
+    if rounded_fps <= 0:
+        return None
+
+    divisors = [i for i in range(1, rounded_fps + 1) if rounded_fps % i == 0]
+    candidates = [d for d in divisors if d >= target_fps]
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+def resample_motion_with_interpolation(
+    motion: RobotState,
+    *,
+    target_fps: int = DEFAULT_CONVERSION_TARGET_FPS,
+) -> Tuple[RobotState, Optional[Dict[str, float]]]:
+    if motion.fps is None:
+        raise ValueError("Motion fps is required for text packaging.")
+
+    source_fps = float(motion.fps)
+    if abs(source_fps - target_fps) <= FALSE_GAP_FPS_TOLERANCE:
+        return motion, None
+
+    motion_length = float(motion.motion_length)
+    output_num_frames = int(math.floor(motion_length * target_fps)) + 1
+    if output_num_frames <= 1:
+        return motion, None
+
+    output_times = (
+        torch.arange(output_num_frames, dtype=torch.float32)
+        / float(target_fps)
+    ).clamp(max=motion_length)
+    frame_idx0, frame_idx1, blend = calc_frame_blend(
+        output_times,
+        torch.tensor(motion_length, dtype=torch.float32),
+        torch.tensor(int(motion.motion_num_frames), dtype=torch.long),
+        torch.tensor(float(motion.motion_dt), dtype=torch.float32),
+    )
+
+    state0 = motion[frame_idx0]
+    state1 = motion[frame_idx1]
+    resampled_motion = state0
+
+    pos_keys = [
+        "rigid_body_pos",
+        "rigid_body_vel",
+        "rigid_body_ang_vel",
+        "dof_vel",
+    ]
+    for key in pos_keys:
+        if resampled_motion[key] is not None:
+            resampled_motion[key] = interpolate_pos(
+                resampled_motion[key], state1[key], blend
+            )
+
+    if resampled_motion.rigid_body_rot is not None:
+        resampled_motion.rigid_body_rot = interpolate_quat(
+            resampled_motion.rigid_body_rot,
+            state1.rigid_body_rot,
+            blend,
+        )
+
+    if resampled_motion.local_rigid_body_rot is not None:
+        local_rot = interpolate_quat(
+            resampled_motion.local_rigid_body_rot,
+            state1.local_rigid_body_rot,
+            blend,
+        )
+        resampled_motion.local_rigid_body_rot = local_rot
+        batch_size, num_bodies, _ = local_rot.shape
+        if resampled_motion.dof_pos is not None:
+            resampled_motion.dof_pos = quat_to_exp_map(
+                local_rot[:, 1:, :].reshape(-1, 4),
+                w_last=True,
+            ).reshape(batch_size, (num_bodies - 1) * 3)
+    elif resampled_motion.dof_pos is not None:
+        resampled_motion.dof_pos = interpolate_pos(
+            resampled_motion.dof_pos,
+            state1.dof_pos,
+            blend,
+        )
+
+    if resampled_motion.rigid_body_contacts is not None:
+        if resampled_motion.rigid_body_contacts.dtype == torch.bool:
+            resampled_motion.rigid_body_contacts = (
+                resampled_motion.rigid_body_contacts
+                | state1.rigid_body_contacts
+            )
+        else:
+            resampled_motion.rigid_body_contacts = (
+                resampled_motion.rigid_body_contacts
+                + state1.rigid_body_contacts
+            ) / 2.0
+
+    resampled_motion.fps = float(target_fps)
+    return resampled_motion, {
+        "source_fps": source_fps,
+        "output_fps": float(target_fps),
+        "downsample_factor": source_fps / float(target_fps),
+        "source_length": float(motion.motion_length),
+        "output_length": float(resampled_motion.motion_length),
+        "resampled": 1.0,
+    }
+
+
+def downsample_motion_to_target_fps(
+    motion: RobotState,
+    *,
+    source_fps: Optional[float] = None,
+    target_fps: int = DEFAULT_CONVERSION_TARGET_FPS,
+) -> Tuple[RobotState, Optional[Dict[str, float]]]:
+    if motion.fps is None:
+        raise ValueError("Motion fps is required for text packaging.")
+
+    source_fps = float(source_fps) if source_fps is not None else float(motion.fps)
+    working_source_motion = motion
+    if abs(float(motion.fps) - source_fps) > FALSE_GAP_FPS_TOLERANCE:
+        working_source_motion = motion.clone()
+        working_source_motion.fps = source_fps
+
+    divisor_fps = closest_divisor_larger_than_target(source_fps, target_fps)
+    if divisor_fps is None:
+        divisor_fps = int(round(source_fps))
+
+    downsample_factor = int(round(source_fps)) // divisor_fps
+    working_motion = working_source_motion
+    first_stage_stats: Optional[Dict[str, float]] = None
+    if downsample_factor > 1:
+        working_motion = working_source_motion[::downsample_factor]
+        working_motion.fps = float(divisor_fps)
+        first_stage_stats = {
+            "source_fps": source_fps,
+            "output_fps": float(divisor_fps),
+            "downsample_factor": float(downsample_factor),
+            "source_length": float(working_source_motion.motion_length),
+            "output_length": float(working_motion.motion_length),
+            "resampled": 0.0,
+        }
+
+    if abs(float(working_motion.fps) - target_fps) <= FALSE_GAP_FPS_TOLERANCE:
+        return working_motion, first_stage_stats
+
+    resampled_motion, resample_stats = resample_motion_with_interpolation(
+        working_motion,
+        target_fps=target_fps,
+    )
+    if resample_stats is None:
+        return working_motion, first_stage_stats
+
+    if first_stage_stats is None:
+        resample_stats["divisor_fps"] = float(divisor_fps)
+        return resampled_motion, resample_stats
+
+    return resampled_motion, {
+        "source_fps": source_fps,
+        "output_fps": float(target_fps),
+        "downsample_factor": first_stage_stats["downsample_factor"],
+        "source_length": first_stage_stats["source_length"],
+        "output_length": float(resampled_motion.motion_length),
+        "divisor_fps": float(divisor_fps),
+        "resampled": 1.0,
+    }
+
+
 def slice_motion_single_range(
     motion: RobotState,
     interval: Tuple[float, float],
@@ -279,6 +456,42 @@ def motion_has_unlabeled_gaps(
     merged = merge_intervals(intervals, tolerance=tolerance)
     covered = sum(end - start for start, end in merged)
     return covered < motion_length - tolerance
+
+
+def infer_existing_downsampled_fps(
+    original_fps: Optional[float],
+    *,
+    target_fps: int = DEFAULT_CONVERSION_TARGET_FPS,
+) -> Optional[float]:
+    if original_fps is None:
+        return None
+    return_fps = closest_divisor_larger_than_target(original_fps, target_fps)
+    return float(return_fps) if return_fps is not None else None
+
+
+def resolve_source_fps_for_downsampling(
+    motion: dict,
+) -> Tuple[Optional[float], Optional[Dict[str, float]]]:
+    yaml_fps = motion.get("fps")
+    yaml_fps_float = float(yaml_fps) if yaml_fps is not None else None
+    expected_downsampled_fps = infer_existing_downsampled_fps(
+        yaml_fps_float,
+        target_fps=DEFAULT_CONVERSION_TARGET_FPS,
+    )
+    if expected_downsampled_fps is None:
+        return yaml_fps_float, None
+
+    if (
+        abs(expected_downsampled_fps - DEFAULT_CONVERSION_TARGET_FPS)
+        <= FALSE_GAP_FPS_TOLERANCE
+    ):
+        return expected_downsampled_fps, None
+
+    return expected_downsampled_fps, {
+        "original_fps": float(yaml_fps_float),
+        "expected_downsampled_fps": float(expected_downsampled_fps),
+        "target_fps": float(DEFAULT_CONVERSION_TARGET_FPS),
+    }
 
 
 def main():
@@ -385,7 +598,10 @@ def main():
 
         gap_motion_count = 0
         unchanged_motion_count = 0
+        downsampled_motion_count = 0
         split_clip_count = 0
+        downsample_warnings: List[str] = []
+        fps_inference_warnings: List[str] = []
         if args.clip_to_text:
             clipped_motions: List[dict] = []
             clipped_sidecar: Dict[str, dict] = {}
@@ -406,6 +622,70 @@ def main():
                     continue
 
                 motion_state = load_robot_motion(resolved_path)
+                source_fps, fps_inference_stats = resolve_source_fps_for_downsampling(
+                    motion
+                )
+                if fps_inference_stats is not None:
+                    fps_inference_warnings.append(
+                        "idx={idx}, original_fps={original_fps:.3f}, "
+                        "expected_downsampled_fps={expected_downsampled_fps:.3f}, "
+                        "target_fps={target_fps:.3f}".format(
+                            idx=motion_idx,
+                            **fps_inference_stats,
+                        )
+                    )
+                working_motion_entry = dict(motion)
+
+                motion_state, downsample_stats = downsample_motion_to_target_fps(
+                    motion_state,
+                    source_fps=source_fps,
+                    target_fps=DEFAULT_CONVERSION_TARGET_FPS,
+                )
+                if downsample_stats is not None:
+                    downsampled_motion_count += 1
+                    downsampled_fps_label = int(round(float(motion_state.fps)))
+                    downsampled_file_name = (
+                        f"{motion_idx}_fps{downsampled_fps_label}_{resolved_path.name}"
+                    )
+                    working_path = tmp_motion_dir / downsampled_file_name
+                    save_robot_motion(working_path, motion_state)
+
+                    working_motion_entry["file"] = str(working_path)
+                    working_motion_entry["fps"] = float(motion_state.fps)
+                    sub_motions = working_motion_entry.get("sub_motions")
+                    if isinstance(sub_motions, list) and len(sub_motions) == 1:
+                        downsampled_sub_motion = dict(sub_motions[0])
+                        downsampled_timings = dict(
+                            downsampled_sub_motion.get("timings", {})
+                        )
+                        downsampled_timings["start"] = 0.0
+                        downsampled_timings["end"] = float(motion_state.motion_length)
+                        downsampled_sub_motion["timings"] = downsampled_timings
+                        working_motion_entry["sub_motions"] = [downsampled_sub_motion]
+                    elif not isinstance(sub_motions, list):
+                        working_motion_entry["sub_motions"] = [
+                            {
+                                "timings": {
+                                    "start": 0.0,
+                                    "end": float(motion_state.motion_length),
+                                }
+                            }
+                        ]
+
+                    if meta is not None and motion_idx is not None:
+                        meta = dict(meta)
+                        meta["file"] = str(working_path)
+
+                    downsample_warnings.append(
+                        "idx={idx}, source_fps={source_fps:.3f}, "
+                        "output_fps={output_fps:.3f}, factor={downsample_factor:.3f}, "
+                        "source_length={source_length:.3f}, output_length={output_length:.3f}, "
+                        "interpolated={resampled:.0f}".format(
+                            idx=motion_idx,
+                            **downsample_stats,
+                        )
+                    )
+
                 merged_intervals = merge_intervals(
                     intervals, tolerance=(0.5 / float(motion_state.fps))
                 )
@@ -414,15 +694,14 @@ def main():
                     merged_intervals,
                     tolerance=(1.0 / float(motion_state.fps)),
                 )
-                if has_gaps:
-                    gap_motion_count += 1
-                else:
+                if not has_gaps:
                     unchanged_motion_count += 1
-                    clipped_motions.append(dict(motion))
+                    clipped_motions.append(working_motion_entry)
                     if meta is not None and motion_idx is not None:
                         clipped_sidecar[str(motion_idx)] = dict(meta)
                     continue
 
+                gap_motion_count += 1
                 for clip_idx, interval in enumerate(merged_intervals):
                     clipped_motion, frame_range = slice_motion_single_range(
                         motion_state, interval
@@ -436,9 +715,10 @@ def main():
                     clipped_file_path = tmp_motion_dir / clipped_file_name
                     save_robot_motion(clipped_file_path, clipped_motion)
 
-                    new_motion = dict(motion)
+                    new_motion = dict(working_motion_entry)
                     new_motion["idx"] = new_idx
                     new_motion["file"] = str(clipped_file_path)
+                    new_motion["fps"] = float(clipped_motion.fps)
                     new_motion["sub_motions"] = [
                         {
                             "timings": {
@@ -510,11 +790,18 @@ def main():
         print(f"Skipped {len(missing)} motions with missing files")
     if args.clip_to_text:
         print(
-            f"Clip-to-text mode enabled. {gap_motion_count} motions contained unlabeled gaps and were split into contiguous text-covered clips."
+            f"Clip-to-text mode enabled. {gap_motion_count} motions contained true unlabeled gaps and were split into contiguous text-covered clips."
         )
         print(
             f"{unchanged_motion_count} motions already had full text coverage and were kept unchanged."
         )
+        print(
+            f"Downsampled {downsampled_motion_count} motions to {DEFAULT_CONVERSION_TARGET_FPS} FPS before checking text coverage."
+        )
+        for warning in fps_inference_warnings:
+            print(f"  inferred source FPS from YAML: {warning}")
+        for warning in downsample_warnings:
+            print(f"  downsampled motion: {warning}")
         print(f"Created {split_clip_count} split clips from gap motions.")
     print(f"Packaged {packaged_motion_count} motions into {args.output_file}")
     print(f"Included text metadata for {len(filtered_sidecar)} motions")
