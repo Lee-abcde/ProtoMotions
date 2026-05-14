@@ -212,6 +212,10 @@ class VQDistillModelConfig(BaseModelConfig):
         default_factory=ModuleContainerConfig,
         metadata={"help": "Decoder trunk network (quantized latent to actions)."},
     )
+    categorical_prior: ModuleContainerConfig = field(
+        default_factory=ModuleContainerConfig,
+        metadata={"help": "Optional text-conditioned categorical prior over VQ codebook entries."},
+    )
 
     latent_dim: int = 64
     num_embeddings: int = 512
@@ -220,6 +224,8 @@ class VQDistillModelConfig(BaseModelConfig):
     ema_decay: float = 0.99
     dead_code_threshold: int = 2
     dead_code_revive_every: int = 100
+    use_categorical_prior: bool = False
+    categorical_prior_loss_weight: float = 1.0
     use_text_conditioning: bool = False
     text_obs_key: Optional[str] = None
     text_obs_dim: int = 0

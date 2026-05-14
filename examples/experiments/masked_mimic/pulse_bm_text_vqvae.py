@@ -44,6 +44,7 @@ from protomotions.agents.distill.config import (
 
 
 VQ_LATENT_DIM = 64
+NUM_EMBEDDINGS = 512
 
 
 def additional_experiment_arguments(parser: argparse.ArgumentParser):
@@ -322,6 +323,36 @@ def agent_config(
         ],
     )
 
+    categorical_prior_config = ModuleContainerConfig(
+        in_keys=[
+            "noisy_reduced_coords_obs",
+            "historical_previous_processed_actions",
+            "text_embedding_obs",
+        ],
+        out_keys=["prior_code_logits"],
+        models=[
+            ObsProcessorConfig(
+                in_keys=[
+                    "noisy_reduced_coords_obs",
+                    "historical_previous_processed_actions",
+                ],
+                out_keys=["categorical_prior_motion_obs_norm"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                module_operations=[ModuleOperationForwardConfig()],
+            ),
+            MLPWithConcatConfig(
+                in_keys=[
+                    "categorical_prior_motion_obs_norm",
+                    "text_embedding_obs",
+                ],
+                out_keys=["prior_code_logits"],
+                num_out=NUM_EMBEDDINGS,
+                layers=[MLPLayerConfig(units=1024, activation="relu") for _ in range(4)],
+            ),
+        ],
+    )
+
     trunk_config = ModuleContainerConfig(
         in_keys=[
             "noisy_reduced_coords_obs",
@@ -350,8 +381,9 @@ def agent_config(
         encoder=encoder_config,
         prior=prior_config,
         trunk=trunk_config,
+        categorical_prior=categorical_prior_config,
         latent_dim=VQ_LATENT_DIM,
-        num_embeddings=512,
+        num_embeddings=NUM_EMBEDDINGS,
         commitment_cost=0.25,
         codebook_update_mode="gradient",
         ema_decay=0.99,
