@@ -399,6 +399,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
                 num_embeddings=self.config.num_embeddings,
                 embedding_dim=self.config.latent_dim,
                 commitment_cost=self.config.commitment_cost,
+                dead_code_threshold=self.config.dead_code_threshold,
             )
         else:
             self.quantizer = VectorQuantizer(
@@ -427,7 +428,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
     def _quantize(self, latent: torch.Tensor, update_codebook: bool):
         if self.config.codebook_update_mode == "gradient":
             quantized, commitment_loss, codebook_loss, indices, perplexity = self.quantizer(
-                latent
+                latent, track_usage=update_codebook
             )
             if not update_codebook:
                 codebook_loss = torch.zeros_like(codebook_loss)
@@ -465,10 +466,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
 
         if self.training:
             self._forward_count += 1
-            if (
-                self.config.codebook_update_mode == "ema"
-                and self._forward_count % self.config.dead_code_revive_every == 0
-            ):
+            if self._forward_count % self.config.dead_code_revive_every == 0:
                 self.quantizer.revive_dead_codes(encoder_latent.detach())
 
         tensordict = self._prior(tensordict)
