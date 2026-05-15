@@ -467,6 +467,13 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         codebook = self.quantizer._codebook
         return F.embedding(indices, codebook)
 
+    def _select_prior_indices(self, logits: torch.Tensor) -> torch.Tensor:
+        temperature = max(float(self.config.categorical_prior_temperature), 1e-6)
+        probs = F.softmax(logits / temperature, dim=-1)
+        return torch.multinomial(probs.reshape(-1, probs.shape[-1]), 1).reshape(
+            logits.shape[:-1]
+        )
+
     def _categorical_prior_logits(self, tensordict: TensorDict) -> Optional[torch.Tensor]:
         if self._categorical_prior is None:
             return None
@@ -519,7 +526,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             prior_categorical_loss = F.cross_entropy(
                 prior_code_logits, indices.detach(), reduction="none"
             )
-            prior_indices = prior_code_logits.argmax(dim=-1)
+            prior_indices = self._select_prior_indices(prior_code_logits)
             actor_latent = self._lookup_codebook(prior_indices).detach()
             categorical_prior_indices = prior_indices
         else:
@@ -591,7 +598,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         if self._uses_categorical_prior:
             prior_latent = self._empty_prior_latent(tensordict)
             prior_code_logits = self._categorical_prior_logits(tensordict)
-            prior_indices = prior_code_logits.argmax(dim=-1)
+            prior_indices = self._select_prior_indices(prior_code_logits)
             actor_latent = self._lookup_codebook(prior_indices).detach()
         else:
             tensordict = self._prior(tensordict)

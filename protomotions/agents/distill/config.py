@@ -226,6 +226,7 @@ class VQDistillModelConfig(BaseModelConfig):
     dead_code_revive_every: int = 100
     use_categorical_prior: bool = False
     categorical_prior_loss_weight: float = 1.0
+    categorical_prior_temperature: float = 1.0
     use_text_conditioning: bool = False
     text_obs_key: Optional[str] = None
     text_obs_dim: int = 0
