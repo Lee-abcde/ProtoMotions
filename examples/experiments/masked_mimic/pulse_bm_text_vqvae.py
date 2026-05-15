@@ -327,6 +327,7 @@ def agent_config(
         in_keys=[
             "noisy_reduced_coords_obs",
             "historical_previous_processed_actions",
+            "text_embedding_obs",
         ],
         out_keys=["prior_code_logits"],
         models=[
@@ -343,6 +344,7 @@ def agent_config(
             MLPWithConcatConfig(
                 in_keys=[
                     "categorical_prior_motion_obs_norm",
+                    "text_embedding_obs",
                 ],
                 out_keys=["prior_code_logits"],
                 num_out=NUM_EMBEDDINGS,
@@ -393,7 +395,7 @@ def agent_config(
             prior_alignment_weight=1.0,
             prior_bc_weight=0.0,
         ),
-        use_text_conditioning=True,
+        use_text_conditioning=False,
         text_obs_key="text_embedding_obs",
         text_obs_dim=512,
         text_conditioning_scale=0.25,
