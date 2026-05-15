@@ -250,6 +250,7 @@ def agent_config(
             "noisy_reduced_coords_obs",
             "noisy_mimic_reduced_coords_target_poses",
             "historical_previous_processed_actions",
+            "text_embedding_obs",
         ],
         out_keys=["encoder_latent"],
         models=[
@@ -267,6 +268,7 @@ def agent_config(
             MLPWithConcatConfig(
                 in_keys=[
                     "encoder_motion_obs_norm",
+                    "text_embedding_obs",
                 ],
                 out_keys=["encoder_trunk_out"],
                 num_out=512,
