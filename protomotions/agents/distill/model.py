@@ -402,6 +402,21 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             PriorClass = get_class(self.config.prior._target_)
             self._prior: ModuleContainer = PriorClass(config=self.config.prior)
             self._categorical_prior = None
+        if self.config.reconstruction is not None:
+            ReconstructionClass = get_class(self.config.reconstruction._target_)
+            self._reconstruction: Optional[ModuleContainer] = ReconstructionClass(
+                config=self.config.reconstruction
+            )
+            if len(self._reconstruction.out_keys) != 1:
+                raise ValueError(
+                    "VQ reconstruction head must produce exactly one output."
+                )
+            if self.config.reconstruction_target_key is None:
+                raise ValueError(
+                    "VQ reconstruction head requires reconstruction_target_key."
+                )
+        else:
+            self._reconstruction = None
 
         if self.config.codebook_update_mode not in ["ema", "gradient"]:
             raise ValueError(
@@ -435,12 +450,18 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             if self._uses_categorical_prior
             else self._prior.in_keys
         )
+        reconstruction_target_keys = (
+            [self.config.reconstruction_target_key]
+            if self._reconstruction is not None
+            else []
+        )
         self.in_keys = list(
             set(
                 prior_input_keys
                 + self._encoder.in_keys
                 + trunk_in_keys_without_latents
                 + self._text_input_keys()
+                + reconstruction_target_keys
             )
         )
         self.out_keys = ["action", "prior_action", "privileged_action"]
@@ -488,18 +509,132 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         reference = tensordict[self._categorical_prior.in_keys[0]]
         return reference.new_zeros(*reference.shape[:-1], self.config.latent_dim)
 
+    def _normalize_reconstruction_target(
+        self,
+        target: torch.Tensor,
+        tensordict: TensorDict,
+        reference_key: Optional[str],
+        norm_snapshot: Optional[Dict[str, object]] = None,
+    ) -> torch.Tensor:
+        if reference_key is None:
+            return target
+
+        if reference_key not in self._encoder.in_keys:
+            raise KeyError(
+                f"Reconstruction reference key {reference_key!r} is not an encoder input."
+            )
+
+        reference_idx = self._encoder.in_keys.index(reference_key)
+        target_dim = tensordict[reference_key].shape[-1]
+        offset = sum(
+            tensordict[key].shape[-1] for key in self._encoder.in_keys[:reference_idx]
+        )
+
+        for model in self._encoder.models:
+            norm = getattr(model, "norm", None)
+            if norm is None:
+                continue
+            running_obs_norm = norm.running_obs_norm
+            if norm_snapshot is not None:
+                if not norm_snapshot["initialized"]:
+                    return target
+                mean = norm_snapshot["mean"][offset : offset + target_dim].to(
+                    device=target.device,
+                    dtype=target.dtype,
+                )
+                var = norm_snapshot["var"][offset : offset + target_dim].to(
+                    device=target.device,
+                    dtype=target.dtype,
+                )
+                epsilon = norm_snapshot["epsilon"]
+                clamp_value = norm_snapshot["clamp_value"]
+            elif running_obs_norm._initialized:
+                mean = running_obs_norm.mean[offset : offset + target_dim].to(
+                    device=target.device,
+                    dtype=target.dtype,
+                )
+                var = running_obs_norm.var[offset : offset + target_dim].to(
+                    device=target.device,
+                    dtype=target.dtype,
+                )
+                epsilon = running_obs_norm.epsilon
+                clamp_value = running_obs_norm.clamp_value
+            else:
+                return target
+
+            normalized = (target - mean) / torch.sqrt(var + epsilon)
+            if clamp_value is not None:
+                normalized = torch.clamp(
+                    normalized,
+                    -clamp_value,
+                    clamp_value,
+                )
+            return normalized
+
+        return target
+
+    def _capture_encoder_norm_snapshot(self) -> Optional[Dict[str, object]]:
+        for model in self._encoder.models:
+            norm = getattr(model, "norm", None)
+            if norm is None:
+                continue
+            running_obs_norm = norm.running_obs_norm
+            snapshot: Dict[str, object] = {
+                "initialized": running_obs_norm._initialized,
+                "epsilon": running_obs_norm.epsilon,
+                "clamp_value": running_obs_norm.clamp_value,
+            }
+            if running_obs_norm._initialized:
+                snapshot["mean"] = running_obs_norm.mean.detach().clone()
+                snapshot["var"] = running_obs_norm.var.detach().clone()
+            return snapshot
+        return None
+
+    def _run_reconstruction(
+        self,
+        tensordict: TensorDict,
+        quantized_latent: torch.Tensor,
+        norm_snapshot: Optional[Dict[str, object]] = None,
+    ) -> TensorDict:
+        if self._reconstruction is None:
+            return tensordict
+
+        tensordict["vq_reconstruction_latent"] = quantized_latent
+        tensordict = self._reconstruction(tensordict)
+        reconstruction = tensordict[self._reconstruction.out_keys[0]]
+        target = tensordict[self.config.reconstruction_target_key]
+        target = self._normalize_reconstruction_target(
+            target,
+            tensordict,
+            self.config.reconstruction_reference_obs_key,
+            norm_snapshot=norm_snapshot,
+        )
+        reconstruction_loss = F.mse_loss(
+            reconstruction, target, reduction="none"
+        ).mean(dim=-1)
+        tensordict["vq_reconstruction_loss"] = reconstruction_loss
+        return tensordict
+
     def forward(self, tensordict: TensorDict) -> TensorDict:
         external_actor_latent = tensordict.get("distill_external_vae_latent", None)
         external_privileged_latent = tensordict.get(
             "distill_external_privileged_vae_latent", None
         )
 
+        norm_snapshot = (
+            self._capture_encoder_norm_snapshot()
+            if self._reconstruction is not None
+            else None
+        )
         tensordict = self._encoder(tensordict)
         encoder_latent = tensordict[self._encoder.out_keys[0]]
         privileged_latent, commitment_loss, codebook_loss, indices, perplexity = self._quantize(
             encoder_latent, update_codebook=True
         )
         raw_privileged_latent = privileged_latent
+        tensordict = self._run_reconstruction(
+            tensordict, raw_privileged_latent, norm_snapshot=norm_snapshot
+        )
         if external_privileged_latent is not None:
             privileged_latent = external_privileged_latent
             privileged_text_residual = None
@@ -665,12 +800,21 @@ class VQDistillModel(TextResidualMixin, BaseModel):
                 tensordict["vq_prior_categorical_loss"].mean()
                 * self.config.categorical_prior_loss_weight
             )
+        reconstruction = torch.zeros_like(prior_alignment)
+        reconstruction_raw = torch.zeros_like(prior_alignment)
+        if (
+            losses.reconstruction_weight > 0.0
+            and "vq_reconstruction_loss" in tensordict.keys()
+        ):
+            reconstruction_raw = tensordict["vq_reconstruction_loss"].mean()
+            reconstruction = reconstruction_raw * losses.reconstruction_weight
         total = (
             commitment
             + codebook
             + prior_commitment
             + prior_alignment
             + prior_categorical
+            + reconstruction
         )
 
         log_dict = {
@@ -679,6 +823,8 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             "distill/vq_prior_commitment_loss": prior_commitment.detach(),
             "distill/vq_prior_alignment_loss": prior_alignment.detach(),
             "distill/vq_prior_categorical_loss": prior_categorical.detach(),
+            "distill/vq_reconstruction_loss": reconstruction_raw.detach(),
+            "distill/vq_reconstruction_loss_weighted": reconstruction.detach(),
             "distill/vq_perplexity": tensordict["vq_perplexity"].mean().detach(),
             "distill/vq_prior_match_rate": (
                 tensordict["vq_prior_indices"] == tensordict["vq_indices"]

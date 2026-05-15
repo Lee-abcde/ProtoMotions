@@ -192,6 +192,7 @@ class VQDistillLossConfig:
     prior_commitment_weight: float = 0.25
     prior_alignment_weight: float = 1.0
     prior_bc_weight: float = 0.0
+    reconstruction_weight: float = 0.0
 
 
 @dataclass
@@ -216,6 +217,10 @@ class VQDistillModelConfig(BaseModelConfig):
         default_factory=ModuleContainerConfig,
         metadata={"help": "Optional text-conditioned categorical prior over VQ codebook entries."},
     )
+    reconstruction: Optional[ModuleContainerConfig] = field(
+        default=None,
+        metadata={"help": "Optional decoder from posterior VQ code to a reconstruction target."},
+    )
 
     latent_dim: int = 64
     num_embeddings: int = 512
@@ -231,6 +236,8 @@ class VQDistillModelConfig(BaseModelConfig):
     text_obs_key: Optional[str] = None
     text_obs_dim: int = 0
     text_conditioning_scale: float = 0.25
+    reconstruction_target_key: Optional[str] = None
+    reconstruction_reference_obs_key: Optional[str] = None
 
     losses: VQDistillLossConfig = field(default_factory=VQDistillLossConfig)
     optimizer: OptimizerConfig = field(
