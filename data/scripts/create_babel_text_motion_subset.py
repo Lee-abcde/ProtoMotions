@@ -48,18 +48,25 @@ _DATASET_ALIASES = {
     "EyesJapanDataset": "eyesjapandataset",
     "Eyes_Japan_Dataset": "eyesjapandataset",
     "MPI_HDM05": "hdm05",
+    "MPIHDM05": "hdm05",
     "HDM05": "hdm05",
     "MPI_mosh": "mosh",
+    "MPImosh": "mosh",
     "MoSh": "mosh",
     "MPI_Limits": "poseprior",
+    "MPILimits": "poseprior",
     "PosePrior": "poseprior",
     "Transitions_mocap": "transitions",
+    "Transitionsmocap": "transitions",
     "Transitions": "transitions",
     "DFaust_67": "dfaust",
+    "DFaust67": "dfaust",
     "DFaust": "dfaust",
     "SSM_synced": "ssm",
+    "SSMsynced": "ssm",
     "SSM": "ssm",
     "TCD_handMocap": "tcdhands",
+    "TCDhandMocap": "tcdhands",
     "TCDHands": "tcdhands",
 }
 
@@ -297,15 +304,6 @@ def clip_overlap(
     return start, end
 
 
-def retargeted_motion_name(source_motion_file: str) -> str:
-    source_path = PurePosixPath(source_motion_file.replace("\\", "/"))
-    return (
-        f"{source_path.parent.name}_{source_path.stem}_keypoints_retargeted"
-        .replace(" ", "_")
-        + ".motion"
-    )
-
-
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -345,15 +343,6 @@ def main():
         help=(
             "segments: emit one YAML entry per labeled overlap segment. "
             "full: keep each clip whole and store text only in sidecar JSON."
-        ),
-    )
-    parser.add_argument(
-        "--retargeted-motion-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Optional directory of final retargeted .motion files. When set, output YAML "
-            "will point at those files instead of the source SMPL motions."
         ),
     )
     parser.add_argument(
@@ -427,7 +416,8 @@ def main():
 
     for motion in input_motions:
         file_path = motion["file"]
-        motion_key = normalize_motion_path(file_path)
+        source_file = motion.get("source_file", file_path)
+        motion_key = normalize_motion_path(source_file)
         babel_samples = babel_index.get(motion_key)
         if not babel_samples:
             continue
@@ -506,10 +496,6 @@ def main():
 
                 new_motion = deepcopy(motion)
                 new_motion["idx"] = next_idx
-                if args.retargeted_motion_dir is not None:
-                    new_motion["file"] = str(
-                        args.retargeted_motion_dir / retargeted_motion_name(file_path)
-                    )
                 new_motion["sub_motions"] = [
                     {"timings": {"start": overlap_start, "end": overlap_end}}
                 ]
@@ -526,7 +512,7 @@ def main():
                     "source_idx": motion.get("idx"),
                     "source_sub_motion_idx": sub_motion_idx,
                     "file": new_motion["file"],
-                    "source_file": file_path,
+                    "source_file": source_file,
                     "motion_key": motion_key,
                     "babel_sid": label["babel_sid"],
                     "url": label["url"],
@@ -553,10 +539,6 @@ def main():
             if args.mode == "full" and overlapping_labels:
                 new_motion = deepcopy(motion)
                 new_motion["idx"] = next_idx
-                if args.retargeted_motion_dir is not None:
-                    new_motion["file"] = str(
-                        args.retargeted_motion_dir / retargeted_motion_name(file_path)
-                    )
                 output_motions.append(new_motion)
 
                 sidecar[str(next_idx)] = {
@@ -564,7 +546,7 @@ def main():
                     "source_idx": motion.get("idx"),
                     "source_sub_motion_idx": sub_motion_idx,
                     "file": new_motion["file"],
-                    "source_file": file_path,
+                    "source_file": source_file,
                     "motion_key": motion_key,
                     "clip_start": clip_start,
                     "clip_end": clip_end,
