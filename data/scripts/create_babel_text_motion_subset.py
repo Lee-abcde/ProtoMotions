@@ -110,8 +110,11 @@ def build_babel_index(babel_data: dict) -> Dict[str, List[dict]]:
     return index
 
 
+TimedLabel = Tuple[float, Optional[float], dict]
+
+
 def resolve_transition_target_text(
-    timed_labels: List[Tuple[float, float, dict]],
+    timed_labels: List[TimedLabel],
     start_idx: int,
     *,
     text_field: str,
@@ -122,8 +125,7 @@ def resolve_transition_target_text(
         if proc_label == "transition":
             continue
 
-        label_duration = next_end - next_start
-        if label_duration < min_label_duration:
+        if next_end is not None and next_end - next_start < min_label_duration:
             continue
 
         text = canonical_text(next_label, text_field)
@@ -133,66 +135,161 @@ def resolve_transition_target_text(
     return None
 
 
+def iter_timed_labels(
+    timed_labels: List[TimedLabel],
+    *,
+    text_field: str,
+    include_transition: bool,
+    min_label_duration: float,
+    annotation_source: str,
+) -> Iterable[dict]:
+    timed_labels.sort(
+        key=lambda item: (
+            item[0],
+            item[1] if item[1] is not None else float("inf"),
+        )
+    )
+
+    for label_idx, (start_t, end_t, label) in enumerate(timed_labels):
+        proc_label = str(label.get("proc_label", "")).strip()
+        if end_t is not None:
+            duration = end_t - start_t
+            if duration < min_label_duration:
+                continue
+
+        if proc_label == "transition":
+            if not include_transition:
+                continue
+
+            next_text = resolve_transition_target_text(
+                timed_labels,
+                label_idx,
+                text_field=text_field,
+                min_label_duration=min_label_duration,
+            )
+            text = (
+                f"transition to {next_text}"
+                if next_text
+                else canonical_text(label, text_field)
+            )
+        else:
+            text = canonical_text(label, text_field)
+
+        if not text:
+            continue
+        yield {
+            "text": text,
+            "raw_label": label.get("raw_label"),
+            "proc_label": proc_label,
+            "act_cat": label.get("act_cat", []),
+            "seg_id": label.get("seg_id"),
+            "label_start": start_t,
+            "label_end": end_t,
+            "annotation_source": annotation_source,
+        }
+
+
 def iter_frame_labels(
-    babel_samples: Iterable[dict],
+    sample: dict,
     *,
     text_field: str,
     include_transition: bool,
     min_label_duration: float,
 ) -> Iterable[dict]:
+    frame_ann = sample.get("frame_ann") or {}
+    timed_labels: List[TimedLabel] = []
+    for label in frame_ann.get("labels", []):
+        start_t = label.get("start_t")
+        end_t = label.get("end_t")
+        if start_t is None or end_t is None:
+            continue
+        timed_labels.append((float(start_t), float(end_t), label))
+
+    yield from iter_timed_labels(
+        timed_labels,
+        text_field=text_field,
+        include_transition=include_transition,
+        min_label_duration=min_label_duration,
+        annotation_source="frame_ann",
+    )
+
+
+def iter_seq_labels(
+    sample: dict,
+    *,
+    text_field: str,
+    include_transition: bool,
+    min_label_duration: float,
+) -> Iterable[dict]:
+    seq_ann = sample.get("seq_ann") or {}
+    sample_duration = sample.get("dur")
+    label_end = float(sample_duration) if sample_duration is not None else None
+
+    timed_labels: List[TimedLabel] = []
+    for label in seq_ann.get("labels", []):
+        timed_labels.append((0.0, label_end, label))
+
+    usable_labels = iter_timed_labels(
+        timed_labels,
+        text_field=text_field,
+        include_transition=include_transition,
+        min_label_duration=min_label_duration,
+        annotation_source="seq_ann",
+    )
+    first_label = next(usable_labels, None)
+    if first_label is not None:
+        yield first_label
+
+
+def iter_babel_labels(
+    babel_samples: Iterable[dict],
+    *,
+    annotation_policy: str,
+    text_field: str,
+    include_transition: bool,
+    min_label_duration: float,
+) -> Iterable[dict]:
     for sample in babel_samples:
-        frame_ann = sample.get("frame_ann") or {}
-        timed_labels: List[Tuple[float, float, dict]] = []
-        for label in frame_ann.get("labels", []):
-            start_t = label.get("start_t")
-            end_t = label.get("end_t")
-            if start_t is None or end_t is None:
-                continue
-            timed_labels.append((float(start_t), float(end_t), label))
-
-        timed_labels.sort(key=lambda item: (item[0], item[1]))
-
-        for label_idx, (start_t, end_t, label) in enumerate(timed_labels):
-            proc_label = str(label.get("proc_label", "")).strip()
-            duration = end_t - start_t
-            if duration < min_label_duration:
-                continue
-
-            if proc_label == "transition":
-                if not include_transition:
-                    continue
-
-                next_text = resolve_transition_target_text(
-                    timed_labels,
-                    label_idx,
+        if annotation_policy == "seq_only":
+            label_iter = iter_seq_labels(
+                sample,
+                text_field=text_field,
+                include_transition=include_transition,
+                min_label_duration=min_label_duration,
+            )
+        else:
+            frame_labels = list(
+                iter_frame_labels(
+                    sample,
                     text_field=text_field,
+                    include_transition=include_transition,
                     min_label_duration=min_label_duration,
                 )
-                text = (
-                    f"transition to {next_text}" if next_text else canonical_text(label, text_field)
-                )
+            )
+            if annotation_policy == "frame_only" or frame_labels:
+                label_iter = iter(frame_labels)
             else:
-                text = canonical_text(label, text_field)
+                label_iter = iter_seq_labels(
+                    sample,
+                    text_field=text_field,
+                    include_transition=include_transition,
+                    min_label_duration=min_label_duration,
+                )
 
-            if not text:
-                continue
+        for label in label_iter:
             yield {
                 "babel_sid": sample.get("babel_sid"),
                 "url": sample.get("url"),
                 "duration": sample.get("dur"),
-                "text": text,
-                "raw_label": label.get("raw_label"),
-                "proc_label": proc_label,
-                "act_cat": label.get("act_cat", []),
-                "seg_id": label.get("seg_id"),
-                "label_start": start_t,
-                "label_end": end_t,
+                **label,
             }
 
 
 def clip_overlap(
-    clip_start: float, clip_end: float, label_start: float, label_end: float
+    clip_start: float, clip_end: float, label_start: float, label_end: Optional[float]
 ) -> Optional[Tuple[float, float]]:
+    if label_end is None:
+        label_end = clip_end
     start = max(clip_start, label_start)
     end = min(clip_end, label_end)
     if end <= start:
@@ -213,7 +310,7 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             "Create a text-labeled motion subset by intersecting a motion YAML "
-            "with BABEL frame annotations."
+            "with BABEL frame or sequence annotations."
         )
     )
     parser.add_argument(
@@ -265,6 +362,16 @@ def main():
         default="proc_label",
         choices=["proc_label", "raw_label", "act_cat"],
         help="Which BABEL label field to use as the text prompt.",
+    )
+    parser.add_argument(
+        "--annotation-policy",
+        type=str,
+        default="frame_only",
+        choices=["frame_only", "seq_only", "frame_then_seq"],
+        help=(
+            "Which BABEL annotations to use. frame_then_seq uses frame_ann labels "
+            "when available and falls back to the first usable seq_ann label."
+        ),
     )
     parser.add_argument(
         "--min-overlap",
@@ -327,17 +434,17 @@ def main():
 
         matched_source_motions += 1
         labels = list(
-            iter_frame_labels(
+            iter_babel_labels(
                 babel_samples,
+                annotation_policy=args.annotation_policy,
                 text_field=args.text_field,
                 include_transition=args.include_transition,
                 min_label_duration=args.min_label_duration,
             )
         )
         if not labels:
-            # some motion might not have the frame_ann
+            # Some motions do not have usable labels for the selected policy.
             continue
-
 
         sub_motions = motion.get("sub_motions", []) or [{"timings": {"start": 0.0}}]
         for sub_motion_idx, sub_motion in enumerate(sub_motions):
@@ -350,11 +457,20 @@ def main():
 
             overlapping_labels = []
             for label in labels:
+                label_start = label["label_start"]
+                label_end = label["label_end"]
+                if label["annotation_source"] == "seq_ann":
+                    # Sequence annotations have no true temporal boundary. Treat
+                    # them as covering the whole YAML clip to avoid BABEL duration
+                    # rounding creating tiny false gaps at the final frame.
+                    label_start = clip_start
+                    label_end = clip_end
+
                 overlap = clip_overlap(
                     clip_start,
                     clip_end,
-                    label["label_start"],
-                    label["label_end"],
+                    label_start,
+                    label_end,
                 )
                 if overlap is None:
                     continue
@@ -372,10 +488,11 @@ def main():
                         "proc_label": label["proc_label"],
                         "act_cat": label["act_cat"],
                         "seg_id": label["seg_id"],
+                        "annotation_source": label["annotation_source"],
                         "clip_start": clip_start,
                         "clip_end": clip_end,
-                        "label_start": label["label_start"],
-                        "label_end": label["label_end"],
+                        "label_start": label_start,
+                        "label_end": label_end,
                         "overlap_start": overlap_start,
                         "overlap_end": overlap_end,
                         "local_start": overlap_start - clip_start,
@@ -401,6 +518,7 @@ def main():
                 new_motion["source_sub_motion_idx"] = sub_motion_idx
                 new_motion["babel_sid"] = label["babel_sid"]
                 new_motion["babel_seg_id"] = label["seg_id"]
+                new_motion["babel_annotation_source"] = label["annotation_source"]
                 output_motions.append(new_motion)
 
                 sidecar[str(next_idx)] = {
@@ -417,10 +535,11 @@ def main():
                     "proc_label": label["proc_label"],
                     "act_cat": label["act_cat"],
                     "seg_id": label["seg_id"],
+                    "annotation_source": label["annotation_source"],
                     "clip_start": clip_start,
                     "clip_end": clip_end,
-                    "label_start": label["label_start"],
-                    "label_end": label["label_end"],
+                    "label_start": label_start,
+                    "label_end": label_end,
                     "overlap_start": overlap_start,
                     "overlap_end": overlap_end,
                     "local_start": overlap_start - clip_start,
