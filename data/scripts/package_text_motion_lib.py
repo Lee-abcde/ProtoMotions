@@ -557,6 +557,14 @@ def main():
             "MotionLib will include the embedding table."
         ),
     )
+    parser.add_argument(
+        "--drop-text-metadata",
+        action="store_true",
+        help=(
+            "Use text metadata for filtering/splitting, but do not store text "
+            "metadata or text embeddings in the output MotionLib."
+        ),
+    )
     args = parser.parse_args()
 
     motion_yaml = load_yaml(args.motion_yaml)
@@ -769,10 +777,11 @@ def main():
             ),
             device=args.device,
         )
-        motion_lib.motion_text_data = build_aligned_motion_text_data(
-            filtered_config["motions"], filtered_sidecar
-        )
-        if args.text_embeddings_pt is not None:
+        if not args.drop_text_metadata:
+            motion_lib.motion_text_data = build_aligned_motion_text_data(
+                filtered_config["motions"], filtered_sidecar
+            )
+        if args.text_embeddings_pt is not None and not args.drop_text_metadata:
             text_embedding_payload = load_text_embedding_payload(args.text_embeddings_pt)
             motion_lib.text_embedding_table = text_embedding_payload["embeddings"].to(
                 device=args.device
@@ -804,9 +813,12 @@ def main():
             print(f"  downsampled motion: {warning}")
         print(f"Created {split_clip_count} split clips from gap motions.")
     print(f"Packaged {packaged_motion_count} motions into {args.output_file}")
-    print(f"Included text metadata for {len(filtered_sidecar)} motions")
-    print(f"Included {count_text_segments(filtered_sidecar)} text segments/prompts")
-    if args.text_embeddings_pt is not None:
+    if args.drop_text_metadata:
+        print("Dropped text metadata from output MotionLib")
+    else:
+        print(f"Included text metadata for {len(filtered_sidecar)} motions")
+        print(f"Included {count_text_segments(filtered_sidecar)} text segments/prompts")
+    if args.text_embeddings_pt is not None and not args.drop_text_metadata:
         print(f"Merged text embedding table from {args.text_embeddings_pt}")
 
 
