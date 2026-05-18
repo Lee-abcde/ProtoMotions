@@ -128,6 +128,7 @@ class MotionLib:
     text_embedding_table: Optional[torch.Tensor] = None
     text_embedding_texts: Optional[Tuple[str, ...]] = None
     text_embedding_model_name: Optional[str] = None
+    text_embedding_indices: Optional[torch.Tensor] = None
 
     # Optional fields
     lrs: Optional[torch.Tensor] = (
@@ -203,6 +204,7 @@ class MotionLib:
         self.text_embedding_table = None
         self.text_embedding_texts = None
         self.text_embedding_model_name = None
+        self.text_embedding_indices = None
         self._text_embedding_lookup = None
         self._override_text_embedding = None
         self._override_text_label = None
@@ -538,6 +540,7 @@ class MotionLib:
 
         self.motion_files = tuple(motion_files)  # for saving to packed pt file
         self.motion_text_data = None
+        self.text_embedding_indices = None
         self._text_embedding_lookup = None
 
         num_motions = len(motions)
@@ -915,9 +918,6 @@ class MotionLib:
     def get_active_motion_text_embedding_indices(
         self, motion_ids, motion_times
     ) -> torch.Tensor:
-        if self._text_embedding_lookup is None and self.motion_text_data is not None:
-            self._build_text_embedding_lookup()
-
         if torch.is_tensor(motion_ids):
             motion_ids_tensor = motion_ids.to(device=self.device, dtype=torch.long)
         else:
@@ -931,6 +931,16 @@ class MotionLib:
             motion_times_tensor = torch.tensor(
                 motion_times, dtype=torch.float32, device=self.device
             )
+
+        if self.text_embedding_indices is not None:
+            frame_indices = self._calc_closest_frame(
+                motion_ids_tensor, motion_times_tensor
+            )
+            flat_indices = frame_indices + self.length_starts[motion_ids_tensor]
+            return self.text_embedding_indices[flat_indices].to(dtype=torch.long)
+
+        if self._text_embedding_lookup is None and self.motion_text_data is not None:
+            self._build_text_embedding_lookup()
 
         indices = torch.full_like(motion_ids_tensor, fill_value=-1, dtype=torch.long)
         if self._text_embedding_lookup is None:
@@ -970,6 +980,73 @@ class MotionLib:
             ]
 
         return indices
+
+    def build_text_embedding_indices(self) -> Optional[torch.Tensor]:
+        """Precompute one active text embedding index for every stored motion frame.
+
+        The returned tensor is flattened in MotionLib frame order. Entry ``i`` maps
+        frame ``i`` to a row in ``text_embedding_table``; ``-1`` means no valid text
+        label covers that frame. This removes the per-step segment search during
+        training while respecting the actual packaged/downsampled frame count.
+        """
+        if self.motion_text_data is None:
+            return None
+
+        if self._text_embedding_lookup is None:
+            self._build_text_embedding_lookup()
+        if self._text_embedding_lookup is None:
+            return None
+
+        total_frames = int(self.motion_num_frames.sum().item())
+        indices = torch.full(
+            (total_frames,), -1, dtype=torch.long, device=self.device
+        )
+
+        for motion_id, lookup in enumerate(self._text_embedding_lookup):
+            if lookup is None:
+                continue
+
+            num_frames = int(self.motion_num_frames[motion_id].item())
+            if num_frames <= 0:
+                continue
+
+            motion_length = float(self.motion_lengths[motion_id].item())
+            if num_frames == 1 or motion_length <= 0:
+                frame_times = torch.zeros(1, device=self.device)
+            else:
+                frame_times = torch.linspace(
+                    0.0,
+                    motion_length,
+                    steps=num_frames,
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+
+            interval_positions = (
+                torch.bucketize(frame_times, lookup["starts"], right=True) - 1
+            )
+            valid_positions = interval_positions >= 0
+            if not valid_positions.any():
+                continue
+
+            valid_lookup_positions = interval_positions[valid_positions]
+            valid_frame_times = frame_times[valid_positions]
+            end_times = lookup["ends"][valid_lookup_positions]
+            in_bound = valid_frame_times < end_times
+            if not in_bound.any():
+                continue
+
+            frame_positions = valid_positions.nonzero(as_tuple=False).squeeze(-1)
+            frame_positions = frame_positions[in_bound]
+            valid_lookup_positions = valid_lookup_positions[in_bound]
+
+            flat_start = int(self.length_starts[motion_id].item())
+            indices[flat_start + frame_positions] = lookup["embedding_indices"][
+                valid_lookup_positions
+            ]
+
+        return indices
+
     def get_active_motion_text_embeddings(
         self, motion_ids, motion_times
     ) -> Tuple[torch.Tensor, torch.Tensor]:

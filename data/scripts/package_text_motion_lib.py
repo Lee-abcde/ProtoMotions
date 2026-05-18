@@ -565,6 +565,15 @@ def main():
             "metadata or text embeddings in the output MotionLib."
         ),
     )
+    parser.add_argument(
+        "--no-precompute-text-frame-indices",
+        action="store_true",
+        help=(
+            "Do not precompute per-frame text embedding indices. By default, "
+            "text-packaged MotionLib files include this flattened tensor so "
+            "training can gather text embeddings without per-step segment search."
+        ),
+    )
     args = parser.parse_args()
 
     motion_yaml = load_yaml(args.motion_yaml)
@@ -792,6 +801,18 @@ def main():
             motion_lib.text_embedding_model_name = (
                 str(model_name) if model_name is not None else None
             )
+        text_indexed_frame_count = None
+        text_unlabeled_frame_count = None
+        if (
+            not args.drop_text_metadata
+            and not args.no_precompute_text_frame_indices
+            and motion_lib.motion_text_data is not None
+        ):
+            motion_lib.text_embedding_indices = motion_lib.build_text_embedding_indices()
+            if motion_lib.text_embedding_indices is not None:
+                valid_text_frames = motion_lib.text_embedding_indices >= 0
+                text_indexed_frame_count = int(valid_text_frames.sum().item())
+                text_unlabeled_frame_count = int((~valid_text_frames).sum().item())
         motion_lib.save_to_file(args.output_file)
 
     print(f"Loaded {len(motions)} YAML motions from {args.motion_yaml}")
@@ -820,6 +841,15 @@ def main():
         print(f"Included {count_text_segments(filtered_sidecar)} text segments/prompts")
     if args.text_embeddings_pt is not None and not args.drop_text_metadata:
         print(f"Merged text embedding table from {args.text_embeddings_pt}")
+    if not args.drop_text_metadata and not args.no_precompute_text_frame_indices:
+        if text_indexed_frame_count is not None:
+            print(
+                "Precomputed per-frame text embedding indices: "
+                f"{text_indexed_frame_count} labeled frames, "
+                f"{text_unlabeled_frame_count} unlabeled frames"
+            )
+        else:
+            print("Skipped per-frame text embedding index precompute: no text metadata")
 
 
 if __name__ == "__main__":
