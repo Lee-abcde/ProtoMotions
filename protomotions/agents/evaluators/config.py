@@ -63,6 +63,16 @@ class MimicEvaluatorConfig(EvaluatorConfig):
     """Configuration for Mimic evaluator."""
 
     _target_: str = "protomotions.agents.evaluators.mimic_evaluator.MimicEvaluator"
+    collect_trajectory_metrics: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Collect full per-frame robot/action trajectories during evaluation. "
+                "Required for predicted motion-lib export and smoothness metrics, "
+                "but memory-heavy for large motion libraries."
+            )
+        },
+    )
     save_predicted_motion_lib_every: Optional[int] = field(
         default=3,
         metadata={"help": "Save pred_motion_lib every M evals. None = disabled.", "min": 1}

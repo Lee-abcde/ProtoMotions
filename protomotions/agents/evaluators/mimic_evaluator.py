@@ -52,6 +52,8 @@ class MimicEvaluator(BaseEvaluator):
 
     def _register_plugins(self) -> None:
         """Register metric computation plugins."""
+        if not getattr(self.config, "collect_trajectory_metrics", True):
+            return
         self._register_smoothness_plugin(window_sec=0.4, high_jerk_threshold=6500.0)
         self._register_action_smoothness_plugin()
 
@@ -63,6 +65,9 @@ class MimicEvaluator(BaseEvaluator):
     ) -> Dict[str, MotionMetrics]:
         """Create MotionMetrics buffers for trajectory collection (robot state + actions)."""
         metrics = {}
+
+        if not getattr(self.config, "collect_trajectory_metrics", True):
+            return metrics
 
         self._add_robot_state_metrics(
             metrics, num_motions, motion_num_frames, max_eval_steps
@@ -258,6 +263,8 @@ class MimicEvaluator(BaseEvaluator):
 
         if self.fabric.global_rank == 0:
             if (
+                getattr(self.config, "collect_trajectory_metrics", True)
+                and
                 self.config.save_predicted_motion_lib_every is not None
                 and self.eval_count % self.config.save_predicted_motion_lib_every == 0
             ):
