@@ -388,6 +388,16 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         self._uses_categorical_prior = getattr(
             self.config, "use_categorical_prior", False
         )
+        self._categorical_prior_history_steps = int(
+            getattr(self.config, "categorical_prior_history_steps", 0)
+        )
+        self._categorical_prior_history_key = getattr(
+            self.config,
+            "categorical_prior_history_key",
+            "vq_code_history_indices",
+        )
+        self._categorical_prior_history_obs_key = "_vq_code_history_obs"
+        self._categorical_prior_history_pad_index = self.config.num_embeddings
         if self._uses_categorical_prior:
             self._prior = None
             CategoricalPriorClass = get_class(self.config.categorical_prior._target_)
@@ -450,6 +460,12 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             if self._uses_categorical_prior
             else self._prior.in_keys
         )
+        if self._uses_categorical_prior and self._categorical_prior_history_steps > 0:
+            prior_input_keys = [
+                key
+                for key in prior_input_keys
+                if key != self._categorical_prior_history_obs_key
+            ] + [self._categorical_prior_history_key]
         reconstruction_target_keys = (
             [self.config.reconstruction_target_key]
             if self._reconstruction is not None
@@ -499,8 +515,33 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         if self._categorical_prior is None:
             return None
 
+        self._prepare_categorical_prior_history(tensordict)
         tensordict = self._categorical_prior(tensordict)
         return tensordict[self._categorical_prior.out_keys[0]]
+
+    def _prepare_categorical_prior_history(self, tensordict: TensorDict) -> None:
+        if self._categorical_prior_history_steps <= 0:
+            return
+
+        batch_size = tensordict.batch_size[0]
+        if self._categorical_prior_history_key in tensordict.keys():
+            history_indices = tensordict[self._categorical_prior_history_key].long()
+        else:
+            history_indices = torch.full(
+                (batch_size, self._categorical_prior_history_steps),
+                self._categorical_prior_history_pad_index,
+                dtype=torch.long,
+                device=tensordict.device,
+            )
+        valid_mask = history_indices != self._categorical_prior_history_pad_index
+        safe_indices = history_indices.clamp(min=0, max=self.config.num_embeddings - 1)
+        history_features = F.embedding(safe_indices, self.quantizer._codebook.detach())
+        history_features = history_features * valid_mask.unsqueeze(-1).to(
+            dtype=history_features.dtype
+        )
+        tensordict[self._categorical_prior_history_obs_key] = history_features.flatten(
+            start_dim=1
+        )
 
     def _empty_prior_latent(self, tensordict: TensorDict) -> torch.Tensor:
         # Categorical prior does not produce a continuous pre-quantization
@@ -706,7 +747,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         tensordict["vq_prior_codebook_loss"] = prior_codebook_loss
         tensordict["vq_prior_alignment_loss"] = prior_alignment_loss
         tensordict["vq_prior_categorical_loss"] = prior_categorical_loss
-        tensordict["vq_indices"] = indices
+        tensordict["posterior_vq_indices"] = indices
         tensordict["vq_prior_indices"] = prior_indices
         tensordict["vq_prior_categorical_indices"] = categorical_prior_indices
         tensordict["vq_perplexity"] = perplexity.expand(encoder_latent.shape[0])
@@ -827,12 +868,13 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             "distill/vq_reconstruction_loss_weighted": reconstruction.detach(),
             "distill/vq_perplexity": tensordict["vq_perplexity"].mean().detach(),
             "distill/vq_prior_match_rate": (
-                tensordict["vq_prior_indices"] == tensordict["vq_indices"]
+                tensordict["vq_prior_indices"] == tensordict["posterior_vq_indices"]
             ).float().mean().detach(),
         }
         if "vq_prior_categorical_indices" in tensordict.keys():
             log_dict["distill/vq_prior_categorical_match_rate"] = (
-                tensordict["vq_prior_categorical_indices"] == tensordict["vq_indices"]
+                tensordict["vq_prior_categorical_indices"]
+                == tensordict["posterior_vq_indices"]
             ).float().mean().detach()
         if "vq_prior_entropy" in tensordict.keys():
             log_dict["distill/vq_prior_entropy"] = (

@@ -98,6 +98,13 @@ class DistillAgent(BaseAgent):
             is not None
         )
 
+    def _uses_vq_code_history(self) -> bool:
+        return (
+            getattr(self.config.model, "use_categorical_prior", False)
+            and int(getattr(self.config.model, "categorical_prior_history_steps", 0))
+            > 0
+        )
+
     def setup(self):
         # Initialize VAE noise for each environment.
         # Create vae_noise tensor before super().setup() to ensure it can be used to initialize the lazy linear layers in the model.
@@ -202,6 +209,15 @@ class DistillAgent(BaseAgent):
             self.vq_posterior_frequency_accum_valid = torch.zeros(
                 self.num_envs,
                 dtype=torch.bool,
+                device=self.device,
+            )
+        if self._uses_vq_code_history():
+            history_steps = int(self.config.model.categorical_prior_history_steps)
+            pad_index = int(self.config.model.num_embeddings)
+            self.vq_code_history = torch.full(
+                (self.num_envs, history_steps),
+                pad_index,
+                dtype=torch.long,
                 device=self.device,
             )
         super().setup()
@@ -398,6 +414,9 @@ class DistillAgent(BaseAgent):
             if reset_ids.numel() > 0:
                 self.vq_posterior_frequency_accum[reset_ids] = 0.0
                 self.vq_posterior_frequency_accum_valid[reset_ids] = False
+        if self._uses_vq_code_history():
+            reset_ids = dones.nonzero(as_tuple=False).squeeze(-1)
+            self.reset_vq_code_history(reset_ids)
         return dones, terminated, extras
 
     def add_agent_info_to_obs(self, obs):
@@ -462,6 +481,10 @@ class DistillAgent(BaseAgent):
             obs["vq_posterior_frequency_accum_valid"] = (
                 self.vq_posterior_frequency_accum_valid.clone()
             )
+        if self._uses_vq_code_history():
+            obs[self.config.model.categorical_prior_history_key] = (
+                self.vq_code_history.clone()
+            )
         return obs
 
     def load_parameters(self, state_dict):
@@ -471,11 +494,117 @@ class DistillAgent(BaseAgent):
     # -----------------------------
     # Training Loop and Dataset Processing
     # -----------------------------
+    def reset_vq_code_history(self, env_ids: Optional[Tensor] = None):
+        if not self._uses_vq_code_history():
+            return
+
+        pad_index = int(self.config.model.num_embeddings)
+        if env_ids is None:
+            self.vq_code_history.fill_(pad_index)
+        elif env_ids.numel() > 0:
+            self.vq_code_history[env_ids] = pad_index
+
+    def update_vq_code_history(
+        self,
+        output_td: TensorDict,
+        env_ids: Optional[Tensor] = None,
+        dones: Optional[Tensor] = None,
+        action_key: str = "prior_action",
+    ):
+        if not self._uses_vq_code_history():
+            return
+
+        token_key = (
+            "posterior_vq_indices"
+            if action_key == "privileged_action"
+            else "vq_prior_indices"
+        )
+        if token_key not in output_td.keys():
+            return
+
+        selected_indices = output_td[token_key].detach().long()
+        if env_ids is not None and selected_indices.numel() != env_ids.numel():
+            env_ids = None
+        if env_ids is None:
+            target_history = self.vq_code_history.clone()
+        else:
+            target_history = self.vq_code_history[env_ids].clone()
+
+        target_history = torch.roll(target_history, shifts=1, dims=1)
+        target_history[:, 0] = selected_indices
+        if env_ids is None:
+            self.vq_code_history.copy_(target_history)
+        else:
+            self.vq_code_history[env_ids] = target_history
+
+        if dones is None:
+            return
+
+        done_mask = dones.bool()
+        if env_ids is not None and done_mask.numel() == env_ids.numel():
+            reset_ids = env_ids[done_mask]
+        elif done_mask.numel() == self.num_envs:
+            reset_ids = done_mask.nonzero(as_tuple=False).squeeze(-1)
+        else:
+            return
+
+        if reset_ids.numel() > 0:
+            self.reset_vq_code_history(reset_ids)
+
+    @torch.no_grad()
+    def pre_process_dataset(self):
+        if not self._uses_vq_code_history():
+            return
+        if not hasattr(self.experience_buffer, "posterior_vq_indices"):
+            return
+
+        history_key = self.config.model.categorical_prior_history_key
+        history_steps = int(self.config.model.categorical_prior_history_steps)
+        pad_index = int(self.config.model.num_embeddings)
+        indices = self.experience_buffer.posterior_vq_indices.long()
+        dones = self.experience_buffer.dones.bool()
+        num_steps, num_envs = indices.shape
+        step_ids = torch.arange(num_steps, device=indices.device)
+        history_offsets = torch.arange(1, history_steps + 1, device=indices.device)
+        source_steps = step_ids[:, None] - history_offsets[None, :]
+        source_valid = source_steps >= 0
+        safe_source_steps = source_steps.clamp_min(0)
+
+        history = indices[safe_source_steps].permute(0, 2, 1).contiguous()
+
+        done_step_ids = torch.where(
+            dones,
+            step_ids[:, None],
+            torch.full(
+                (num_steps, num_envs),
+                -1,
+                dtype=step_ids.dtype,
+                device=indices.device,
+            ),
+        )
+        last_done_including_current = torch.cummax(done_step_ids, dim=0).values
+        last_done_before_current = torch.empty_like(last_done_including_current)
+        last_done_before_current[0] = -1
+        last_done_before_current[1:] = last_done_including_current[:-1]
+
+        valid_history = source_valid[:, None, :] & (
+            source_steps[:, None, :] > last_done_before_current[:, :, None]
+        )
+        history = torch.where(
+            valid_history,
+            history,
+            torch.full_like(history, pad_index),
+        )
+
+        self.experience_buffer.batch_update_data(history_key, history)
+
     def register_algorithm_experience_buffer_keys(self):
         # MaskedMimic-specific keys (action, mean_action, prior_mu, etc. auto-registered from model)
         self.experience_buffer.register_key(
             "expert_actions", shape=(self.env.robot_config.number_of_actions,)
         )
+        if self._uses_vq_code_history():
+            self.experience_buffer.register_key("posterior_vq_indices", dtype=torch.long)
 
     def collect_rollout_step(self, obs_td: TensorDict, step):
         """Collect MaskedMimic-specific data: policy actions and expert actions."""
@@ -571,6 +700,12 @@ class DistillAgent(BaseAgent):
         for key in self.model_output_keys:
             if key in output_td:
                 self.experience_buffer.update_data(key, step, output_td[key])
+        if self._uses_vq_code_history() and "posterior_vq_indices" in output_td:
+            self.experience_buffer.update_data(
+                "posterior_vq_indices",
+                step,
+                output_td["posterior_vq_indices"].detach().long(),
+            )
 
         # Store expert action
         self.experience_buffer.update_data("expert_actions", step, expert_action)

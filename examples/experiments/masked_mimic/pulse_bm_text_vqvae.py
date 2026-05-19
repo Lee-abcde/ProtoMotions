@@ -54,6 +54,16 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         default=None,
         help="Path to expert model checkpoint for distillation training",
     )
+    parser.add_argument(
+        "--vq-prior-history-steps",
+        type=int,
+        default=0,
+        help=(
+            "Number of previous VQ code tokens to feed to the categorical prior. "
+            "Uses teacher-forced posterior tokens during training and sampled "
+            "prior tokens during inference."
+        ),
+    )
 
 
 def terrain_config(args: argparse.Namespace):
@@ -323,12 +333,23 @@ def agent_config(
         ],
     )
 
+    vq_prior_history_steps = int(getattr(args, "vq_prior_history_steps", 0))
+    vq_code_history_feature_key = "_vq_code_history_obs"
+    categorical_prior_container_in_keys = [
+        "noisy_reduced_coords_obs",
+        "historical_previous_processed_actions",
+        "text_embedding_obs",
+    ]
+    categorical_prior_mlp_in_keys = [
+        "categorical_prior_motion_obs_norm",
+        "text_embedding_obs",
+    ]
+    if vq_prior_history_steps > 0:
+        categorical_prior_container_in_keys.append(vq_code_history_feature_key)
+        categorical_prior_mlp_in_keys.append(vq_code_history_feature_key)
+
     categorical_prior_config = ModuleContainerConfig(
-        in_keys=[
-            "noisy_reduced_coords_obs",
-            "historical_previous_processed_actions",
-            "text_embedding_obs",
-        ],
+        in_keys=categorical_prior_container_in_keys,
         out_keys=["prior_code_logits"],
         models=[
             ObsProcessorConfig(
@@ -342,10 +363,7 @@ def agent_config(
                 module_operations=[ModuleOperationForwardConfig()],
             ),
             MLPWithConcatConfig(
-                in_keys=[
-                    "categorical_prior_motion_obs_norm",
-                    "text_embedding_obs",
-                ],
+                in_keys=categorical_prior_mlp_in_keys,
                 out_keys=["prior_code_logits"],
                 num_out=NUM_EMBEDDINGS,
                 layers=[MLPLayerConfig(units=1024, activation="relu") for _ in range(4)],
@@ -390,6 +408,7 @@ def agent_config(
         ema_decay=0.99,
         dead_code_threshold=2,
         dead_code_revive_every=100,
+        categorical_prior_history_steps=vq_prior_history_steps,
         losses=VQDistillLossConfig(
             commitment_weight=1.0,
             prior_commitment_weight=0.25,
