@@ -353,31 +353,6 @@ def agent_config(
         ],
     )
 
-    mimic_cfg = env_config.control_components["mimic"]
-    future_steps = mimic_cfg.future_steps
-    num_future_steps = (
-        len(future_steps) if isinstance(future_steps, (list, tuple)) else future_steps
-    )
-    reconstruction_target_dim = num_future_steps * (
-        6 + 2 * robot_config.kinematic_info.num_dofs
-    )
-    reconstruction_config = ModuleContainerConfig(
-        in_keys=["vq_reconstruction_latent"],
-        out_keys=["vq_reconstructed_target_poses"],
-        models=[
-            MLPWithConcatConfig(
-                in_keys=["vq_reconstruction_latent"],
-                out_keys=["vq_reconstructed_target_poses"],
-                num_out=reconstruction_target_dim,
-                layers=[
-                    MLPLayerConfig(units=256, activation="relu"),
-                    MLPLayerConfig(units=512, activation="relu"),
-                    MLPLayerConfig(units=512, activation="relu"),
-                ],
-            ),
-        ],
-    )
-
     trunk_config = ModuleContainerConfig(
         in_keys=[
             "noisy_reduced_coords_obs",
@@ -407,7 +382,7 @@ def agent_config(
         prior=prior_config,
         trunk=trunk_config,
         categorical_prior=categorical_prior_config,
-        reconstruction=reconstruction_config,
+        reconstruction=None,
         latent_dim=VQ_LATENT_DIM,
         num_embeddings=NUM_EMBEDDINGS,
         commitment_cost=0.25,
@@ -420,14 +395,12 @@ def agent_config(
             prior_commitment_weight=0.25,
             prior_alignment_weight=1.0,
             prior_bc_weight=0.0,
-            reconstruction_weight=1.0,
+            reconstruction_weight=0.0,
         ),
         use_text_conditioning=True,
         text_obs_key="text_embedding_obs",
         text_obs_dim=512,
         text_conditioning_scale=0.25,
-        reconstruction_target_key="clean_mimic_reduced_coords_target_poses",
-        reconstruction_reference_obs_key="noisy_mimic_reduced_coords_target_poses",
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
 
