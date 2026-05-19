@@ -325,9 +325,32 @@ class DistillAgent(BaseAgent):
         return TensorDict(expert_obs, batch_size=obs_td.batch_size, device=self.device)
 
     def create_optimizers(self, model: DistillModel):
+        train_categorical_prior_only = bool(
+            getattr(self.config.model, "train_categorical_prior_only", False)
+        )
+        if train_categorical_prior_only:
+            categorical_prior = getattr(model, "_categorical_prior", None)
+            if categorical_prior is None:
+                raise ValueError(
+                    "train_categorical_prior_only=True requires "
+                    "agent.model.use_categorical_prior=True."
+                )
+            for param in model.parameters():
+                param.requires_grad = False
+            for param in categorical_prior.parameters():
+                param.requires_grad = True
+            optimizer_params = [
+                param for param in categorical_prior.parameters() if param.requires_grad
+            ]
+            log.info(
+                "Training categorical prior only with "
+                f"{sum(param.numel() for param in optimizer_params)} parameters."
+            )
+        else:
+            optimizer_params = list(model.parameters())
         optimizer = instantiate(
             self.config.model.optimizer,
-            params=list(model.parameters()),
+            params=optimizer_params,
         )
         self.model, self.distill_optimizer = self.fabric.setup(model, optimizer)
 
@@ -489,6 +512,12 @@ class DistillAgent(BaseAgent):
 
     def load_parameters(self, state_dict):
         super().load_parameters(state_dict)
+        if bool(getattr(self.config.model, "train_categorical_prior_only", False)):
+            log.info(
+                "Skipping checkpoint optimizer state because "
+                "train_categorical_prior_only=True changes optimizer parameters."
+            )
+            return
         self.distill_optimizer.load_state_dict(state_dict["distill_optimizer"])
 
     # -----------------------------
@@ -739,7 +768,15 @@ class DistillAgent(BaseAgent):
         """Compute MaskedMimic loss from batch."""
         # Convert to TensorDict and run model forward
         batch_td = TensorDict(batch_dict, batch_size=batch_dict["action"].shape[0])
+        train_categorical_prior_only = bool(
+            getattr(self.config.model, "train_categorical_prior_only", False)
+        )
+        model_was_training = self.model.training
+        if train_categorical_prior_only:
+            self.model.eval()
         batch_td = self.model(batch_td)
+        if train_categorical_prior_only and model_was_training:
+            self.model.train()
 
         # Extract outputs
         actions = batch_td["privileged_action"]

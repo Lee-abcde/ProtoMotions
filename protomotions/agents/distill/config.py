@@ -234,6 +234,7 @@ class VQDistillModelConfig(BaseModelConfig):
     categorical_prior_temperature: float = 1.0
     categorical_prior_history_steps: int = 0
     categorical_prior_history_key: str = "vq_code_history_indices"
+    train_categorical_prior_only: bool = False
     use_text_conditioning: bool = False
     text_obs_key: Optional[str] = None
     text_obs_dim: int = 0
