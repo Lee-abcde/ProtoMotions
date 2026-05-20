@@ -39,6 +39,7 @@ from tensordict.nn import TensorDictModuleBase
 from protomotions.agents.utils.normalization import RunningMeanStd
 from protomotions.agents.common.config import (
     NormObsBaseConfig,
+    FiLMConfig,
     ObsProcessorConfig,
     ModuleContainerConfig,
     ModuleOperationConfig,
@@ -224,6 +225,34 @@ class ObsProcessor(TensorDictModuleBase):
         )
         tensordict[self.out_keys[0]] = result["output"]
 
+        return tensordict
+
+
+class FiLM(TensorDictModuleBase):
+    """Apply text/style-produced feature-wise affine modulation."""
+
+    config: FiLMConfig
+
+    def __init__(self, config: FiLMConfig):
+        TensorDictModuleBase.__init__(self)
+        self.config = config
+        assert len(config.in_keys) == 2, "FiLM requires [features, film_params]."
+        assert len(config.out_keys) == 1, "FiLM requires exactly one output key."
+        self.in_keys = config.in_keys
+        self.out_keys = config.out_keys
+
+    def forward(self, tensordict: TensorDict, *args, **kwargs) -> TensorDict:
+        features = tensordict[self.in_keys[0]]
+        film_params = tensordict[self.in_keys[1]]
+        feature_dim = features.shape[-1]
+        if film_params.shape[-1] != feature_dim * 2:
+            raise ValueError(
+                "FiLM params must have last dim 2 * feature_dim, got "
+                f"{film_params.shape[-1]} for feature dim {feature_dim}."
+            )
+        gamma, beta = film_params.chunk(2, dim=-1)
+        scale = float(self.config.scale)
+        tensordict[self.out_keys[0]] = features * (1.0 + scale * gamma) + scale * beta
         return tensordict
 
 

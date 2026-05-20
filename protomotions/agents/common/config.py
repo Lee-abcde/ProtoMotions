@@ -121,6 +121,25 @@ class ObsProcessorConfig(NormObsBaseConfig):
     )
 
 
+@dataclass
+class FiLMConfig:
+    """Feature-wise linear modulation with parameters produced by another module."""
+
+    _target_: str = "protomotions.agents.common.common.FiLM"
+    in_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Input keys [features, film_params]."}
+    )
+    out_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Output key for modulated features."}
+    )
+    scale: float = field(
+        default=1.0,
+        metadata={"help": "Scale applied to gamma and beta modulation."}
+    )
+
+
 # =============================================================================
 # MLP Configurations (from mlp.py)
 # =============================================================================

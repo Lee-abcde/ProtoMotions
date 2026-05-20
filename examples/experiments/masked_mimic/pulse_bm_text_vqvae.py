@@ -64,6 +64,23 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
             "prior tokens during inference."
         ),
     )
+    parser.add_argument(
+        "--use-categorical-prior-film",
+        action="store_true",
+        help="Use text FiLM modulation in the categorical VQ prior.",
+    )
+    parser.add_argument(
+        "--categorical-prior-film-hidden-dim",
+        type=int,
+        default=1024,
+        help="Hidden feature dimension modulated by text FiLM.",
+    )
+    parser.add_argument(
+        "--categorical-prior-film-scale",
+        type=float,
+        default=1.0,
+        help="Scale applied to categorical-prior FiLM gamma/beta outputs.",
+    )
 
 
 def terrain_config(args: argparse.Namespace):
@@ -236,6 +253,7 @@ def agent_config(
 ) -> DistillAgentConfig:
     from protomotions.agents.base_agent.config import OptimizerConfig
     from protomotions.agents.common.config import (
+        FiLMConfig,
         MLPWithConcatConfig,
         MLPLayerConfig,
         ModuleContainerConfig,
@@ -334,41 +352,96 @@ def agent_config(
     )
 
     vq_prior_history_steps = int(getattr(args, "vq_prior_history_steps", 0))
+    use_categorical_prior_film = bool(
+        getattr(args, "use_categorical_prior_film", False)
+    )
+    categorical_prior_film_hidden_dim = int(
+        getattr(args, "categorical_prior_film_hidden_dim", 1024)
+    )
+    categorical_prior_film_scale = float(
+        getattr(args, "categorical_prior_film_scale", 1.0)
+    )
     vq_code_history_feature_key = "_vq_code_history_obs"
     categorical_prior_container_in_keys = [
         "noisy_reduced_coords_obs",
         "historical_previous_processed_actions",
         "text_embedding_obs",
     ]
-    categorical_prior_mlp_in_keys = [
-        "categorical_prior_motion_obs_norm",
-        "text_embedding_obs",
-    ]
+    categorical_prior_context_in_keys = ["categorical_prior_motion_obs_norm"]
     if vq_prior_history_steps > 0:
         categorical_prior_container_in_keys.append(vq_code_history_feature_key)
-        categorical_prior_mlp_in_keys.append(vq_code_history_feature_key)
+        categorical_prior_context_in_keys.append(vq_code_history_feature_key)
 
-    categorical_prior_config = ModuleContainerConfig(
-        in_keys=categorical_prior_container_in_keys,
-        out_keys=["prior_code_logits"],
-        models=[
-            ObsProcessorConfig(
-                in_keys=[
-                    "noisy_reduced_coords_obs",
-                    "historical_previous_processed_actions",
+    categorical_prior_models = [
+        ObsProcessorConfig(
+            in_keys=[
+                "noisy_reduced_coords_obs",
+                "historical_previous_processed_actions",
+            ],
+            out_keys=["categorical_prior_motion_obs_norm"],
+            normalize_obs=True,
+            norm_clamp_value=5,
+            module_operations=[ModuleOperationForwardConfig()],
+        ),
+    ]
+    if use_categorical_prior_film:
+        categorical_prior_models += [
+            MLPWithConcatConfig(
+                in_keys=categorical_prior_context_in_keys,
+                out_keys=["categorical_prior_context_feature"],
+                num_out=categorical_prior_film_hidden_dim,
+                layers=[
+                    MLPLayerConfig(units=1024, activation="relu"),
+                    MLPLayerConfig(units=1024, activation="relu"),
                 ],
-                out_keys=["categorical_prior_motion_obs_norm"],
-                normalize_obs=True,
-                norm_clamp_value=5,
-                module_operations=[ModuleOperationForwardConfig()],
+                output_activation="relu",
             ),
+            MLPWithConcatConfig(
+                in_keys=["text_embedding_obs"],
+                out_keys=["categorical_prior_text_film_params"],
+                num_out=categorical_prior_film_hidden_dim * 2,
+                layers=[
+                    MLPLayerConfig(units=512, activation="relu"),
+                    MLPLayerConfig(units=512, activation="relu"),
+                ],
+            ),
+            FiLMConfig(
+                in_keys=[
+                    "categorical_prior_context_feature",
+                    "categorical_prior_text_film_params",
+                ],
+                out_keys=["categorical_prior_film_feature"],
+                scale=categorical_prior_film_scale,
+            ),
+            MLPWithConcatConfig(
+                in_keys=["categorical_prior_film_feature"],
+                out_keys=["prior_code_logits"],
+                num_out=NUM_EMBEDDINGS,
+                layers=[
+                    MLPLayerConfig(units=1024, activation="relu"),
+                    MLPLayerConfig(units=1024, activation="relu"),
+                ],
+            ),
+        ]
+    else:
+        categorical_prior_mlp_in_keys = categorical_prior_context_in_keys + [
+            "text_embedding_obs"
+        ]
+        categorical_prior_models.append(
             MLPWithConcatConfig(
                 in_keys=categorical_prior_mlp_in_keys,
                 out_keys=["prior_code_logits"],
                 num_out=NUM_EMBEDDINGS,
-                layers=[MLPLayerConfig(units=1024, activation="relu") for _ in range(4)],
-            ),
-        ],
+                layers=[
+                    MLPLayerConfig(units=1024, activation="relu") for _ in range(4)
+                ],
+            )
+        )
+
+    categorical_prior_config = ModuleContainerConfig(
+        in_keys=categorical_prior_container_in_keys,
+        out_keys=["prior_code_logits"],
+        models=categorical_prior_models,
     )
 
     trunk_config = ModuleContainerConfig(
