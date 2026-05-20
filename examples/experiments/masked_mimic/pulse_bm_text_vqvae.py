@@ -38,6 +38,7 @@ from protomotions.components.scene_lib import SceneLibConfig
 from protomotions.components.motion_lib import MotionLibConfig
 from protomotions.agents.distill.config import (
     DistillAgentConfig,
+    SoftCodeTargetConfig,
     VQDistillLossConfig,
     VQDistillModelConfig,
 )
@@ -488,6 +489,15 @@ def agent_config(
             prior_alignment_weight=1.0,
             prior_bc_weight=0.0,
             reconstruction_weight=0.0,
+        ),
+        soft_code_target=SoftCodeTargetConfig(
+            enabled=True,
+            tau=0.1,
+            lambda_soft=1.0,
+            lambda_hard_ce=0.2,
+            use_no_grad_decoder_eval=True,
+            full_codebook=False,
+            topk_eval=64,
         ),
         use_text_conditioning=True,
         text_obs_key="text_embedding_obs",

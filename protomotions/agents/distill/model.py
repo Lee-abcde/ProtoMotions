@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from contextlib import contextmanager, nullcontext
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence, Tuple
+
 import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
@@ -22,14 +25,266 @@ from protomotions.agents.common.common import ModuleContainer
 from protomotions.agents.common.vqvae import VectorQuantizer, GradientVectorQuantizer
 from protomotions.agents.base_agent.model import BaseModel
 
-# Import for type annotations - using TYPE_CHECKING to avoid circular imports
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
-
 if TYPE_CHECKING:
     from protomotions.agents.distill.config import (
         DistillModelConfig,
         VQDistillModelConfig,
     )
+
+
+def _expand_decoder_value_for_codes(value: Any, num_codes: int) -> Any:
+    """Expand a batched decoder input from [B, ...] to [B * K, ...]."""
+    if torch.is_tensor(value):
+        batch_size = value.shape[0]
+        expanded = value.unsqueeze(1).expand(
+            batch_size, num_codes, *value.shape[1:]
+        )
+        return expanded.reshape(batch_size * num_codes, *value.shape[1:])
+
+    if isinstance(value, TensorDict):
+        expanded_values = {
+            key: _expand_decoder_value_for_codes(value[key], num_codes)
+            for key in value.keys()
+        }
+        batch_size = value.batch_size[0]
+        expanded_batch_size = (batch_size * num_codes, *value.batch_size[1:])
+        return TensorDict(
+            expanded_values,
+            batch_size=expanded_batch_size,
+            device=value.device,
+        )
+
+    if isinstance(value, dict):
+        return {
+            key: _expand_decoder_value_for_codes(item, num_codes)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, tuple):
+        return tuple(_expand_decoder_value_for_codes(item, num_codes) for item in value)
+
+    if isinstance(value, list):
+        return [_expand_decoder_value_for_codes(item, num_codes) for item in value]
+
+    raise TypeError(f"Cannot expand decoder input of type {type(value).__name__}.")
+
+
+def _expand_decoder_inputs_for_codes(
+    decoder_inputs: TensorDict, num_codes: int
+) -> TensorDict:
+    expanded_inputs = {
+        key: _expand_decoder_value_for_codes(decoder_inputs[key], num_codes)
+        for key in decoder_inputs.keys()
+    }
+    batch_size = decoder_inputs.batch_size[0]
+    return TensorDict(
+        expanded_inputs,
+        batch_size=(batch_size * num_codes,),
+        device=decoder_inputs.device,
+    )
+
+
+@contextmanager
+def _temporary_eval_modules(modules: Optional[Sequence[nn.Module]]):
+    if not modules:
+        yield
+        return
+
+    training_states = [(module, module.training) for module in modules]
+    try:
+        for module, _ in training_states:
+            module.eval()
+        yield
+    finally:
+        for module, was_training in training_states:
+            module.train(was_training)
+
+
+def compute_soft_code_target_loss(
+    prior_logits: torch.Tensor,
+    codebook_embeddings: torch.Tensor,
+    decoder: Callable[[TensorDict], torch.Tensor],
+    decoder_inputs: TensorDict,
+    expert_action: torch.Tensor,
+    posterior_code_idx: torch.Tensor,
+    tau: float,
+    lambda_soft: float,
+    lambda_hard_ce: float,
+    use_no_grad_decoder_eval: bool = True,
+    full_codebook: bool = True,
+    topk_eval: Optional[int] = None,
+    latent_key: str = "vae_latent",
+    decoder_eval_modules: Optional[Sequence[nn.Module]] = None,
+    code_embedding_transform: Optional[
+        Callable[[torch.Tensor, TensorDict], torch.Tensor]
+    ] = None,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Build a soft target over VQ codes by decoding every codebook entry.
+
+    Expected shapes:
+        prior_logits: [B, K]
+        codebook_embeddings: [K, latent_dim]
+        expanded_code_embeddings: [B, K, latent_dim]
+        decoded_actions_all_codes: [B, K, action_dim]
+        expert_action: [B, action_dim]
+        code_errors: [B, K]
+        soft_targets_q: [B, K]
+    """
+    if tau <= 0.0:
+        raise ValueError(f"soft code target tau must be positive, got {tau}.")
+    if prior_logits.ndim != 2:
+        raise ValueError(
+            f"prior_logits must have shape [B, K], got {prior_logits.shape}."
+        )
+    if codebook_embeddings.ndim != 2:
+        raise ValueError(
+            "codebook_embeddings must have shape [K, latent_dim], "
+            f"got {codebook_embeddings.shape}."
+        )
+    if expert_action.ndim != 2:
+        raise ValueError(
+            "expert_action must have shape [B, action_dim], "
+            f"got {expert_action.shape}."
+        )
+
+    batch_size, num_codes = prior_logits.shape
+    if codebook_embeddings.shape[0] != num_codes:
+        raise ValueError(
+            "prior logits and codebook size disagree: "
+            f"{num_codes} logits vs {codebook_embeddings.shape[0]} codes."
+        )
+    if expert_action.shape[0] != batch_size:
+        raise ValueError(
+            "expert_action batch size must match prior_logits: "
+            f"{expert_action.shape[0]} vs {batch_size}."
+        )
+
+    posterior_code_idx = posterior_code_idx.detach().long().reshape(batch_size)
+    hard_prior_ce_loss = F.cross_entropy(prior_logits, posterior_code_idx)
+    log_p = F.log_softmax(prior_logits, dim=-1)
+
+    candidate_indices = None
+    num_eval_codes = num_codes
+    if topk_eval is not None:
+        num_eval_codes = min(int(topk_eval), num_codes)
+        if num_eval_codes <= 0:
+            raise ValueError(f"topk_eval must be positive, got {topk_eval}.")
+        candidate_indices = prior_logits.detach().topk(
+            num_eval_codes, dim=-1
+        ).indices
+        posterior_in_candidates = (
+            candidate_indices == posterior_code_idx[:, None]
+        ).any(dim=-1)
+        if not posterior_in_candidates.all():
+            candidate_indices = candidate_indices.clone()
+            candidate_indices[~posterior_in_candidates, -1] = posterior_code_idx[
+                ~posterior_in_candidates
+            ]
+    elif not full_codebook:
+        raise ValueError(
+            "full_codebook=False requires topk_eval to choose candidate codes."
+        )
+
+    grad_context = torch.no_grad() if use_no_grad_decoder_eval else nullcontext()
+    with _temporary_eval_modules(decoder_eval_modules), grad_context:
+        expanded_decoder_inputs = _expand_decoder_inputs_for_codes(
+            decoder_inputs, num_eval_codes
+        )
+        if candidate_indices is None:
+            # [K, D] -> [B, K, D] -> [B * K, D]
+            expanded_code_embeddings = codebook_embeddings.unsqueeze(0).expand(
+                batch_size, num_eval_codes, codebook_embeddings.shape[-1]
+            )
+            expanded_code_embeddings = expanded_code_embeddings.reshape(
+                batch_size * num_eval_codes, codebook_embeddings.shape[-1]
+            )
+        else:
+            # [B, M] + [K, D] -> [B, M, D] -> [B * M, D]
+            expanded_code_embeddings = F.embedding(
+                candidate_indices, codebook_embeddings
+            ).reshape(batch_size * num_eval_codes, codebook_embeddings.shape[-1])
+        if code_embedding_transform is not None:
+            expanded_code_embeddings = code_embedding_transform(
+                expanded_code_embeddings,
+                expanded_decoder_inputs,
+            )
+        expanded_decoder_inputs[latent_key] = expanded_code_embeddings
+        decoded_actions_flat = decoder(expanded_decoder_inputs)
+        expected_action_shape = (batch_size * num_eval_codes, expert_action.shape[-1])
+        if tuple(decoded_actions_flat.shape) != expected_action_shape:
+            raise ValueError(
+                "decoder output must have shape [B * K, action_dim], "
+                f"got {decoded_actions_flat.shape}, expected {expected_action_shape}."
+            )
+        decoded_actions_all_codes = decoded_actions_flat.reshape(
+            batch_size, num_eval_codes, expert_action.shape[-1]
+        )
+        code_errors = (
+            decoded_actions_all_codes - expert_action[:, None, :]
+        ).square().mean(dim=-1)
+        soft_targets_q = F.softmax(-code_errors / tau, dim=-1).detach()
+
+    target_log_p = (
+        log_p
+        if candidate_indices is None
+        else log_p.gather(dim=1, index=candidate_indices)
+    )
+    soft_code_loss = -(soft_targets_q * target_log_p).sum(dim=-1).mean()
+    total_prior_loss = (
+        lambda_soft * soft_code_loss + lambda_hard_ce * hard_prior_ce_loss
+    )
+
+    topk = min(5, num_eval_codes)
+    soft_target_top_values, _ = soft_targets_q.topk(topk, dim=-1)
+    if candidate_indices is None:
+        posterior_prob = soft_targets_q.gather(
+            1, posterior_code_idx[:, None]
+        ).squeeze(1)
+    else:
+        posterior_prob = (
+            soft_targets_q
+            * (candidate_indices == posterior_code_idx[:, None]).to(soft_targets_q)
+        ).sum(dim=-1)
+    posterior_rank = (soft_targets_q > posterior_prob[:, None]).sum(dim=-1) + 1
+    prior_topk_indices = prior_logits.topk(min(5, num_codes), dim=-1).indices
+    prior_top1_indices = prior_logits.argmax(dim=-1)
+
+    metrics = {
+        "soft_code_loss": soft_code_loss.detach(),
+        "hard_prior_ce_loss": hard_prior_ce_loss.detach(),
+        "total_prior_loss": total_prior_loss.detach(),
+        "soft_target_entropy": (
+            -(soft_targets_q * torch.log(soft_targets_q.clamp_min(1e-10))).sum(
+                dim=-1
+            )
+        )
+        .mean()
+        .detach(),
+        "soft_target_top1_prob": soft_targets_q.max(dim=-1).values.mean().detach(),
+        "soft_target_top5_prob_sum": (
+            soft_target_top_values.sum(dim=-1).mean().detach()
+        ),
+        "posterior_token_prob_under_soft_target": posterior_prob.mean().detach(),
+        "posterior_token_rank_under_soft_target": (
+            posterior_rank.float().mean().detach()
+        ),
+        "prior_top1_match_post": (
+            prior_top1_indices == posterior_code_idx
+        ).float().mean().detach(),
+        "prior_top5_match_post": (
+            prior_topk_indices == posterior_code_idx[:, None]
+        ).any(dim=-1).float().mean().detach(),
+        "soft_target_sum_error": (
+            soft_targets_q.sum(dim=-1) - 1.0
+        ).abs().max().detach(),
+        "soft_target_num_eval_codes": prior_logits.new_tensor(
+            float(num_eval_codes)
+        ).detach(),
+        "soft_target_full_codebook": prior_logits.new_tensor(
+            1.0 if candidate_indices is None else 0.0
+        ).detach(),
+    }
+    return total_prior_loss, metrics
 
 
 class FeedForwardModel(BaseModel):
@@ -759,6 +1014,22 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             tensordict["vq_prior_entropy"] = -(
                 prior_probs * prior_log_probs
             ).sum(dim=-1)
+            soft_cfg = getattr(self.config, "soft_code_target", None)
+            if (
+                self._uses_categorical_prior
+                and soft_cfg is not None
+                and bool(soft_cfg.enabled)
+                and "expert_actions" in tensordict.keys()
+            ):
+                soft_code_loss, soft_log_dict = self._compute_soft_code_target_loss(
+                    tensordict
+                )
+                batch_size = encoder_latent.shape[0]
+                tensordict["vq_prior_soft_code_target_loss"] = soft_code_loss.expand(
+                    batch_size
+                )
+                for key, value in soft_log_dict.items():
+                    tensordict[f"vq_prior_{key}"] = value.expand(batch_size)
         self._record_text_residual_stats(
             tensordict, "distill", actor_text_residual, raw_actor_latent
         )
@@ -818,6 +1089,67 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             )
         )
 
+    def _build_soft_code_decoder_inputs(self, tensordict: TensorDict) -> TensorDict:
+        decoder_input_keys = [
+            key for key in self._trunk.in_keys if key != "vae_latent"
+        ]
+        text_keys = self._text_input_keys()
+        for key in text_keys:
+            if key not in decoder_input_keys:
+                decoder_input_keys.append(key)
+
+        missing_keys = [
+            key for key in decoder_input_keys if key not in tensordict.keys()
+        ]
+        if missing_keys:
+            raise KeyError(
+                "Cannot compute soft code target loss; missing decoder input keys "
+                f"{missing_keys}."
+            )
+        return TensorDict(
+            {key: tensordict[key] for key in decoder_input_keys},
+            batch_size=tensordict.batch_size,
+            device=tensordict.device,
+        )
+
+    def _compute_soft_code_target_loss(
+        self, tensordict: TensorDict
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        soft_cfg = self.config.soft_code_target
+        decoder_inputs = self._build_soft_code_decoder_inputs(tensordict)
+
+        def decode_actions(expanded_decoder_inputs: TensorDict) -> torch.Tensor:
+            decoded_td = self._trunk(expanded_decoder_inputs)
+            return decoded_td[self._trunk.out_keys[0]]
+
+        def transform_code_embeddings(
+            expanded_code_embeddings: torch.Tensor,
+            expanded_decoder_inputs: TensorDict,
+        ) -> torch.Tensor:
+            transformed, _ = self._apply_text_residual(
+                expanded_code_embeddings,
+                expanded_decoder_inputs,
+            )
+            return transformed
+
+        return compute_soft_code_target_loss(
+            prior_logits=tensordict["vq_prior_logits"],
+            codebook_embeddings=self.quantizer._codebook,
+            decoder=decode_actions,
+            decoder_inputs=decoder_inputs,
+            expert_action=tensordict["expert_actions"],
+            posterior_code_idx=tensordict["posterior_vq_indices"],
+            tau=float(soft_cfg.tau),
+            lambda_soft=float(soft_cfg.lambda_soft),
+            lambda_hard_ce=float(soft_cfg.lambda_hard_ce),
+            use_no_grad_decoder_eval=bool(soft_cfg.use_no_grad_decoder_eval),
+            full_codebook=bool(soft_cfg.full_codebook),
+            topk_eval=soft_cfg.topk_eval,
+            latent_key="vae_latent",
+            decoder_eval_modules=[self._trunk],
+            code_embedding_transform=transform_code_embeddings,
+        )
+
     def calculate_aux_losses(
         self, tensordict: TensorDict
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -836,10 +1168,47 @@ class VQDistillModel(TextResidualMixin, BaseModel):
                 * losses.prior_alignment_weight
             )
         prior_categorical = torch.zeros_like(prior_alignment)
+        hard_prior_ce_loss = torch.zeros_like(prior_alignment)
+        total_prior_loss = torch.zeros_like(prior_alignment)
+        soft_log_dict: Dict[str, torch.Tensor] = {}
         if "vq_prior_categorical_loss" in tensordict.keys():
+            hard_prior_ce_loss = tensordict["vq_prior_categorical_loss"].mean()
+            total_prior_loss = hard_prior_ce_loss
+            soft_cfg = getattr(self.config, "soft_code_target", None)
+            use_soft_code_target = (
+                self._uses_categorical_prior
+                and soft_cfg is not None
+                and bool(soft_cfg.enabled)
+                and "vq_prior_soft_code_target_loss" in tensordict.keys()
+            )
+            if use_soft_code_target:
+                total_prior_loss = tensordict[
+                    "vq_prior_soft_code_target_loss"
+                ].mean()
+                for key in [
+                    "soft_code_loss",
+                    "hard_prior_ce_loss",
+                    "total_prior_loss",
+                    "soft_target_entropy",
+                    "soft_target_top1_prob",
+                    "soft_target_top5_prob_sum",
+                    "posterior_token_prob_under_soft_target",
+                    "posterior_token_rank_under_soft_target",
+                    "prior_top1_match_post",
+                    "prior_top5_match_post",
+                    "soft_target_sum_error",
+                    "soft_target_num_eval_codes",
+                    "soft_target_full_codebook",
+                ]:
+                    tensordict_key = f"vq_prior_{key}"
+                    if tensordict_key in tensordict.keys():
+                        soft_log_dict[key] = tensordict[tensordict_key].mean()
+                hard_prior_ce_loss = soft_log_dict.get(
+                    "hard_prior_ce_loss",
+                    hard_prior_ce_loss,
+                )
             prior_categorical = (
-                tensordict["vq_prior_categorical_loss"].mean()
-                * self.config.categorical_prior_loss_weight
+                total_prior_loss * self.config.categorical_prior_loss_weight
             )
         reconstruction = torch.zeros_like(prior_alignment)
         reconstruction_raw = torch.zeros_like(prior_alignment)
@@ -866,11 +1235,16 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             "distill/vq_prior_categorical_loss": prior_categorical.detach(),
             "distill/vq_reconstruction_loss": reconstruction_raw.detach(),
             "distill/vq_reconstruction_loss_weighted": reconstruction.detach(),
+            "distill/hard_prior_ce_loss": hard_prior_ce_loss.detach(),
+            "distill/total_prior_loss": total_prior_loss.detach(),
+            "distill/total_prior_loss_weighted": prior_categorical.detach(),
             "distill/vq_perplexity": tensordict["vq_perplexity"].mean().detach(),
             "distill/vq_prior_match_rate": (
                 tensordict["vq_prior_indices"] == tensordict["posterior_vq_indices"]
             ).float().mean().detach(),
         }
+        for key, value in soft_log_dict.items():
+            log_dict[f"distill/{key}"] = value.detach()
         if "vq_prior_categorical_indices" in tensordict.keys():
             log_dict["distill/vq_prior_categorical_match_rate"] = (
                 tensordict["vq_prior_categorical_indices"]

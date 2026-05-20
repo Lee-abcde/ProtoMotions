@@ -196,6 +196,19 @@ class VQDistillLossConfig:
 
 
 @dataclass
+class SoftCodeTargetConfig:
+    """Soft behavioral target distribution for categorical VQ prior training."""
+
+    enabled: bool = True
+    tau: float = 0.1
+    lambda_soft: float = 1.0
+    lambda_hard_ce: float = 0.2
+    use_no_grad_decoder_eval: bool = True
+    full_codebook: bool = True
+    topk_eval: Optional[int] = None
+
+
+@dataclass
 class VQDistillModelConfig(BaseModelConfig):
     """Distill model that replaces VAE sampling with a shared VQ codebook."""
 
@@ -241,6 +254,15 @@ class VQDistillModelConfig(BaseModelConfig):
     text_conditioning_scale: float = 0.25
     reconstruction_target_key: Optional[str] = None
     reconstruction_reference_obs_key: Optional[str] = None
+    soft_code_target: SoftCodeTargetConfig = field(
+        default_factory=SoftCodeTargetConfig,
+        metadata={
+            "help": (
+                "Soft target distribution over all VQ codes for categorical "
+                "prior training."
+            )
+        },
+    )
 
     losses: VQDistillLossConfig = field(default_factory=VQDistillLossConfig)
     optimizer: OptimizerConfig = field(
