@@ -410,6 +410,29 @@ def mimic_target_poses_reduced_coords_factory(
     )
 
 
+def target_root_velocity_yaw_command_factory(
+    use_noisy: bool = False,
+    future_steps: Optional[Union[int, List[int]]] = None,
+) -> MdpComponent:
+    """Factory for target root velocity/yaw commands over future rows."""
+    from protomotions.envs.obs import build_target_root_velocity_yaw_command
+
+    state = EnvContext.noisy if use_noisy else EnvContext.current
+    static_params = {"w_last": True}
+    if future_steps is not None:
+        static_params["future_steps"] = future_steps
+
+    return MdpComponent(
+        compute_func=build_target_root_velocity_yaw_command,
+        dynamic_vars={
+            "current_state_anchor_rot": state.anchor_rot,
+            "mimic_ref_root_vel": EnvContext.mimic.future_root_vel,
+            "mimic_ref_root_ang_vel": EnvContext.mimic.future_root_ang_vel,
+        },
+        static_params=static_params,
+    )
+
+
 def mimic_deploy_target_poses_factory(
     use_noisy: bool = False,
     include_dof_vel: bool = True,

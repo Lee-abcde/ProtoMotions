@@ -82,6 +82,14 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         default=1.0,
         help="Scale applied to categorical-prior FiLM gamma/beta outputs.",
     )
+    parser.add_argument(
+        "--use-prior-oracle-motion-command",
+        action="store_true",
+        help=(
+            "Append reference-derived local target root vx/vy and yaw rate "
+            "to the categorical VQ prior input for oracle ablation."
+        ),
+    )
 
 
 def terrain_config(args: argparse.Namespace):
@@ -115,6 +123,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         max_coords_obs_factory,
         mimic_target_poses_max_coords_factory,
         previous_actions_factory,
+        target_root_velocity_yaw_command_factory,
         action_smoothness_factory,
         global_anchor_ori_rew_factory,
         relative_body_pos_rew_factory,
@@ -180,6 +189,10 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             },
         ),
     }
+    if bool(getattr(args, "use_prior_oracle_motion_command", False)):
+        observation_components["target_root_velocity_yaw_command"] = (
+            target_root_velocity_yaw_command_factory(use_noisy=True)
+        )
 
     expert_model_path = getattr(args, "expert_model_path", None)
     if expert_model_path:
@@ -368,17 +381,21 @@ def agent_config(
         "historical_previous_processed_actions",
         "text_embedding_obs",
     ]
+    categorical_prior_motion_obs_in_keys = [
+        "noisy_reduced_coords_obs",
+        "historical_previous_processed_actions",
+    ]
     categorical_prior_context_in_keys = ["categorical_prior_motion_obs_norm"]
+    if bool(getattr(args, "use_prior_oracle_motion_command", False)):
+        categorical_prior_container_in_keys.append("target_root_velocity_yaw_command")
+        categorical_prior_motion_obs_in_keys.append("target_root_velocity_yaw_command")
     if vq_prior_history_steps > 0:
         categorical_prior_container_in_keys.append(vq_code_history_feature_key)
         categorical_prior_context_in_keys.append(vq_code_history_feature_key)
 
     categorical_prior_models = [
         ObsProcessorConfig(
-            in_keys=[
-                "noisy_reduced_coords_obs",
-                "historical_previous_processed_actions",
-            ],
+            in_keys=categorical_prior_motion_obs_in_keys,
             out_keys=["categorical_prior_motion_obs_norm"],
             normalize_obs=True,
             norm_clamp_value=5,

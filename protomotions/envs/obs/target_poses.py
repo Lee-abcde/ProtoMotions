@@ -958,6 +958,50 @@ def build_target_root_ang_vel(
     return local_ang_vel.reshape(num_envs, -1)
 
 
+def build_target_root_velocity_yaw_command(
+    current_state_anchor_rot: Tensor,
+    mimic_ref_root_vel: Tensor,
+    mimic_ref_root_ang_vel: Tensor,
+    future_steps: Union[int, List[int]] = None,
+    w_last: bool = True,
+) -> Tensor:
+    """Build local target root vx/vy and yaw-rate command.
+
+    Args:
+        current_state_anchor_rot: Current anchor rotation [envs, 4].
+        mimic_ref_root_vel: Reference root velocity [envs, future_steps, 3].
+        mimic_ref_root_ang_vel: Reference root angular velocity
+            [envs, future_steps, 3].
+        future_steps: Steps to select. None uses all available future rows.
+        w_last: If True, quaternions are in XYZW format.
+
+    Returns:
+        Local command [envs, steps * 3].
+        Per-step order is [root_vx, root_vy, yaw_rate].
+    """
+    if future_steps is None:
+        future_steps = mimic_ref_root_vel.shape[1]
+
+    num_envs = current_state_anchor_rot.shape[0]
+    local_root_vel = build_target_root_vel(
+        current_state_anchor_rot=current_state_anchor_rot,
+        mimic_ref_root_vel=mimic_ref_root_vel,
+        future_steps=future_steps,
+        w_last=w_last,
+    ).reshape(num_envs, -1, 3)
+    local_root_ang_vel = build_target_root_ang_vel(
+        current_state_anchor_rot=current_state_anchor_rot,
+        mimic_ref_root_ang_vel=mimic_ref_root_ang_vel,
+        future_steps=future_steps,
+        w_last=w_last,
+    ).reshape(num_envs, -1, 3)
+
+    target_root_vel_local_xy = local_root_vel[..., :2]
+    target_yaw_rate = local_root_ang_vel[..., 2:3]
+    command = torch.cat((target_root_vel_local_xy, target_yaw_rate), dim=-1)
+    return command.reshape(num_envs, -1)
+
+
 def build_deploy_target_poses(
     current_anchor_rot: Tensor,
     mimic_ref_rot: Tensor,

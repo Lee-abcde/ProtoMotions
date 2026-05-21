@@ -62,6 +62,7 @@ from protomotions.envs.obs.target_poses import (
     build_target_height,
     build_target_root_vel,
     build_target_root_ang_vel,
+    build_target_root_velocity_yaw_command,
 )
 
 # Masked mimic observation compute kernels
@@ -118,6 +119,7 @@ __all__ = [
     "build_target_height",
     "build_target_root_vel",
     "build_target_root_ang_vel",
+    "build_target_root_velocity_yaw_command",
     # Masked mimic observation compute kernels
     "compute_target_poses_only",
     "compute_target_masks_only",
