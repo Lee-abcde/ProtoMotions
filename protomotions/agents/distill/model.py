@@ -240,12 +240,21 @@ def compute_soft_code_target_loss(
         posterior_prob = soft_targets_q.gather(
             1, posterior_code_idx[:, None]
         ).squeeze(1)
+        posterior_code_error = code_errors.gather(
+            1, posterior_code_idx[:, None]
+        ).squeeze(1)
     else:
+        posterior_candidate_mask = candidate_indices == posterior_code_idx[:, None]
         posterior_prob = (
-            soft_targets_q
-            * (candidate_indices == posterior_code_idx[:, None]).to(soft_targets_q)
+            soft_targets_q * posterior_candidate_mask.to(soft_targets_q)
+        ).sum(dim=-1)
+        posterior_code_error = (
+            code_errors * posterior_candidate_mask.to(code_errors)
         ).sum(dim=-1)
     posterior_rank = (soft_targets_q > posterior_prob[:, None]).sum(dim=-1) + 1
+    posterior_code_error_rank = (
+        code_errors < posterior_code_error[:, None]
+    ).sum(dim=-1) + 1
     prior_topk_indices = prior_logits.topk(min(5, num_codes), dim=-1).indices
     prior_top1_indices = prior_logits.argmax(dim=-1)
 
@@ -267,6 +276,15 @@ def compute_soft_code_target_loss(
         "posterior_token_prob_under_soft_target": posterior_prob.mean().detach(),
         "posterior_token_rank_under_soft_target": (
             posterior_rank.float().mean().detach()
+        ),
+        "soft_code_error_min": code_errors.min(dim=-1).values.mean().detach(),
+        "soft_code_error_mean": code_errors.mean(dim=-1).mean().detach(),
+        "soft_code_error_std": (
+            code_errors.std(dim=-1, unbiased=False).mean().detach()
+        ),
+        "posterior_code_error": posterior_code_error.mean().detach(),
+        "posterior_code_error_rank": (
+            posterior_code_error_rank.float().mean().detach()
         ),
         "prior_top1_match_post": (
             prior_top1_indices == posterior_code_idx
@@ -1194,6 +1212,11 @@ class VQDistillModel(TextResidualMixin, BaseModel):
                     "soft_target_top5_prob_sum",
                     "posterior_token_prob_under_soft_target",
                     "posterior_token_rank_under_soft_target",
+                    "soft_code_error_min",
+                    "soft_code_error_mean",
+                    "soft_code_error_std",
+                    "posterior_code_error",
+                    "posterior_code_error_rank",
                     "prior_top1_match_post",
                     "prior_top5_match_post",
                     "soft_target_sum_error",
