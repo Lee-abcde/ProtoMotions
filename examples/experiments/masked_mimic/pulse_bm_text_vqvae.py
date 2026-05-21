@@ -491,7 +491,7 @@ def agent_config(
             reconstruction_weight=0.0,
         ),
         soft_code_target=SoftCodeTargetConfig(
-            enabled=True,
+            enabled=False,
             tau=0.1,
             lambda_soft=1.0,
             lambda_hard_ce=0.2,

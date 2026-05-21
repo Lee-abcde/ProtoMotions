@@ -199,7 +199,7 @@ class VQDistillLossConfig:
 class SoftCodeTargetConfig:
     """Soft behavioral target distribution for categorical VQ prior training."""
 
-    enabled: bool = True
+    enabled: bool = False
     tau: float = 0.1
     lambda_soft: float = 1.0
     lambda_hard_ce: float = 0.2
