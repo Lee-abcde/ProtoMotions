@@ -90,6 +90,23 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
             "to the categorical VQ prior input for oracle ablation."
         ),
     )
+    parser.add_argument(
+        "--use-decoder-film",
+        action="store_true",
+        help="Use text FiLM modulation inside the VQ decoder/action trunk.",
+    )
+    parser.add_argument(
+        "--decoder-film-hidden-dim",
+        type=int,
+        default=1024,
+        help="Hidden feature dimension modulated by decoder text FiLM.",
+    )
+    parser.add_argument(
+        "--decoder-film-scale",
+        type=float,
+        default=1.0,
+        help="Scale applied to decoder FiLM gamma/beta outputs.",
+    )
 
 
 def terrain_config(args: argparse.Namespace):
@@ -462,14 +479,64 @@ def agent_config(
         models=categorical_prior_models,
     )
 
-    trunk_config = ModuleContainerConfig(
-        in_keys=[
-            "noisy_reduced_coords_obs",
-            "historical_previous_processed_actions",
-            "vae_latent",
-        ],
-        out_keys=["actor_trunk_out"],
-        models=[
+    decoder_trunk_in_keys = [
+        "noisy_reduced_coords_obs",
+        "historical_previous_processed_actions",
+        "vae_latent",
+    ]
+    use_decoder_film = bool(getattr(args, "use_decoder_film", False))
+    decoder_film_hidden_dim = int(getattr(args, "decoder_film_hidden_dim", 1024))
+    decoder_film_scale = float(getattr(args, "decoder_film_scale", 1.0))
+    if use_decoder_film:
+        decoder_trunk_in_keys = decoder_trunk_in_keys + ["text_embedding_obs"]
+        decoder_trunk_models = [
+            ObsProcessorConfig(
+                in_keys=[
+                    "noisy_reduced_coords_obs",
+                    "historical_previous_processed_actions",
+                    "vae_latent",
+                ],
+                out_keys=["decoder_motion_obs_norm"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                module_operations=[ModuleOperationForwardConfig()],
+            ),
+            MLPWithConcatConfig(
+                in_keys=["decoder_motion_obs_norm"],
+                out_keys=["decoder_context_feature"],
+                num_out=decoder_film_hidden_dim,
+                layers=[
+                    MLPLayerConfig(units=1024, activation="relu") for _ in range(4)
+                ],
+                output_activation="relu",
+            ),
+            MLPWithConcatConfig(
+                in_keys=["text_embedding_obs"],
+                out_keys=["decoder_text_film_params"],
+                num_out=decoder_film_hidden_dim * 2,
+                layers=[
+                    MLPLayerConfig(units=512, activation="relu"),
+                    MLPLayerConfig(units=512, activation="relu"),
+                ],
+            ),
+            FiLMConfig(
+                in_keys=["decoder_context_feature", "decoder_text_film_params"],
+                out_keys=["decoder_film_feature"],
+                scale=decoder_film_scale,
+            ),
+            MLPWithConcatConfig(
+                in_keys=["decoder_film_feature"],
+                out_keys=["actor_trunk_out"],
+                num_out=robot_config.number_of_actions,
+                layers=[
+                    MLPLayerConfig(units=1024, activation="relu"),
+                    MLPLayerConfig(units=1024, activation="relu"),
+                ],
+                output_activation="tanh",
+            ),
+        ]
+    else:
+        decoder_trunk_models = [
             MLPWithConcatConfig(
                 in_keys=[
                     "noisy_reduced_coords_obs",
@@ -483,7 +550,12 @@ def agent_config(
                 layers=[MLPLayerConfig(units=1024, activation="relu") for _ in range(6)],
                 output_activation="tanh",
             ),
-        ],
+        ]
+
+    trunk_config = ModuleContainerConfig(
+        in_keys=decoder_trunk_in_keys,
+        out_keys=["actor_trunk_out"],
+        models=decoder_trunk_models,
     )
 
     model_config = VQDistillModelConfig(
