@@ -105,6 +105,16 @@ class DistillAgent(BaseAgent):
             > 0
         )
 
+    def _uses_vq_prior_future_targets(self) -> bool:
+        return (
+            getattr(self.config.model, "use_categorical_prior", False)
+            and int(getattr(self.config.model, "categorical_prior_future_steps", 0))
+            > 0
+        )
+
+    def _needs_posterior_vq_indices(self) -> bool:
+        return self._uses_vq_code_history() or self._uses_vq_prior_future_targets()
+
     def setup(self):
         # Initialize VAE noise for each environment.
         # Create vae_noise tensor before super().setup() to ensure it can be used to initialize the lazy linear layers in the model.
@@ -582,24 +592,16 @@ class DistillAgent(BaseAgent):
 
     @torch.no_grad()
     def pre_process_dataset(self):
-        if not self._uses_vq_code_history():
+        if not self._needs_posterior_vq_indices():
             return
         if not hasattr(self.experience_buffer, "posterior_vq_indices"):
             return
 
-        history_key = self.config.model.categorical_prior_history_key
-        history_steps = int(self.config.model.categorical_prior_history_steps)
         pad_index = int(self.config.model.num_embeddings)
         indices = self.experience_buffer.posterior_vq_indices.long()
         dones = self.experience_buffer.dones.bool()
         num_steps, num_envs = indices.shape
         step_ids = torch.arange(num_steps, device=indices.device)
-        history_offsets = torch.arange(1, history_steps + 1, device=indices.device)
-        source_steps = step_ids[:, None] - history_offsets[None, :]
-        source_valid = source_steps >= 0
-        safe_source_steps = source_steps.clamp_min(0)
-
-        history = indices[safe_source_steps].permute(0, 2, 1).contiguous()
 
         done_step_ids = torch.where(
             dones,
@@ -616,24 +618,76 @@ class DistillAgent(BaseAgent):
         last_done_before_current[0] = -1
         last_done_before_current[1:] = last_done_including_current[:-1]
 
-        valid_history = source_valid[:, None, :] & (
-            source_steps[:, None, :] > last_done_before_current[:, :, None]
-        )
-        history = torch.where(
-            valid_history,
-            history,
-            torch.full_like(history, pad_index),
-        )
+        if self._uses_vq_code_history():
+            history_key = self.config.model.categorical_prior_history_key
+            history_steps = int(self.config.model.categorical_prior_history_steps)
+            history_offsets = torch.arange(1, history_steps + 1, device=indices.device)
+            source_steps = step_ids[:, None] - history_offsets[None, :]
+            source_valid = source_steps >= 0
+            safe_source_steps = source_steps.clamp_min(0)
 
-        self.experience_buffer.batch_update_data(history_key, history)
+            history = indices[safe_source_steps].permute(0, 2, 1).contiguous()
+            valid_history = source_valid[:, None, :] & (
+                source_steps[:, None, :] > last_done_before_current[:, :, None]
+            )
+            history = torch.where(
+                valid_history,
+                history,
+                torch.full_like(history, pad_index),
+            )
+
+            self.experience_buffer.batch_update_data(history_key, history)
+
+        if self._uses_vq_prior_future_targets():
+            future_key = self.config.model.categorical_prior_future_target_key
+            num_future_steps = int(self.config.model.categorical_prior_future_steps)
+            future_steps = torch.arange(
+                1,
+                num_future_steps + 1,
+                device=indices.device,
+                dtype=torch.long,
+            )
+            target_steps = step_ids[:, None] + future_steps[None, :]
+            source_valid = target_steps < num_steps
+            safe_target_steps = target_steps.clamp_max(num_steps - 1)
+            future = indices[safe_target_steps].permute(0, 2, 1).contiguous()
+
+            done_prefix = torch.cat(
+                [
+                    torch.zeros(
+                        (1, num_envs),
+                        dtype=torch.long,
+                        device=indices.device,
+                    ),
+                    torch.cumsum(dones.long(), dim=0),
+                ],
+                dim=0,
+            )
+            done_count = (
+                done_prefix[safe_target_steps] - done_prefix[step_ids[:, None]]
+            ).permute(0, 2, 1)
+            valid_future = source_valid[:, None, :] & (done_count == 0)
+            future = torch.where(
+                valid_future,
+                future,
+                torch.full_like(future, pad_index),
+            )
+
+            self.experience_buffer.batch_update_data(future_key, future)
 
     def register_algorithm_experience_buffer_keys(self):
         # MaskedMimic-specific keys (action, mean_action, prior_mu, etc. auto-registered from model)
         self.experience_buffer.register_key(
             "expert_actions", shape=(self.env.robot_config.number_of_actions,)
         )
-        if self._uses_vq_code_history():
+        if self._needs_posterior_vq_indices():
             self.experience_buffer.register_key("posterior_vq_indices", dtype=torch.long)
+        if self._uses_vq_prior_future_targets():
+            self.experience_buffer.register_key(
+                self.config.model.categorical_prior_future_target_key,
+                shape=(int(self.config.model.categorical_prior_future_steps),),
+                dtype=torch.long,
+            )
 
     def collect_rollout_step(self, obs_td: TensorDict, step):
         """Collect MaskedMimic-specific data: policy actions and expert actions."""
@@ -729,7 +783,7 @@ class DistillAgent(BaseAgent):
         for key in self.model_output_keys:
             if key in output_td:
                 self.experience_buffer.update_data(key, step, output_td[key])
-        if self._uses_vq_code_history() and "posterior_vq_indices" in output_td:
+        if self._needs_posterior_vq_indices() and "posterior_vq_indices" in output_td:
             self.experience_buffer.update_data(
                 "posterior_vq_indices",
                 step,

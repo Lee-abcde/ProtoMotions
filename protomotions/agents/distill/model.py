@@ -671,6 +671,17 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         )
         self._categorical_prior_history_obs_key = "_vq_code_history_obs"
         self._categorical_prior_history_pad_index = self.config.num_embeddings
+        self._num_categorical_prior_future_steps = int(
+            getattr(self.config, "categorical_prior_future_steps", 0)
+        )
+        self._categorical_prior_future_steps = list(
+            range(1, self._num_categorical_prior_future_steps + 1)
+        )
+        self._categorical_prior_future_target_key = getattr(
+            self.config,
+            "categorical_prior_future_target_key",
+            "vq_prior_future_targets",
+        )
         if self._uses_categorical_prior:
             self._prior = None
             CategoricalPriorClass = get_class(self.config.categorical_prior._target_)
@@ -680,6 +691,18 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             if len(self._categorical_prior.out_keys) != 1:
                 raise ValueError(
                     "Categorical prior must produce exactly one logits output."
+                )
+            expected_prior_logits = self.config.num_embeddings * (
+                1 + self._num_categorical_prior_future_steps
+            )
+            last_model = self.config.categorical_prior.models[-1]
+            configured_num_out = getattr(last_model, "num_out", expected_prior_logits)
+            if configured_num_out != expected_prior_logits:
+                raise ValueError(
+                    "Categorical prior logits output dim must be "
+                    f"{expected_prior_logits} for "
+                    f"{self._num_categorical_prior_future_steps} future steps, "
+                    f"got {configured_num_out}."
                 )
         else:
             PriorClass = get_class(self.config.prior._target_)
@@ -791,6 +814,27 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         self._prepare_categorical_prior_history(tensordict)
         tensordict = self._categorical_prior(tensordict)
         return tensordict[self._categorical_prior.out_keys[0]]
+
+    def _split_categorical_prior_logits(
+        self, logits: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self._num_categorical_prior_future_steps <= 0:
+            return logits, None
+
+        num_embeddings = self.config.num_embeddings
+        expected = num_embeddings * (1 + self._num_categorical_prior_future_steps)
+        if logits.shape[-1] != expected:
+            raise ValueError(
+                "Categorical prior logits shape mismatch: expected last dim "
+                f"{expected}, got {logits.shape[-1]}."
+            )
+        current_logits = logits[..., :num_embeddings]
+        future_logits = logits[..., num_embeddings:].reshape(
+            *logits.shape[:-1],
+            self._num_categorical_prior_future_steps,
+            num_embeddings,
+        )
+        return current_logits, future_logits
 
     def _prepare_categorical_prior_history(self, tensordict: TensorDict) -> None:
         if self._categorical_prior_history_steps <= 0:
@@ -971,7 +1015,10 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             # Direct code prior: state/action/text predict a distribution over
             # codebook entries. The selected code becomes vae_latent below.
             prior_latent = self._empty_prior_latent(tensordict)
-            prior_code_logits = self._categorical_prior_logits(tensordict)
+            prior_code_output = self._categorical_prior_logits(tensordict)
+            prior_code_logits, prior_future_logits = (
+                self._split_categorical_prior_logits(prior_code_output)
+            )
             prior_categorical_loss = F.cross_entropy(
                 prior_code_logits, indices.detach(), reduction="none"
             )
@@ -982,6 +1029,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             tensordict = self._prior(tensordict)
             prior_latent = tensordict[self._prior.out_keys[0]]
             prior_code_logits = None
+            prior_future_logits = None
             actor_latent, prior_commitment_loss, prior_codebook_loss, prior_indices, prior_perplexity = self._quantize(
                 prior_latent, update_codebook=False
             )
@@ -1027,6 +1075,8 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         tensordict["vq_prior_perplexity"] = prior_perplexity.expand(prior_latent.shape[0])
         if prior_code_logits is not None:
             tensordict["vq_prior_logits"] = prior_code_logits
+            if prior_future_logits is not None:
+                tensordict["vq_prior_future_logits"] = prior_future_logits
             prior_log_probs = F.log_softmax(prior_code_logits, dim=-1)
             prior_probs = prior_log_probs.exp()
             tensordict["vq_prior_entropy"] = -(
@@ -1187,6 +1237,11 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             )
         prior_categorical = torch.zeros_like(prior_alignment)
         hard_prior_ce_loss = torch.zeros_like(prior_alignment)
+        future_prior_ce_loss = torch.zeros_like(prior_alignment)
+        future_prior_ce_loss_weighted = torch.zeros_like(prior_alignment)
+        future_prior_valid_ratio = torch.zeros_like(prior_alignment)
+        future_prior_match_rate = torch.zeros_like(prior_alignment)
+        future_prior_step_log_dict: Dict[str, torch.Tensor] = {}
         total_prior_loss = torch.zeros_like(prior_alignment)
         soft_log_dict: Dict[str, torch.Tensor] = {}
         if "vq_prior_categorical_loss" in tensordict.keys():
@@ -1230,6 +1285,52 @@ class VQDistillModel(TextResidualMixin, BaseModel):
                     "hard_prior_ce_loss",
                     hard_prior_ce_loss,
                 )
+            if (
+                "vq_prior_future_logits" in tensordict.keys()
+                and self._categorical_prior_future_target_key in tensordict.keys()
+            ):
+                future_logits = tensordict["vq_prior_future_logits"]
+                future_targets = tensordict[
+                    self._categorical_prior_future_target_key
+                ].long()
+                pad_index = int(self.config.num_embeddings)
+                valid_future = future_targets != pad_index
+                future_prior_valid_ratio = valid_future.float().mean()
+                if valid_future.any():
+                    future_ce = F.cross_entropy(
+                        future_logits.reshape(-1, self.config.num_embeddings),
+                        future_targets.reshape(-1),
+                        ignore_index=pad_index,
+                        reduction="none",
+                    ).reshape_as(future_targets)
+                    future_prior_ce_loss = future_ce[valid_future].mean()
+                    future_weight = float(
+                        getattr(losses, "future_prior_categorical_weight", 0.0)
+                    )
+                    future_prior_ce_loss_weighted = (
+                        future_prior_ce_loss * future_weight
+                    )
+                    total_prior_loss = (
+                        total_prior_loss + future_prior_ce_loss_weighted
+                    )
+
+                    future_predictions = future_logits.argmax(dim=-1)
+                    future_prior_match_rate = (
+                        future_predictions[valid_future]
+                        == future_targets[valid_future]
+                    ).float().mean()
+                    for idx, step in enumerate(self._categorical_prior_future_steps):
+                        step_valid = valid_future[:, idx]
+                        if step_valid.any():
+                            future_prior_step_log_dict[
+                                f"distill/future_prior_ce_step_{step}"
+                            ] = future_ce[:, idx][step_valid].mean().detach()
+                            future_prior_step_log_dict[
+                                f"distill/future_prior_match_step_{step}"
+                            ] = (
+                                future_predictions[:, idx][step_valid]
+                                == future_targets[:, idx][step_valid]
+                            ).float().mean().detach()
             prior_categorical = (
                 total_prior_loss * self.config.categorical_prior_loss_weight
             )
@@ -1259,6 +1360,12 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             "distill/vq_reconstruction_loss": reconstruction_raw.detach(),
             "distill/vq_reconstruction_loss_weighted": reconstruction.detach(),
             "distill/hard_prior_ce_loss": hard_prior_ce_loss.detach(),
+            "distill/future_prior_ce_loss": future_prior_ce_loss.detach(),
+            "distill/future_prior_ce_loss_weighted": (
+                future_prior_ce_loss_weighted.detach()
+            ),
+            "distill/future_prior_valid_ratio": future_prior_valid_ratio.detach(),
+            "distill/future_prior_match_rate": future_prior_match_rate.detach(),
             "distill/total_prior_loss": total_prior_loss.detach(),
             "distill/total_prior_loss_weighted": prior_categorical.detach(),
             "distill/vq_perplexity": tensordict["vq_perplexity"].mean().detach(),
@@ -1266,6 +1373,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
                 tensordict["vq_prior_indices"] == tensordict["posterior_vq_indices"]
             ).float().mean().detach(),
         }
+        log_dict.update(future_prior_step_log_dict)
         for key, value in soft_log_dict.items():
             log_dict[f"distill/{key}"] = value.detach()
         if "vq_prior_categorical_indices" in tensordict.keys():

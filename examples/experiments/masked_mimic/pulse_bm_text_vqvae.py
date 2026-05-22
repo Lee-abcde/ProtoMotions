@@ -66,6 +66,21 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         ),
     )
     parser.add_argument(
+        "--vq-prior-future-steps",
+        type=int,
+        default=0,
+        help=(
+            "Number of next posterior VQ tokens to predict with an auxiliary "
+            "categorical prior CE loss. For example, 4 predicts t+1..t+4."
+        ),
+    )
+    parser.add_argument(
+        "--vq-prior-future-loss-weight",
+        type=float,
+        default=0.25,
+        help="Weight for the auxiliary future posterior VQ token CE loss.",
+    )
+    parser.add_argument(
         "--use-categorical-prior-film",
         action="store_true",
         help="Use text FiLM modulation in the categorical VQ prior.",
@@ -383,6 +398,11 @@ def agent_config(
     )
 
     vq_prior_history_steps = int(getattr(args, "vq_prior_history_steps", 0))
+    vq_prior_future_steps = int(getattr(args, "vq_prior_future_steps", 0))
+    vq_prior_future_loss_weight = float(
+        getattr(args, "vq_prior_future_loss_weight", 1.0)
+    )
+    categorical_prior_num_out = NUM_EMBEDDINGS * (1 + vq_prior_future_steps)
     use_categorical_prior_film = bool(
         getattr(args, "use_categorical_prior_film", False)
     )
@@ -451,7 +471,7 @@ def agent_config(
             MLPWithConcatConfig(
                 in_keys=["categorical_prior_film_feature"],
                 out_keys=["prior_code_logits"],
-                num_out=NUM_EMBEDDINGS,
+                num_out=categorical_prior_num_out,
                 layers=[
                     MLPLayerConfig(units=1024, activation="relu"),
                     MLPLayerConfig(units=1024, activation="relu"),
@@ -466,7 +486,7 @@ def agent_config(
             MLPWithConcatConfig(
                 in_keys=categorical_prior_mlp_in_keys,
                 out_keys=["prior_code_logits"],
-                num_out=NUM_EMBEDDINGS,
+                num_out=categorical_prior_num_out,
                 layers=[
                     MLPLayerConfig(units=1024, activation="relu") for _ in range(4)
                 ],
@@ -572,12 +592,14 @@ def agent_config(
         dead_code_threshold=2,
         dead_code_revive_every=100,
         categorical_prior_history_steps=vq_prior_history_steps,
+        categorical_prior_future_steps=vq_prior_future_steps,
         losses=VQDistillLossConfig(
             commitment_weight=1.0,
             prior_commitment_weight=0.25,
             prior_alignment_weight=1.0,
             prior_bc_weight=0.0,
             reconstruction_weight=0.0,
+            future_prior_categorical_weight=vq_prior_future_loss_weight,
         ),
         soft_code_target=SoftCodeTargetConfig(
             enabled=False,
