@@ -106,6 +106,20 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         ),
     )
     parser.add_argument(
+        "--use-prior-state-history",
+        action="store_true",
+        help=(
+            "Append noisy historical reduced-coords state observations to the "
+            "categorical VQ prior input."
+        ),
+    )
+    parser.add_argument(
+        "--prior-state-history-steps",
+        type=int,
+        default=4,
+        help="Number of previous noisy reduced-coords state frames for the prior.",
+    )
+    parser.add_argument(
         "--use-decoder-film",
         action="store_true",
         help="Use text FiLM modulation inside the VQ decoder/action trunk.",
@@ -151,6 +165,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     from protomotions.envs.context_views import EnvContext
     from protomotions.envs.component_factories import (
         reduced_coords_obs_factory,
+        historical_reduced_coords_obs_factory,
         mimic_target_poses_reduced_coords_factory,
         max_coords_obs_factory,
         mimic_target_poses_max_coords_factory,
@@ -225,6 +240,13 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         observation_components["target_root_velocity_yaw_command"] = (
             target_root_velocity_yaw_command_factory(use_noisy=True)
         )
+    if bool(getattr(args, "use_prior_state_history", False)):
+        observation_components["noisy_historical_reduced_coords_obs"] = (
+            historical_reduced_coords_obs_factory(
+                use_noisy=True,
+                history_steps=int(getattr(args, "prior_state_history_steps", 4)),
+            )
+        )
 
     expert_model_path = getattr(args, "expert_model_path", None)
     if expert_model_path:
@@ -278,7 +300,14 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     return EnvConfig(
         ref_contact_smooth_window=7,
         max_episode_length=1000,
-        num_state_history_steps=1,
+        num_state_history_steps=max(
+            1,
+            (
+                int(getattr(args, "prior_state_history_steps", 4))
+                if bool(getattr(args, "use_prior_state_history", False))
+                else 1
+            ),
+        ),
         control_components=control_components,
         observation_components=observation_components,
         termination_components={
@@ -426,6 +455,13 @@ def agent_config(
     if bool(getattr(args, "use_prior_oracle_motion_command", False)):
         categorical_prior_container_in_keys.append("target_root_velocity_yaw_command")
         categorical_prior_motion_obs_in_keys.append("target_root_velocity_yaw_command")
+    if bool(getattr(args, "use_prior_state_history", False)):
+        categorical_prior_container_in_keys.append(
+            "noisy_historical_reduced_coords_obs"
+        )
+        categorical_prior_motion_obs_in_keys.append(
+            "noisy_historical_reduced_coords_obs"
+        )
     if vq_prior_history_steps > 0:
         categorical_prior_container_in_keys.append(vq_code_history_feature_key)
         categorical_prior_context_in_keys.append(vq_code_history_feature_key)

@@ -198,11 +198,14 @@ def historical_max_coords_obs_factory(
 
 def historical_reduced_coords_obs_factory(
     use_noisy: bool = False,
+    history_steps: Optional[Union[int, List[int]]] = None,
 ) -> MdpComponent:
     """Factory for historical reduced-coords observations.
 
     Args:
         use_noisy: If True, use noisy historical state.
+        history_steps: Steps to select. Int N for first N previous steps,
+            list for specific step indices (e.g. [1, 2, 4, 8]). None = use all.
 
     Returns:
         MdpComponent configured for historical reduced-coords observations.
@@ -220,7 +223,7 @@ def historical_reduced_coords_obs_factory(
             "historical_root_local_ang_vel": hist.root_local_ang_vel,
             "historical_anchor_rot": hist.anchor_rot,
         },
-        static_params={"w_last": True},
+        static_params={"history_steps": history_steps, "w_last": True},
     )
 
 
