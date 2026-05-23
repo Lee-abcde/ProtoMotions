@@ -1112,13 +1112,17 @@ class VQDistillModel(TextResidualMixin, BaseModel):
     def forward_inference(self, tensordict: TensorDict) -> TensorDict:
         if self._uses_categorical_prior:
             prior_latent = self._empty_prior_latent(tensordict)
-            prior_code_logits = self._categorical_prior_logits(tensordict)
+            prior_code_output = self._categorical_prior_logits(tensordict)
+            prior_code_logits, prior_future_logits = (
+                self._split_categorical_prior_logits(prior_code_output)
+            )
             prior_indices = self._select_prior_indices(prior_code_logits)
             actor_latent = self._lookup_codebook(prior_indices).detach()
         else:
             tensordict = self._prior(tensordict)
             prior_latent = tensordict[self._prior.out_keys[0]]
             prior_code_logits = None
+            prior_future_logits = None
             actor_latent, _, _, prior_indices, _ = self._quantize(
                 prior_latent, update_codebook=False
             )
@@ -1136,6 +1140,8 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         tensordict["vq_prior_indices"] = prior_indices
         if prior_code_logits is not None:
             tensordict["vq_prior_logits"] = prior_code_logits
+            if prior_future_logits is not None:
+                tensordict["vq_prior_future_logits"] = prior_future_logits
         self._record_text_residual_stats(
             tensordict, "distill", actor_text_residual, raw_actor_latent
         )
