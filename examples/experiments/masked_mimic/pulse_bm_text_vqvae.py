@@ -86,6 +86,49 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         help="Use text FiLM modulation in the categorical VQ prior.",
     )
     parser.add_argument(
+        "--use-categorical-prior-transformer",
+        "--use-transformer-prior",
+        dest="use_categorical_prior_transformer",
+        action="store_true",
+        help="Use a causal Transformer categorical VQ prior over recent observations.",
+    )
+    parser.add_argument(
+        "--vq-prior-transformer-context-steps",
+        type=int,
+        default=16,
+        help="Number of chronological obs steps consumed by the Transformer prior.",
+    )
+    parser.add_argument(
+        "--vq-prior-transformer-d-model",
+        type=int,
+        default=512,
+        help="Hidden size for the Transformer categorical prior.",
+    )
+    parser.add_argument(
+        "--vq-prior-transformer-num-layers",
+        type=int,
+        default=2,
+        help="Number of Transformer encoder layers in the categorical prior.",
+    )
+    parser.add_argument(
+        "--vq-prior-transformer-num-heads",
+        type=int,
+        default=4,
+        help="Number of attention heads in the Transformer categorical prior.",
+    )
+    parser.add_argument(
+        "--vq-prior-transformer-ff-size",
+        type=int,
+        default=1024,
+        help="Feed-forward hidden size in the Transformer categorical prior.",
+    )
+    parser.add_argument(
+        "--vq-prior-transformer-dropout",
+        type=float,
+        default=0.1,
+        help="Dropout probability in the Transformer categorical prior.",
+    )
+    parser.add_argument(
         "--categorical-prior-film-hidden-dim",
         type=int,
         default=1024,
@@ -328,6 +371,7 @@ def agent_config(
 ) -> DistillAgentConfig:
     from protomotions.agents.base_agent.config import OptimizerConfig
     from protomotions.agents.common.config import (
+        CausalTransformerCategoricalPriorConfig,
         FiLMConfig,
         MLPWithConcatConfig,
         MLPLayerConfig,
@@ -435,12 +479,29 @@ def agent_config(
     use_categorical_prior_film = bool(
         getattr(args, "use_categorical_prior_film", False)
     )
+    use_categorical_prior_transformer = bool(
+        getattr(args, "use_categorical_prior_transformer", False)
+    )
+    if use_categorical_prior_transformer and use_categorical_prior_film:
+        raise ValueError(
+            "--use-categorical-prior-transformer and "
+            "--use-categorical-prior-film are separate prior architectures; "
+            "enable only one for this ablation."
+        )
+    if use_categorical_prior_transformer and vq_prior_history_steps > 0:
+        raise ValueError(
+            "--vq-prior-history-steps is not wired into the Transformer prior "
+            "yet; keep it at 0 for this ablation."
+        )
     categorical_prior_film_hidden_dim = int(
         getattr(args, "categorical_prior_film_hidden_dim", 1024)
     )
     categorical_prior_film_scale = float(
         getattr(args, "categorical_prior_film_scale", 1.0)
     )
+    transformer_sequence_key = "categorical_prior_transformer_obs_seq"
+    transformer_text_sequence_key = "categorical_prior_transformer_text_seq"
+    transformer_mask_key = "categorical_prior_transformer_obs_seq_mask"
     vq_code_history_feature_key = "_vq_code_history_obs"
     categorical_prior_container_in_keys = [
         "noisy_reduced_coords_obs",
@@ -466,15 +527,53 @@ def agent_config(
         categorical_prior_container_in_keys.append(vq_code_history_feature_key)
         categorical_prior_context_in_keys.append(vq_code_history_feature_key)
 
-    categorical_prior_models = [
-        ObsProcessorConfig(
-            in_keys=categorical_prior_motion_obs_in_keys,
-            out_keys=["categorical_prior_motion_obs_norm"],
-            normalize_obs=True,
-            norm_clamp_value=5,
-            module_operations=[ModuleOperationForwardConfig()],
-        ),
-    ]
+    if use_categorical_prior_transformer:
+        categorical_prior_container_in_keys = [
+            transformer_sequence_key,
+            transformer_text_sequence_key,
+            transformer_mask_key,
+        ]
+        categorical_prior_models = [
+            ObsProcessorConfig(
+                in_keys=[transformer_sequence_key],
+                out_keys=["categorical_prior_transformer_obs_seq_norm"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                module_operations=[ModuleOperationForwardConfig()],
+            ),
+            CausalTransformerCategoricalPriorConfig(
+                in_keys=[
+                    "categorical_prior_transformer_obs_seq_norm",
+                    transformer_text_sequence_key,
+                    transformer_mask_key,
+                ],
+                out_keys=["prior_code_logits"],
+                num_out=categorical_prior_num_out,
+                context_steps=int(
+                    getattr(args, "vq_prior_transformer_context_steps", 16)
+                ),
+                d_model=int(getattr(args, "vq_prior_transformer_d_model", 512)),
+                num_heads=int(
+                    getattr(args, "vq_prior_transformer_num_heads", 4)
+                ),
+                ff_size=int(getattr(args, "vq_prior_transformer_ff_size", 1024)),
+                num_layers=int(
+                    getattr(args, "vq_prior_transformer_num_layers", 2)
+                ),
+                dropout=float(getattr(args, "vq_prior_transformer_dropout", 0.1)),
+            ),
+        ]
+    else:
+        categorical_prior_models = [
+            ObsProcessorConfig(
+                in_keys=categorical_prior_motion_obs_in_keys,
+                out_keys=["categorical_prior_motion_obs_norm"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                module_operations=[ModuleOperationForwardConfig()],
+            ),
+        ]
+
     if use_categorical_prior_film:
         categorical_prior_models += [
             MLPWithConcatConfig(
@@ -514,7 +613,7 @@ def agent_config(
                 ],
             ),
         ]
-    else:
+    elif not use_categorical_prior_transformer:
         categorical_prior_mlp_in_keys = categorical_prior_context_in_keys + [
             "text_embedding_obs"
         ]
@@ -627,8 +726,23 @@ def agent_config(
         ema_decay=0.99,
         dead_code_threshold=2,
         dead_code_revive_every=100,
+        use_categorical_prior=use_categorical_prior_transformer,
         categorical_prior_history_steps=vq_prior_history_steps,
         categorical_prior_future_steps=vq_prior_future_steps,
+        use_categorical_prior_transformer=use_categorical_prior_transformer,
+        categorical_prior_transformer_context_steps=int(
+            getattr(args, "vq_prior_transformer_context_steps", 16)
+        ),
+        categorical_prior_transformer_input_keys=(
+            categorical_prior_motion_obs_in_keys
+            if use_categorical_prior_transformer
+            else []
+        ),
+        categorical_prior_transformer_sequence_key=transformer_sequence_key,
+        categorical_prior_transformer_text_sequence_key=(
+            transformer_text_sequence_key
+        ),
+        categorical_prior_transformer_mask_key=transformer_mask_key,
         losses=VQDistillLossConfig(
             commitment_weight=1.0,
             prior_commitment_weight=0.25,

@@ -318,6 +318,78 @@ class TransformerConfig:
         assert len(self.out_keys) == 1, "Transformer supports exactly one output key"
 
 
+@dataclass
+class CausalTransformerCategoricalPriorConfig:
+    """Causal temporal categorical prior over VQ codebook entries.
+
+    Consumes a chronological observation sequence and predicts categorical VQ
+    logits from the latest token representation.
+    """
+
+    _target_: str = "protomotions.agents.common.transformer.CausalTransformerCategoricalPrior"
+    in_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Input keys [obs_sequence, text_sequence, valid_mask]."}
+    )
+    out_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Output key for flattened categorical logits."}
+    )
+    num_out: int = field(
+        default=None,
+        metadata={"help": "Output logits dimension, usually K * (1 + future_steps)."}
+    )
+    context_steps: int = field(
+        default=16,
+        metadata={"help": "Number of chronological steps in the input context."}
+    )
+    d_model: int = field(
+        default=512,
+        metadata={"help": "Transformer hidden size."}
+    )
+    num_heads: int = field(
+        default=4,
+        metadata={"help": "Number of attention heads."}
+    )
+    ff_size: int = field(
+        default=1024,
+        metadata={"help": "Transformer feed-forward hidden size."}
+    )
+    num_layers: int = field(
+        default=2,
+        metadata={"help": "Number of causal Transformer encoder layers."}
+    )
+    dropout: float = field(
+        default=0.1,
+        metadata={"help": "Transformer dropout probability."}
+    )
+    activation: str = field(
+        default="gelu",
+        metadata={"help": "Transformer/feed-forward activation."}
+    )
+    head_layers: List[MLPLayerConfig] = field(
+        default_factory=lambda: [
+            MLPLayerConfig(units=1024, activation="relu"),
+            MLPLayerConfig(units=1024, activation="relu"),
+        ],
+        metadata={"help": "MLP layers applied after the latest Transformer token."}
+    )
+
+    def __post_init__(self):
+        assert self.num_out is not None, "num_out must be provided"
+        assert len(self.in_keys) == 3, (
+            "CausalTransformerCategoricalPrior expects "
+            "[obs_sequence, text_sequence, valid_mask]."
+        )
+        assert len(self.out_keys) == 1, (
+            "CausalTransformerCategoricalPrior requires exactly one output key."
+        )
+        assert self.context_steps > 0, "context_steps must be positive"
+        assert self.d_model % self.num_heads == 0, (
+            "d_model must be divisible by num_heads"
+        )
+
+
 # =============================================================================
 # VAE Configurations
 # =============================================================================

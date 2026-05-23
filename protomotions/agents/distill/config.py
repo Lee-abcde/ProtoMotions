@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-from typing import Union, Optional
+from typing import List, Union, Optional
 from enum import Enum
 from protomotions.agents.common.config import ModuleContainerConfig
 from protomotions.agents.base_agent.config import (
@@ -250,6 +250,20 @@ class VQDistillModelConfig(BaseModelConfig):
     categorical_prior_history_key: str = "vq_code_history_indices"
     categorical_prior_future_steps: int = 0
     categorical_prior_future_target_key: str = "vq_prior_future_targets"
+    use_categorical_prior_transformer: bool = False
+    categorical_prior_transformer_context_steps: int = 16
+    categorical_prior_transformer_input_keys: List[str] = field(
+        default_factory=list
+    )
+    categorical_prior_transformer_sequence_key: str = (
+        "categorical_prior_transformer_obs_seq"
+    )
+    categorical_prior_transformer_text_sequence_key: str = (
+        "categorical_prior_transformer_text_seq"
+    )
+    categorical_prior_transformer_mask_key: str = (
+        "categorical_prior_transformer_obs_seq_mask"
+    )
     train_categorical_prior_only: bool = False
     use_text_conditioning: bool = False
     text_obs_key: Optional[str] = None

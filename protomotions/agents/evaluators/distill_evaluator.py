@@ -906,6 +906,8 @@ class DistillEvaluator(MimicEvaluator):
         self._on_episode_start(env_ids)
         if hasattr(self.agent, "reset_vq_code_history"):
             self.agent.reset_vq_code_history(env_ids)
+        if hasattr(self.agent, "reset_categorical_prior_transformer_history"):
+            self.agent.reset_categorical_prior_transformer_history(env_ids)
 
         obs, _ = self.env.reset(env_ids, **self._get_reset_kwargs())
         obs = self.agent.add_agent_info_to_obs(obs)
@@ -924,6 +926,12 @@ class DistillEvaluator(MimicEvaluator):
                 prev_actions = actions.clone()
 
             obs, rewards, dones, terminated, extras = self.env.step(actions)
+            if hasattr(self.agent, "update_categorical_prior_transformer_history"):
+                self.agent.update_categorical_prior_transformer_history(
+                    obs_td,
+                    env_ids=env_ids,
+                    dones=dones,
+                )
             if hasattr(self.agent, "update_vq_code_history"):
                 self.agent.update_vq_code_history(
                     model_outs,
@@ -1097,6 +1105,8 @@ class DistillEvaluator(MimicEvaluator):
         print("Evaluating policy... (Ctrl+C to stop)")
         if hasattr(self.agent, "reset_vq_code_history"):
             self.agent.reset_vq_code_history()
+        if hasattr(self.agent, "reset_categorical_prior_transformer_history"):
+            self.agent.reset_categorical_prior_transformer_history()
         if is_distill_vae_model and action_key == "privileged_action":
             print(
                 "[distill-eval] using environment-provided interpolated targets "
@@ -1455,6 +1465,11 @@ class DistillEvaluator(MimicEvaluator):
                 actions = self._select_actions(model_outs, action_key)
 
                 obs, rewards, dones, terminated, extras = self.env.step(actions)
+                if hasattr(self.agent, "update_categorical_prior_transformer_history"):
+                    self.agent.update_categorical_prior_transformer_history(
+                        obs_td,
+                        dones=dones,
+                    )
                 if hasattr(self.agent, "update_vq_code_history"):
                     self.agent.update_vq_code_history(
                         model_outs, dones=dones, action_key=action_key
