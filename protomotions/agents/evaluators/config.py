@@ -15,7 +15,7 @@
 #
 """Configuration classes for evaluators."""
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from dataclasses import dataclass, field
 
 from protomotions.envs.mdp_component import MdpComponent
@@ -77,6 +77,16 @@ class MimicEvaluatorConfig(EvaluatorConfig):
         default=3,
         metadata={"help": "Save pred_motion_lib every M evals. None = disabled.", "min": 1}
     )
+    predicted_motion_lib_output_fps: Optional[int] = field(
+        default=30,
+        metadata={
+            "help": (
+                "Target FPS for saved predicted MotionLib files. "
+                "None keeps the evaluator timestep."
+            ),
+            "min": 1,
+        },
+    )
     motion_weights_rules: MotionWeightsRulesConfig = field(
         default_factory=MotionWeightsRulesConfig,
         metadata={"help": "Rules for updating motion sampling weights."}
@@ -96,12 +106,20 @@ class MimicEvaluatorConfig(EvaluatorConfig):
         }
     )
 
-from typing import List
 @dataclass
 class DistillEvaluatorConfig(MimicEvaluatorConfig):
     """Configuration for distillation evaluator with privileged-action testing."""
 
     _target_: str = "protomotions.agents.evaluators.distill_evaluator.DistillEvaluator"
+    evaluate_privileged_action: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "If True, full evaluation runs an additional privileged_action pass. "
+                "Set False to evaluate only the prior action."
+            )
+        },
+    )
     use_privileged_success_for_motion_weights: bool = field(
         default=False,
         metadata={

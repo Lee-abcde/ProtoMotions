@@ -25,6 +25,7 @@ from protomotions.agents.evaluators.metrics import MotionMetrics
 from protomotions.components.motion_lib import MotionLib
 from protomotions.agents.evaluators.config import MimicEvaluatorConfig
 from protomotions.envs.motion_manager.mimic_motion_manager import MimicMotionManager
+from protomotions.utils.motion_interpolation_utils import interpolate_quat
 
 
 @dataclass
@@ -86,7 +87,14 @@ class MimicEvaluator(BaseEvaluator):
         motion_lengths = self.motion_lib.get_motion_length(None)
         motion_num_frames = (motion_lengths / self.env.dt).floor().long()
         motion_num_frames = motion_num_frames.clamp(max=self.config.max_eval_steps)
+        export_motion_num_frames = (motion_lengths / self.env.dt).ceil().long() + 1
+        export_motion_num_frames = export_motion_num_frames.clamp(
+            max=self.config.max_eval_steps
+        )
         self._init_eval_component_buffers(num_motions)
+        self._init_predicted_export_buffers(
+            num_motions, export_motion_num_frames, motion_num_frames
+        )
 
         # Cache env + motion manager state (restored in cleanup_after_evaluation)
         self._env_snapshot = self.env.save_state()
@@ -96,6 +104,113 @@ class MimicEvaluator(BaseEvaluator):
         return self._create_metrics(
             num_motions, motion_num_frames, self.config.max_eval_steps
         )
+
+    def _init_predicted_export_buffers(
+        self,
+        num_motions: int,
+        export_motion_num_frames: Tensor,
+        metric_motion_num_frames: Tensor,
+    ) -> None:
+        """Allocate small export-only buffers for reset and extra ceil frames."""
+        self._predicted_export_start_state = None
+        self._predicted_export_extra_state = None
+        self._predicted_export_start_valid = None
+        self._predicted_export_extra_valid = None
+        self._predicted_export_lens = None
+        self._predicted_export_metric_lens = None
+
+        if not getattr(self.config, "collect_trajectory_metrics", True):
+            return
+        if self.config.save_predicted_motion_lib_every is None:
+            return
+        if not hasattr(self.env, "simulator"):
+            return
+
+        try:
+            robot_state = self.env.simulator.get_robot_state()
+            self._predicted_export_lens = export_motion_num_frames.detach().cpu().long()
+            self._predicted_export_metric_lens = (
+                metric_motion_num_frames.detach().cpu().long()
+            )
+            self._predicted_export_start_valid = torch.zeros(
+                num_motions, dtype=torch.bool
+            )
+            self._predicted_export_extra_valid = torch.zeros(
+                num_motions, dtype=torch.bool
+            )
+            self._predicted_export_start_state = {}
+            self._predicted_export_extra_state = {}
+            for k, shape in robot_state.get_shape_mapping(flattened=True).items():
+                values = robot_state.flatten_bodies(k)
+                if values is None:
+                    continue
+                self._predicted_export_start_state[k] = torch.zeros(
+                    (num_motions, shape[0]), dtype=values.dtype
+                )
+                self._predicted_export_extra_state[k] = torch.zeros(
+                    (num_motions, shape[0]), dtype=values.dtype
+                )
+        except (AttributeError, KeyError, IndexError):
+            self._predicted_export_start_state = None
+            self._predicted_export_extra_state = None
+            self._predicted_export_start_valid = None
+            self._predicted_export_extra_valid = None
+            self._predicted_export_lens = None
+            self._predicted_export_metric_lens = None
+
+    def _clear_predicted_export_buffers(self) -> None:
+        """Release export-only buffers after evaluation."""
+        self._predicted_export_start_state = None
+        self._predicted_export_extra_state = None
+        self._predicted_export_start_valid = None
+        self._predicted_export_extra_valid = None
+        self._predicted_export_lens = None
+        self._predicted_export_metric_lens = None
+
+    def _record_current_predicted_export_state(
+        self,
+        env_ids: Tensor,
+        source_frame_idx: int,
+    ) -> None:
+        """Record export-only reset or extra final source frames."""
+        if (
+            self._predicted_export_start_state is None
+            or self._predicted_export_extra_state is None
+            or self._predicted_export_start_valid is None
+            or self._predicted_export_extra_valid is None
+            or self._predicted_export_lens is None
+            or self._predicted_export_metric_lens is None
+            or not hasattr(self.env, "simulator")
+        ):
+            return
+
+        motion_ids_cpu = self._episode_ctx.motion_ids.detach().cpu().long()
+        source_frame_idx = int(source_frame_idx)
+        within_export = source_frame_idx < self._predicted_export_lens[motion_ids_cpu]
+        if source_frame_idx == 0:
+            valid_cpu = within_export
+            target_state = self._predicted_export_start_state
+            target_valid = self._predicted_export_start_valid
+        else:
+            needs_extra = (
+                source_frame_idx > self._predicted_export_metric_lens[motion_ids_cpu]
+            )
+            valid_cpu = within_export & needs_extra
+            target_state = self._predicted_export_extra_state
+            target_valid = self._predicted_export_extra_valid
+
+        if not valid_cpu.any():
+            return
+
+        valid_env_ids = env_ids[valid_cpu.to(device=env_ids.device)]
+        valid_motion_ids = motion_ids_cpu[valid_cpu]
+        robot_state = self.env.simulator.get_robot_state()
+        for k in target_state.keys():
+            values = robot_state.flatten_bodies(k)
+            if values is None:
+                continue
+            target_state[k][valid_motion_ids] = values[valid_env_ids].detach().cpu()
+        target_valid[valid_motion_ids] = True
 
     def _save_failed_motions(self, failed_motions: list, epoch: int) -> None:
         """
@@ -281,6 +396,7 @@ class MimicEvaluator(BaseEvaluator):
         del self._env_snapshot
         del self._cached_motion_ids
         del self._cached_motion_times
+        self._clear_predicted_export_buffers()
         super().cleanup_after_evaluation()
 
     def _plot_per_frame_metrics(
@@ -338,30 +454,176 @@ class MimicEvaluator(BaseEvaluator):
                     f"Missing metric '{k}' required to build predicted MotionLib"
                 )
 
-        device = self.device
+        cpu_device = torch.device("cpu")
         num_motions = self.motion_lib.num_motions()
 
-        motion_num_frames = metrics["dof_pos"].motion_lens.to(device=device).long()
+        export_lens = getattr(self, "_predicted_export_lens", None)
+        start_state = getattr(self, "_predicted_export_start_state", None)
+        extra_state = getattr(self, "_predicted_export_extra_state", None)
+        start_valid = getattr(self, "_predicted_export_start_valid", None)
+        extra_valid = getattr(self, "_predicted_export_extra_valid", None)
+        missing_export_keys = (
+            [k for k in required_keys if start_state is None or k not in start_state]
+            + [k for k in required_keys if extra_state is None or k not in extra_state]
+        )
+        use_export_frames = not (
+            export_lens is None
+            or start_state is None
+            or extra_state is None
+            or start_valid is None
+            or extra_valid is None
+            or missing_export_keys
+            or not bool(start_valid.any().item())
+        )
+        device = self.device
+        if use_export_frames:
+            device = cpu_device
+
+        metric_motion_num_frames = metrics["dof_pos"].motion_lens.to(
+            device=device
+        ).long()
+        metric_capacity = metrics["dof_pos"].data.shape[1]
+        if use_export_frames:
+            source_motion_num_frames = export_lens.to(device=device).long()
+        else:
+            source_motion_num_frames = metric_motion_num_frames.clone()
         assert (
-            motion_num_frames.shape[0] == num_motions
+            source_motion_num_frames.shape[0] == num_motions
         ), "motion_num_frames size mismatch"
 
+        source_dt = float(self.env.dt)
+        output_fps = getattr(self.config, "predicted_motion_lib_output_fps", None)
+        target_dt = source_dt if output_fps is None else 1.0 / float(output_fps)
+
+        resample_plans = []
+        target_motion_num_frames = []
+        for m in range(num_motions):
+            source_frames = int(source_motion_num_frames[m].item())
+            source_duration = max(0.0, float(source_frames - 1) * source_dt)
+            target_frames = max(
+                1,
+                int(math.floor(source_duration / target_dt + 1e-5)) + 1,
+            )
+            target_motion_num_frames.append(target_frames)
+
+            if source_frames <= 1:
+                idx0 = torch.zeros(
+                    target_frames, dtype=torch.long, device=device
+                )
+                idx1 = torch.zeros(
+                    target_frames, dtype=torch.long, device=device
+                )
+                blend = torch.zeros(
+                    target_frames, dtype=torch.float32, device=device
+                )
+            else:
+                target_times = (
+                    torch.arange(
+                        target_frames, dtype=torch.float32, device=device
+                    )
+                    * target_dt
+                )
+                max_source_time = float(source_frames - 1) * source_dt
+                sample_times = target_times.clamp(max=max_source_time)
+                frame_pos = sample_times / source_dt
+                idx0 = frame_pos.floor().long().clamp(max=source_frames - 1)
+                idx1 = (idx0 + 1).clamp(max=source_frames - 1)
+                blend = (frame_pos - idx0.to(dtype=torch.float32)).clamp(0.0, 1.0)
+
+            resample_plans.append((source_frames, idx0, idx1, blend))
+
+        motion_num_frames = torch.tensor(
+            target_motion_num_frames, dtype=torch.long, device=device
+        )
         lengths_shifted = motion_num_frames.roll(1)
         lengths_shifted[0] = 0
         length_starts = lengths_shifted.cumsum(0)
-
-        motion_dt = (
-            torch.ones(num_motions, dtype=torch.float32, device=device) * self.env.dt
+        motion_dt = torch.full(
+            (num_motions,), target_dt, dtype=torch.float32, device=device
         )
-        motion_lengths = motion_num_frames.to(dtype=torch.float32) * self.env.dt
+        motion_lengths = (motion_num_frames.float() - 1.0).clamp(min=0.0) * target_dt
+
+        def resample_sequence(
+            sequence: torch.Tensor,
+            idx0: torch.Tensor,
+            idx1: torch.Tensor,
+            blend: torch.Tensor,
+            metric_key: str,
+        ) -> torch.Tensor:
+            values0 = sequence[idx0]
+            values1 = sequence[idx1]
+            if metric_key == "rigid_body_rot":
+                num_bodies = self.env.robot_config.kinematic_info.num_bodies
+                values0 = values0.view(values0.shape[0], num_bodies, 4)
+                values1 = values1.view(values1.shape[0], num_bodies, 4)
+                return interpolate_quat(values0, values1, blend).reshape(
+                    values0.shape[0], num_bodies * 4
+                )
+            return (1.0 - blend.unsqueeze(-1)) * values0 + blend.unsqueeze(-1) * values1
+
+        def get_source_sequence(metric_key: str, motion_id: int) -> torch.Tensor:
+            source_frames = int(source_motion_num_frames[motion_id].item())
+            metric_data = metrics[metric_key].data
+            if not use_export_frames:
+                metric_frames = min(source_frames, metric_capacity)
+                return metric_data[motion_id, :metric_frames].detach().clone()
+
+            if source_frames <= 0:
+                return torch.zeros(
+                    (0, metrics[metric_key].num_sub_features),
+                    dtype=metric_data.dtype,
+                    device=device,
+                )
+            if not bool(start_valid[motion_id].item()):
+                raise ValueError(
+                    f"Missing t=0 export state for motion {motion_id} ({metric_key})"
+                )
+
+            parts = [
+                start_state[metric_key][motion_id : motion_id + 1]
+                .detach()
+                .to(device=device, dtype=metric_data.dtype)
+            ]
+            metric_frames = min(
+                max(0, source_frames - 1),
+                int(metric_motion_num_frames[motion_id].item()),
+                metric_capacity,
+            )
+            if metric_frames > 0:
+                parts.append(
+                    metric_data[motion_id, :metric_frames]
+                    .detach()
+                    .to(device=device)
+                )
+
+            if sum(part.shape[0] for part in parts) < source_frames:
+                if not bool(extra_valid[motion_id].item()):
+                    raise ValueError(
+                        f"Missing extra export state for motion {motion_id} "
+                        f"({metric_key})"
+                    )
+                parts.append(
+                    extra_state[metric_key][motion_id : motion_id + 1]
+                    .detach()
+                    .to(device=device, dtype=metric_data.dtype)
+                )
+
+            return torch.cat(parts, dim=0)[:source_frames]
 
         def pack_metric(metric_key: str) -> torch.Tensor:
-            data = metrics[metric_key].data
             per_motion = []
             for m in range(num_motions):
-                f = motion_num_frames[m].item()
-                f = min(f, data.shape[1])
-                per_motion.append(data[m, :f].detach().clone())
+                source_frames, idx0, idx1, blend = resample_plans[m]
+                sequence = get_source_sequence(metric_key, m)
+                per_motion.append(
+                    resample_sequence(sequence, idx0, idx1, blend, metric_key)
+                )
+                processed = m + 1
+                if processed == 1 or processed % 500 == 0 or processed == num_motions:
+                    print(
+                        f"[pred-save] concat {metric_key}: {processed}/{num_motions}",
+                        flush=True,
+                    )
             return torch.cat(per_motion, dim=0)
 
         # Build packed tensors matching MotionLib field names
@@ -394,17 +656,25 @@ class MimicEvaluator(BaseEvaluator):
         gvs = gvs_flat.view(-1, num_bodies, 3)
         gavs = gavs_flat.view(-1, num_bodies, 3)
 
+        body_names = getattr(self.env.robot_config.kinematic_info, "body_names", None)
+        if body_names is not None and len(body_names) > 1:
+            if body_names[0] == "pelvis" and body_names[1] == "head":
+                # Match the G1 GT layout: head is fixed to the root/pelvis rotation.
+                grs[:, 1] = grs[:, 0]
+
         # Pack predicted contacts from metrics
-        contacts_data = metrics[
-            "rigid_body_contacts"
-        ].data  # [num_motions, max_frames, num_bodies]
         contacts_list = []
         for m in range(num_motions):
-            f = motion_num_frames[m].item()
-            # Clamp to available frames
-            f = min(f, contacts_data.shape[1])
+            source_frames, idx0, idx1, _ = resample_plans[m]
             # Convert float contacts to bool for consistency with MotionLib format
-            contacts_list.append(contacts_data[m, :f].bool().detach().clone())
+            sequence = get_source_sequence("rigid_body_contacts", m).bool()
+            contacts_list.append(sequence[idx0] | sequence[idx1])
+            processed = m + 1
+            if processed == 1 or processed % 500 == 0 or processed == num_motions:
+                print(
+                    f"[pred-save] concat rigid_body_contacts: {processed}/{num_motions}",
+                    flush=True,
+                )
         contacts = torch.cat(contacts_list, dim=0)
 
         # Copy ground-truth motion weights and files
@@ -414,6 +684,8 @@ class MimicEvaluator(BaseEvaluator):
             "motion_weights",
             torch.ones(num_motions, dtype=torch.float32, device=device),
         )
+        if torch.is_tensor(motion_weights):
+            motion_weights = motion_weights.detach().to(device=device)
         motion_files = getattr(
             gt_lib,
             "motion_files",

@@ -884,7 +884,10 @@ class DistillEvaluator(MimicEvaluator):
         """Initialize normal and privileged evaluation state."""
         metrics = super().initialize_eval()
         self._privileged_eval_state = None
-        if self._supports_privileged_action():
+        if (
+            getattr(self.config, "evaluate_privileged_action", True)
+            and self._supports_privileged_action()
+        ):
             num_motions = self.motion_lib.num_motions()
             motion_lengths = self.motion_lib.get_motion_length(None)
             motion_num_frames = (motion_lengths / self.env.dt).floor().long()
@@ -912,6 +915,9 @@ class DistillEvaluator(MimicEvaluator):
         obs, _ = self.env.reset(env_ids, **self._get_reset_kwargs())
         obs = self.agent.add_agent_info_to_obs(obs)
         obs_td = self.agent.obs_dict_to_tensordict(obs)
+
+        if action_key == "prior_action":
+            self._record_current_predicted_export_state(env_ids, source_frame_idx=0)
 
         prev_actions = None
 
@@ -944,6 +950,17 @@ class DistillEvaluator(MimicEvaluator):
 
             self._check_eval_components(env_ids, step_idx)
             self._on_episode_step(env_ids, extras, actions)
+            if action_key == "prior_action":
+                self._record_current_predicted_export_state(
+                    env_ids, source_frame_idx=step_idx + 1
+                )
+
+            processed = step_idx + 1
+            if processed % 50 == 0 or processed == max_steps:
+                print(
+                    f"[eval-debug] {action_key} step {processed}/{max_steps}",
+                    flush=True,
+                )
 
     def run_evaluation(self) -> None:
         """Run normal and optional privileged evaluation across motion batches."""
@@ -956,7 +973,7 @@ class DistillEvaluator(MimicEvaluator):
         for env_ids, motion_ids in self._build_eval_batches():
             motion_lengths = self.motion_lib.get_motion_length(motion_ids)
             max_len = min(
-                (motion_lengths.max() / self.env.dt).floor().long().item(),
+                (motion_lengths.max() / self.env.dt).ceil().long().item(),
                 self.config.max_eval_steps,
             )
             self._episode_ctx = MimicEpisodeContext(
