@@ -81,6 +81,16 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         help="Weight for the auxiliary future posterior VQ token CE loss.",
     )
     parser.add_argument(
+        "--rollout-action-key",
+        type=str,
+        default="privileged_action",
+        choices=["privileged_action", "prior_action"],
+        help=(
+            "Model output key used to step the environment during training "
+            "rollout."
+        ),
+    )
+    parser.add_argument(
         "--use-categorical-prior-film",
         action="store_true",
         help="Use text FiLM modulation in the categorical VQ prior.",
@@ -726,7 +736,7 @@ def agent_config(
         ema_decay=0.99,
         dead_code_threshold=2,
         dead_code_revive_every=100,
-        use_categorical_prior=use_categorical_prior_transformer,
+        use_categorical_prior=True,
         categorical_prior_history_steps=vq_prior_history_steps,
         categorical_prior_future_steps=vq_prior_future_steps,
         use_categorical_prior_transformer=use_categorical_prior_transformer,
@@ -771,6 +781,7 @@ def agent_config(
         model=model_config,
         batch_size=args.batch_size,
         training_max_steps=args.training_max_steps,
+        rollout_action_key=getattr(args, "rollout_action_key", "privileged_action"),
         gradient_clip_val=50.0,
         num_mini_epochs=6,
         evaluator=DistillEvaluatorConfig(

@@ -314,3 +314,13 @@ class DistillAgentConfig(BaseAgentConfig):
         default=None,
         metadata={"help": "Path to pre-trained expert model checkpoint."}
     )
+    rollout_action_key: str = field(
+        default="privileged_action",
+        metadata={
+            "help": (
+                "Model output key used to step the environment during training "
+                "rollout. Valid values are 'privileged_action' and "
+                "'prior_action'."
+            )
+        },
+    )

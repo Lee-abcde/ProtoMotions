@@ -40,6 +40,26 @@ class DistillAgent(BaseAgent):
 
     model: DistillModel
     config: DistillAgentConfig
+    _VALID_ROLLOUT_ACTION_KEYS = ("privileged_action", "prior_action")
+
+    def _rollout_action_key(self) -> str:
+        action_key = getattr(self.config, "rollout_action_key", "privileged_action")
+        if action_key not in self._VALID_ROLLOUT_ACTION_KEYS:
+            raise ValueError(
+                "rollout_action_key must be one of "
+                f"{self._VALID_ROLLOUT_ACTION_KEYS}, got {action_key!r}."
+            )
+        return action_key
+
+    def _select_rollout_action(self, output_td: TensorDict) -> Tensor:
+        action_key = self._rollout_action_key()
+        if action_key not in output_td.keys():
+            available_keys = sorted(str(key) for key in output_td.keys())
+            raise KeyError(
+                f"Configured rollout_action_key={action_key!r} is not present in "
+                f"model outputs. Available keys: {available_keys}."
+            )
+        return output_td[action_key]
 
     def _uses_vae(self) -> bool:
         return hasattr(self.config.model, "vae") and self.config.model.vae is not None
@@ -1044,13 +1064,7 @@ class DistillAgent(BaseAgent):
             )
             self.vq_posterior_frequency_accum_valid[:] = True
 
-        # Get student action
-        if "privileged_action" in output_td:
-            action = output_td[
-                "privileged_action"
-            ]  # During training, we use the privileged action
-        else:
-            action = output_td["action"]  # During evaluation, we use the action
+        action = self._select_rollout_action(output_td)
 
         # Run expert model to get target action
         # Build expert obs tensordict by stripping "expert_" prefix from keys
