@@ -265,6 +265,7 @@ class VQDistillModelConfig(BaseModelConfig):
         "categorical_prior_transformer_obs_seq_mask"
     )
     train_categorical_prior_only: bool = False
+    load_categorical_prior_parameters: bool = True
     use_text_conditioning: bool = False
     text_obs_key: Optional[str] = None
     text_obs_dim: int = 0

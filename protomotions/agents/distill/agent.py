@@ -824,11 +824,50 @@ class DistillAgent(BaseAgent):
         return obs
 
     def load_parameters(self, state_dict):
+        load_categorical_prior_parameters = bool(
+            getattr(self.config.model, "load_categorical_prior_parameters", True)
+        )
+        if not load_categorical_prior_parameters:
+            state_dict = dict(state_dict)
+            checkpoint_model_state = state_dict["model"]
+            current_model_state = self.model.state_dict()
+            merged_model_state = current_model_state.copy()
+            skipped_prior_keys = []
+            loaded_keys = 0
+            kept_current_keys = 0
+
+            for key, value in checkpoint_model_state.items():
+                if "_categorical_prior" in key:
+                    skipped_prior_keys.append(key)
+                    continue
+                if (
+                    key in merged_model_state
+                    and merged_model_state[key].shape == value.shape
+                ):
+                    merged_model_state[key] = value
+                    loaded_keys += 1
+                else:
+                    kept_current_keys += 1
+
+            state_dict["model"] = merged_model_state
+            log.info(
+                "Loading checkpoint without categorical prior parameters: skipped "
+                f"{len(skipped_prior_keys)} prior parameters, loaded "
+                f"{loaded_keys} non-prior parameters, kept {kept_current_keys} "
+                "checkpoint parameters at current initialization due to missing "
+                "keys or shape mismatch."
+            )
         super().load_parameters(state_dict)
         if bool(getattr(self.config.model, "train_categorical_prior_only", False)):
             log.info(
                 "Skipping checkpoint optimizer state because "
                 "train_categorical_prior_only=True changes optimizer parameters."
+            )
+            return
+        if not load_categorical_prior_parameters:
+            log.info(
+                "Skipping checkpoint optimizer state because "
+                "load_categorical_prior_parameters=False resets model parameters."
             )
             return
         self.distill_optimizer.load_state_dict(state_dict["distill_optimizer"])
