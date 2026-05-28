@@ -52,6 +52,7 @@ import argparse
 import datetime
 import os
 from pathlib import Path
+import shlex
 import subprocess
 
 
@@ -87,6 +88,12 @@ DEFAULT_SLURM_PARTITION = "gpu"
 
 # Filesystem mounts for container (cluster-specific)
 CONTAINER_MOUNTS = "/scratch:/scratch:rw"
+
+# ETH Zurich Euler defaults. Override with CLI flags if your paths differ.
+EULER_LOGIN_NODE = "euler.ethz.ch"
+EULER_HOME_BASE = "/cluster/home"
+EULER_SCRATCH_BASE = "/cluster/scratch"
+EULER_ISAACLAB_ENV = "/opt/env_isaaclab/bin/activate"
 
 # =============================================================================
 # END CLUSTER CONFIGURATION
@@ -160,20 +167,135 @@ def create_parser():
     parser.add_argument("--training-max-steps", type=int, default=10000000000, help="Max training steps")
     parser.add_argument("--checkpoint", type=str, default=None, help="Resume from checkpoint")
     parser.add_argument("--use-wandb", action="store_true", help="Enable Weights & Biases logging")
-    parser.add_argument("--use-slurm", action="store_true", default=True, help="Enable SLURM autoresume")
+    parser.add_argument(
+        "--use-slurm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable SLURM autoresume",
+    )
     parser.add_argument("--ngpu", type=int, default=1, help="GPUs per node")
     parser.add_argument("--nodes", type=int, default=1, help="Number of nodes")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--overrides", nargs="*", default=[], help="Config overrides (key=value)")
 
     # SLURM arguments
+    parser.add_argument(
+        "--cluster",
+        choices=["generic", "euler"],
+        default="generic",
+        help="Cluster backend used to generate the batch script",
+    )
+    parser.add_argument(
+        "--cluster-login-node",
+        type=str,
+        default=None,
+        help="Override cluster login hostname",
+    )
+    parser.add_argument(
+        "--cluster-repo",
+        type=str,
+        default=None,
+        help="Repo path on the cluster. Euler default: /cluster/home/<user>/ProtoMotions",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Writable results directory on the cluster. Euler default: /cluster/scratch/<user>/g1_results",
+    )
+    parser.add_argument(
+        "--container-image",
+        type=str,
+        default=None,
+        help="Override container image path",
+    )
+    parser.add_argument(
+        "--container-env",
+        type=str,
+        default=EULER_ISAACLAB_ENV,
+        help="Environment activation script inside the container",
+    )
+    parser.add_argument(
+        "--gpu-type",
+        type=str,
+        default="rtx_4090",
+        help="Euler GPU type for #SBATCH --gpus=<type>:<ngpu>. Use empty string for untyped GPUs.",
+    )
+    parser.add_argument("--cpus-per-task", type=int, default=8, help="CPUs per SLURM task")
+    parser.add_argument("--mem-per-cpu", type=str, default="4G", help="Memory per CPU")
+    parser.add_argument(
+        "--slurm-autoresume-after",
+        type=int,
+        default=12600,
+        help="Seconds before SLURM autoresume checkpoints and exits",
+    )
+    parser.add_argument(
+        "--skip-slurm-autoresume-after-arg",
+        action="store_true",
+        help="Do not pass --slurm-autoresume-after to train_agent.py for older cluster code",
+    )
+    parser.add_argument(
+        "--submit-local",
+        action="store_true",
+        help="Submit with local sbatch instead of ssh/scp. Use this when already on the login node.",
+    )
     parser.add_argument("-t", "--slurm-time", default="4:00:00", help="Job time limit")
     parser.add_argument("-a", "--account", default=DEFAULT_SLURM_ACCOUNT, help="SLURM account")
     parser.add_argument("-p", "--partition", default=DEFAULT_SLURM_PARTITION, help="SLURM partition")
     parser.add_argument("--array-size", type=int, default=5, help="Job array size for auto-resume")
     parser.add_argument("--only-upload-code", action="store_true", help="Only sync code, don't submit")
+    parser.add_argument("--dry-run", action="store_true", help="Print generated script without submitting")
 
     return parser
+
+
+def quote_cmd(args):
+    """Quote argv-style command pieces for shell execution."""
+    return " ".join(shlex.quote(str(arg)) for arg in args)
+
+
+def build_train_agent_command(args):
+    """Build the train_agent.py command shared by cluster backends."""
+    cmd = [
+        "python",
+        "-u",
+        "protomotions/train_agent.py",
+        "--robot-name",
+        args.robot_name,
+        "--simulator",
+        args.simulator,
+        "--motion-file",
+        args.motion_file,
+        "--ngpu",
+        args.ngpu,
+        "--nodes",
+        args.nodes,
+        "--training-max-steps",
+        args.training_max_steps,
+        "--experiment-name",
+        args.experiment_name,
+        "--experiment-path",
+        args.experiment_path,
+        "--num-envs",
+        args.num_envs,
+        "--batch-size",
+        args.batch_size,
+    ]
+
+    if args.scenes_file:
+        cmd += ["--scenes-file", args.scenes_file]
+    if args.use_wandb:
+        cmd += ["--use-wandb"]
+    if args.use_slurm:
+        cmd += ["--use-slurm"]
+        if not args.skip_slurm_autoresume_after_arg:
+            cmd += ["--slurm-autoresume-after", args.slurm_autoresume_after]
+    if args.checkpoint:
+        cmd += ["--checkpoint", args.checkpoint]
+    if args.overrides:
+        cmd += ["--overrides", *args.overrides]
+
+    return quote_cmd(cmd)
 
 
 def sync_code_to_cluster(user, exp_folder, local_repo):
@@ -219,8 +341,12 @@ def build_job_command(args, exp_folder, python_path):
         f"--experiment-path={args.experiment_path} "
         f"--num-envs={args.num_envs} "
         f"--batch-size={args.batch_size} "
-        f"--use-slurm "
     )
+
+    if args.use_slurm:
+        job_cmd += "--use-slurm "
+        if not args.skip_slurm_autoresume_after_arg:
+            job_cmd += f"--slurm-autoresume-after={args.slurm_autoresume_after} "
 
     if args.scenes_file:
         job_cmd += f"--scenes-file={args.scenes_file} "
@@ -232,6 +358,92 @@ def build_job_command(args, exp_folder, python_path):
         job_cmd += f"--overrides {' '.join(args.overrides)} "
 
     return job_cmd
+
+
+def generate_euler_slurm_script(args):
+    """Generate an ETH Euler Apptainer batch script."""
+    repo_dir = args.cluster_repo or f"{EULER_HOME_BASE}/{args.user}/ProtoMotions"
+    output_dir = args.output_dir or f"{EULER_SCRATCH_BASE}/{args.user}/g1_results"
+    container_image = (
+        args.container_image
+        or CONTAINER_IMAGES.get(args.simulator)
+        or f"{EULER_SCRATCH_BASE}/{args.user}/isaaclab_euler.sif"
+    )
+    log_file = f"{output_dir}/{args.experiment_name}_%A_%a.log"
+    gpu_line = (
+        f"#SBATCH --gpus={args.gpu_type}:{args.ngpu}"
+        if args.gpu_type
+        else f"#SBATCH --gpus={args.ngpu}"
+    )
+
+    optional_slurm = []
+    if args.account and args.account != DEFAULT_SLURM_ACCOUNT:
+        optional_slurm.append(f"#SBATCH --account={args.account}")
+    if args.partition and args.partition != DEFAULT_SLURM_PARTITION:
+        optional_slurm.append(f"#SBATCH --partition={args.partition}")
+    if args.array_size > 1:
+        optional_slurm.append(f"#SBATCH --array=0-{args.array_size - 1}%1")
+
+    train_cmd = build_train_agent_command(args)
+    python_bin = "/opt/env_isaaclab/bin/python"
+
+    inner_cmd = f"""
+set -euo pipefail
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
+source {shlex.quote(args.container_env)}
+
+export WANDB_DIR=/workspace/ProtoMotions/results/wandb
+export WANDB_CACHE_DIR=/workspace/ProtoMotions/results/wandb_cache
+export WANDB_CONFIG_DIR=/workspace/ProtoMotions/results/wandb_config
+export TMPDIR=/tmp
+export WANDB__EXECUTABLE={python_bin}
+
+mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_CONFIG_DIR" "$TMPDIR"
+cd /workspace/ProtoMotions
+
+which python
+python --version
+python -c 'import sys; print(sys.executable)'
+python -m wandb status || true
+{train_cmd}
+""".strip()
+
+    optional_slurm_block = "\n".join(optional_slurm)
+    if optional_slurm_block:
+        optional_slurm_block += "\n"
+
+    script = f"""#!/bin/bash
+#SBATCH --job-name={args.experiment_name}
+#SBATCH --output={log_file}
+#SBATCH --error={log_file}
+#SBATCH --time={args.slurm_time}
+#SBATCH --nodes={args.nodes}
+#SBATCH --ntasks-per-node={args.ngpu}
+{gpu_line}
+#SBATCH --cpus-per-task={args.cpus_per_task}
+#SBATCH --mem-per-cpu={args.mem_per_cpu}
+{optional_slurm_block}
+set -euo pipefail
+
+echo "Starting job at $(date)"
+
+CONTAINER={shlex.quote(container_image)}
+PROTOMOTIONS_DIR={shlex.quote(repo_dir)}
+OUTPUT_DIR={shlex.quote(output_dir)}
+
+mkdir -p "$OUTPUT_DIR"/wandb "$OUTPUT_DIR"/wandb_cache "$OUTPUT_DIR"/wandb_config "$OUTPUT_DIR"/tmp
+export APPTAINER_BIND="$OUTPUT_DIR/tmp:/tmp"
+
+srun apptainer exec --nv \\
+  --bind "$PROTOMOTIONS_DIR":/workspace/ProtoMotions:rw \\
+  --bind "$OUTPUT_DIR":/workspace/ProtoMotions/results:rw \\
+  --bind /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro \\
+  "$CONTAINER" \\
+  bash -lc {shlex.quote(inner_cmd)}
+
+echo "Finished job at $(date)"
+"""
+    return script, log_file, output_dir
 
 
 def generate_slurm_script(args, exp_folder, job_cmd, container_image):
@@ -272,9 +484,60 @@ def main():
     # Setup paths
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     local_repo = Path(__file__).parent.parent
-    exp_folder = os.path.join(CLUSTER_BASE_DIR, args.user, f"exp-{timestamp}")
 
     print(f"Local repository: {local_repo}")
+
+    if args.cluster == "euler":
+        slurm_script, log_file, output_dir = generate_euler_slurm_script(args)
+
+        print("\n" + "=" * 60)
+        print("EULER SLURM SCRIPT:")
+        print("=" * 60)
+        print(slurm_script)
+
+        if args.dry_run:
+            return
+
+        local_script = Path(f"tmp/slurm_{timestamp}.sh")
+        local_script.parent.mkdir(exist_ok=True)
+        local_script.write_text(slurm_script)
+
+        if args.submit_local:
+            submit_cmd = f"mkdir -p {shlex.quote(output_dir)}"
+            subprocess_run(submit_cmd, shell=True)
+            submit_cmd = f"sbatch {shlex.quote(str(local_script))}"
+            print(f"\nSubmitting locally: {submit_cmd}")
+            subprocess_run(submit_cmd, shell=True)
+            print(f"Monitor logs: tail -f {log_file}")
+            return
+
+        login_node = args.cluster_login_node or EULER_LOGIN_NODE
+        remote_script = f"{output_dir}/submit_{timestamp}.sh"
+        subprocess_run(
+            f"ssh {args.user}@{login_node} 'mkdir -p {shlex.quote(output_dir)}'",
+            shell=True,
+        )
+        subprocess_run(
+            f"scp {shlex.quote(str(local_script))} {args.user}@{login_node}:{shlex.quote(remote_script)}",
+            shell=True,
+        )
+        submit_cmd = (
+            f"ssh {args.user}@{login_node} "
+            f"'chmod +x {shlex.quote(remote_script)}; sbatch {shlex.quote(remote_script)}'"
+        )
+        print(f"\nSubmitting: {submit_cmd}")
+        subprocess_run(submit_cmd, shell=True)
+
+        print("\n" + "=" * 60)
+        print("JOB SUBMITTED!")
+        print("=" * 60)
+        print(f"Monitor logs:  ssh {args.user}@{login_node} 'tail -f {log_file}'")
+        print(f"Check status:  ssh {args.user}@{login_node} 'squeue -u {args.user}'")
+        print(f"Cancel job:    ssh {args.user}@{login_node} 'scancel <job_id>'")
+        print("=" * 60)
+        return
+
+    exp_folder = os.path.join(CLUSTER_BASE_DIR, args.user, f"exp-{timestamp}")
     print(f"Remote experiment folder: {exp_folder}")
 
     # Sync code
@@ -285,7 +548,7 @@ def main():
         return
 
     # Get container and python path
-    container_image = CONTAINER_IMAGES.get(args.simulator)
+    container_image = args.container_image or CONTAINER_IMAGES.get(args.simulator)
     python_path = PYTHON_EXECUTABLES.get(args.simulator, "python")
 
     if not container_image:
@@ -301,6 +564,9 @@ def main():
     print("SLURM SCRIPT:")
     print("=" * 60)
     print(slurm_script)
+
+    if args.dry_run:
+        return
 
     # Write and upload script
     local_script = Path(f"tmp/slurm_{timestamp}.sh")
