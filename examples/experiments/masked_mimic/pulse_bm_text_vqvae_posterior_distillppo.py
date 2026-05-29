@@ -35,6 +35,7 @@ from protomotions.agents.distill_ppo.config import (
 from protomotions.agents.ppo.config import (
     AdaptiveLRConfig,
     AdvantageNormalizationConfig,
+    L2C2Config,
     PPOActorConfig,
     PPOModelConfig,
 )
@@ -172,6 +173,14 @@ def agent_config(robot_config, env_config, args):
         training_max_steps=args.training_max_steps,
         gradient_clip_val=50.0,
         clip_critic_loss=True,
+        l2c2=L2C2Config(
+            enabled=True,
+            lambda_l2c2=1.0,
+            obs_pairs={
+                "noisy_reduced_coords_obs": "clean_reduced_coords_obs",
+                "noisy_mimic_reduced_coords_target_poses": "clean_mimic_reduced_coords_target_poses",
+            },
+        ),
         evaluator=base_cfg.evaluator,
         advantage_normalization=AdvantageNormalizationConfig(
             enabled=True,
