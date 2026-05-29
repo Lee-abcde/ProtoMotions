@@ -124,6 +124,15 @@ class DistillPPOAgentConfig(PPOAgentConfig):
         default=None,
         metadata={"help": "Path to a frozen expert checkpoint used for action distillation."},
     )
+    critic_init_checkpoint: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional PPO checkpoint used only to initialize the critic. "
+                "This does not load or run an expert actor."
+            )
+        },
+    )
     action_loss_coef: float = field(
         default=1.0,
         metadata={"help": "Weight applied to the expert action matching loss."},

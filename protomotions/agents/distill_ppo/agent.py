@@ -137,6 +137,46 @@ class DistillPPO(PPO):
         if self.config.normalize_rewards and "running_reward_norm" in state_dict:
             self.running_reward_norm.load_state_dict(state_dict["running_reward_norm"])
 
+    def _load_critic_init_checkpoint(self) -> None:
+        critic_init_checkpoint = getattr(self.config, "critic_init_checkpoint", None)
+        if critic_init_checkpoint is None:
+            return
+
+        checkpoint_path = Path(critic_init_checkpoint)
+        assert checkpoint_path.exists(), (
+            f"Could not find critic init checkpoint at {checkpoint_path}"
+        )
+
+        log.info("Initializing critic from checkpoint: %s", checkpoint_path)
+        checkpoint = torch.load(
+            str(checkpoint_path),
+            map_location=self.fabric.device,
+            weights_only=False,
+        )
+        model_state = checkpoint["model"]
+        critic_state_dict = {
+            key.removeprefix("_critic."): value
+            for key, value in model_state.items()
+            if key.startswith("_critic.")
+        }
+        if not critic_state_dict:
+            raise RuntimeError(
+                "Could not find any '_critic.' parameters in critic init checkpoint "
+                f"{checkpoint_path}."
+            )
+
+        critic_module = (
+            self.critic.module if hasattr(self.critic, "module") else self.critic
+        )
+        missing_keys, unexpected_keys = critic_module.load_state_dict(
+            critic_state_dict, strict=True
+        )
+        if missing_keys or unexpected_keys:
+            raise RuntimeError(
+                "Failed loading critic init checkpoint. "
+                f"Missing keys: {missing_keys}. Unexpected keys: {unexpected_keys}."
+            )
+
     def load_parameters(self, state_dict):
         checkpoint_model_state = state_dict["model"]
         is_native_ppo_checkpoint = any(
@@ -144,6 +184,7 @@ class DistillPPO(PPO):
         )
         if is_native_ppo_checkpoint:
             super().load_parameters(state_dict)
+            self._load_critic_init_checkpoint()
             return
 
         if not getattr(self.config, "reset_training_state_on_distill_load", True):
@@ -159,6 +200,7 @@ class DistillPPO(PPO):
             missing_keys,
             unexpected_keys,
         )
+        self._load_critic_init_checkpoint()
 
     def create_model(self) -> PPOModel:
         model = super().create_model()

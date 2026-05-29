@@ -70,6 +70,15 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
     base_additional_args = getattr(_BASE, "additional_experiment_arguments", None)
     if base_additional_args is not None:
         base_additional_args(parser)
+    parser.add_argument(
+        "--critic-expert-path",
+        type=str,
+        default=None,
+        help=(
+            "Path to an expert PPO checkpoint used only to initialize the "
+            "DistillPPO critic. This does not load or run the expert actor."
+        ),
+    )
 
 
 def _actor_in_keys(model_config):
@@ -169,6 +178,7 @@ def agent_config(robot_config, env_config, args):
             shift_mean=True,
         ),
         expert_model_path=getattr(args, "expert_model_path", None),
+        critic_init_checkpoint=getattr(args, "critic_expert_path", None),
         action_loss_coef=1.0,
         action_loss_schedule=ActionLossScheduleConfig(
             enabled=True,
