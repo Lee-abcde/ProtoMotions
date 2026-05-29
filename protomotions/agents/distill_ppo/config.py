@@ -144,3 +144,13 @@ class DistillPPOAgentConfig(PPOAgentConfig):
         default_factory=ActorLRScheduleConfig,
         metadata={"help": "Schedule for the actor optimizer learning rate."},
     )
+    reset_training_state_on_distill_load: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "When loading a non-PPO distill checkpoint, use it only as an "
+                "actor warm start and keep PPO epoch/optimizer/critic state "
+                "freshly initialized."
+            )
+        },
+    )

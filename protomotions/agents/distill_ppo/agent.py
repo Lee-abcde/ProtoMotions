@@ -127,6 +127,39 @@ class DistillPPO(PPO):
     def _use_deterministic_rollout_actions(self) -> bool:
         return self._get_ppo_loss_coef() <= 0.0
 
+    def _load_base_training_state(self, state_dict):
+        self.current_epoch = state_dict["epoch"]
+        if "step_count" in state_dict:
+            self.step_count = state_dict["step_count"]
+        if "run_start_time" in state_dict:
+            self.fit_start_time = state_dict["run_start_time"]
+        self.best_evaluated_score = state_dict.get("best_evaluated_score", None)
+        if self.config.normalize_rewards and "running_reward_norm" in state_dict:
+            self.running_reward_norm.load_state_dict(state_dict["running_reward_norm"])
+
+    def load_parameters(self, state_dict):
+        checkpoint_model_state = state_dict["model"]
+        is_native_ppo_checkpoint = any(
+            key.startswith("_actor.") for key in checkpoint_model_state.keys()
+        )
+        if is_native_ppo_checkpoint:
+            super().load_parameters(state_dict)
+            return
+
+        if not getattr(self.config, "reset_training_state_on_distill_load", True):
+            self._load_base_training_state(state_dict)
+
+        missing_keys, unexpected_keys = self.actor.mu.load_state_dict(
+            checkpoint_model_state,
+            strict=False,
+        )
+        log.info(
+            "Warm-started DistillPPO actor.mu from distill checkpoint. "
+            "Missing keys: %s. Unexpected keys: %s.",
+            missing_keys,
+            unexpected_keys,
+        )
+
     def create_model(self) -> PPOModel:
         model = super().create_model()
 
