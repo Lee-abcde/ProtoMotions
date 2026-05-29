@@ -56,6 +56,12 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         help="Path to expert model checkpoint for distillation training",
     )
     parser.add_argument(
+        "--vq-latent-dim",
+        type=int,
+        default=VQ_LATENT_DIM,
+        help="Dimension of the VQ latent/codebook embedding.",
+    )
+    parser.add_argument(
         "--vq-prior-history-steps",
         type=int,
         default=0,
@@ -402,6 +408,8 @@ def agent_config(
         max_joint_error_factory,
     )
 
+    vq_latent_dim = int(getattr(args, "vq_latent_dim", VQ_LATENT_DIM))
+
     encoder_config = ModuleContainerConfig(
         in_keys=[
             "noisy_reduced_coords_obs",
@@ -433,7 +441,7 @@ def agent_config(
             MLPWithConcatConfig(
                 in_keys=["encoder_trunk_out"],
                 out_keys=["encoder_latent"],
-                num_out=VQ_LATENT_DIM,
+                num_out=vq_latent_dim,
                 layers=[
                     MLPLayerConfig(units=256, activation="relu"),
                     MLPLayerConfig(units=128, activation="relu"),
@@ -471,7 +479,7 @@ def agent_config(
             MLPWithConcatConfig(
                 in_keys=["prior_trunk_out"],
                 out_keys=["prior_latent"],
-                num_out=VQ_LATENT_DIM,
+                num_out=vq_latent_dim,
                 layers=[
                     MLPLayerConfig(units=256, activation="relu"),
                     MLPLayerConfig(units=128, activation="relu"),
@@ -729,7 +737,7 @@ def agent_config(
         trunk=trunk_config,
         categorical_prior=categorical_prior_config,
         reconstruction=None,
-        latent_dim=VQ_LATENT_DIM,
+        latent_dim=vq_latent_dim,
         num_embeddings=NUM_EMBEDDINGS,
         commitment_cost=0.25,
         codebook_update_mode="gradient",
