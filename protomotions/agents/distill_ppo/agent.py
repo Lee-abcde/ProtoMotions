@@ -28,7 +28,7 @@ from protomotions.agents.ppo.config import PPOAgentConfig
 from protomotions.agents.ppo.model import PPOActor, PPOModel
 from protomotions.agents.utils.normalization import RunningMeanStd
 from protomotions.agents.utils.training import bounds_loss, handle_model_grad_clipping
-from protomotions.utils.hydra_replacement import get_class
+from protomotions.utils.hydra_replacement import get_class, instantiate
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +126,68 @@ class DistillPPO(PPO):
 
     def _use_deterministic_rollout_actions(self) -> bool:
         return self._get_ppo_loss_coef() <= 0.0
+
+    def _trains_action_residual_only(self) -> bool:
+        mu_model_config = getattr(self.config.model.actor, "mu_model", None)
+        return bool(getattr(mu_model_config, "train_action_residual_only", False))
+
+    @staticmethod
+    def _safe_num_parameters(parameters) -> int:
+        total = 0
+        for param in parameters:
+            try:
+                total += param.numel()
+            except ValueError:
+                # Lazy modules may still be unmaterialized before the first forward.
+                continue
+        return total
+
+    def create_optimizers(self, model: PPOModel):
+        if not self._trains_action_residual_only():
+            return super().create_optimizers(model)
+
+        action_residual = getattr(model._actor.mu, "_action_residual", None)
+        if action_residual is None:
+            raise ValueError(
+                "train_action_residual_only=True requires "
+                "actor.mu_model.action_residual to be configured."
+            )
+
+        for param in model._actor.parameters():
+            param.requires_grad = False
+        for param in action_residual.parameters():
+            param.requires_grad = True
+
+        actor_params = [
+            param for param in action_residual.parameters() if param.requires_grad
+        ]
+        if len(actor_params) == 0:
+            raise RuntimeError("No trainable action residual parameters found.")
+
+        actor_optimizer = instantiate(
+            self.config.model.actor_optimizer,
+            params=actor_params,
+        )
+        self.actor, self.actor_optimizer = self.fabric.setup(
+            model._actor, actor_optimizer
+        )
+
+        critic_optimizer = instantiate(
+            self.config.model.critic_optimizer,
+            params=list(model._critic.parameters()),
+        )
+        self.critic, self.critic_optimizer = self.fabric.setup(
+            model._critic, critic_optimizer
+        )
+
+        if self.config.adaptive_lr.enabled:
+            self.actor_lr = self.config.model.actor_optimizer.lr
+            self.critic_lr = self.config.model.critic_optimizer.lr
+
+        log.info(
+            "Training DistillPPO action residual only with %d actor parameters.",
+            self._safe_num_parameters(actor_params),
+        )
 
     def _load_base_training_state(self, state_dict):
         self.current_epoch = state_dict["epoch"]

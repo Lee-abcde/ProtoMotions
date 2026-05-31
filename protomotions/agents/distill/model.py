@@ -708,6 +708,18 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             PriorClass = get_class(self.config.prior._target_)
             self._prior: ModuleContainer = PriorClass(config=self.config.prior)
             self._categorical_prior = None
+        if self.config.action_residual is not None:
+            ActionResidualClass = get_class(self.config.action_residual._target_)
+            self._action_residual: Optional[ModuleContainer] = ActionResidualClass(
+                config=self.config.action_residual
+            )
+            if len(self._action_residual.out_keys) != 1:
+                raise ValueError(
+                    "Action residual head must produce exactly one output."
+                )
+        else:
+            self._action_residual = None
+        self._action_residual_output_zero_initialized = False
         if self.config.reconstruction is not None:
             ReconstructionClass = get_class(self.config.reconstruction._target_)
             self._reconstruction: Optional[ModuleContainer] = ReconstructionClass(
@@ -767,16 +779,47 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             if self._reconstruction is not None
             else []
         )
+        action_residual_input_keys = self._action_residual_external_in_keys()
         self.in_keys = list(
             set(
                 prior_input_keys
                 + self._encoder.in_keys
                 + trunk_in_keys_without_latents
+                + action_residual_input_keys
                 + self._text_input_keys()
                 + reconstruction_target_keys
             )
         )
         self.out_keys = ["action", "prior_action", "privileged_action"]
+
+    def _action_residual_external_in_keys(self) -> list:
+        if self._action_residual is None:
+            return []
+
+        base_action_key = getattr(
+            self.config, "action_residual_base_action_key", "decoder_action"
+        )
+        return [
+            key for key in self._action_residual.in_keys if key != base_action_key
+        ]
+
+    def _zero_init_action_residual_output_if_needed(self) -> bool:
+        if (
+            self._action_residual is None
+            or self._action_residual_output_zero_initialized
+            or not bool(getattr(self.config, "action_residual_zero_init", True))
+        ):
+            return False
+
+        for module in reversed(list(self._action_residual.modules())):
+            if isinstance(module, nn.Linear):
+                nn.init.zeros_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+                self._action_residual_output_zero_initialized = True
+                return True
+
+        raise RuntimeError("Could not find a linear output layer in action_residual.")
 
     def _quantize(self, latent: torch.Tensor, update_codebook: bool):
         if self.config.codebook_update_mode == "gradient":
@@ -866,6 +909,49 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         # expects vq_prior_latent to exist; the trunk consumes vae_latent.
         reference = tensordict[self._categorical_prior.in_keys[0]]
         return reference.new_zeros(*reference.shape[:-1], self.config.latent_dim)
+
+    def _apply_action_residual(
+        self,
+        tensordict: TensorDict,
+        base_action: torch.Tensor,
+        prefix: str,
+    ) -> torch.Tensor:
+        if self._action_residual is None:
+            return base_action
+
+        base_action_key = getattr(
+            self.config, "action_residual_base_action_key", "decoder_action"
+        )
+        tensordict[base_action_key] = base_action
+        tensordict = self._action_residual(tensordict)
+        residual_key = self._action_residual.out_keys[0]
+        residual = tensordict[residual_key]
+        if self._zero_init_action_residual_output_if_needed():
+            residual = torch.zeros_like(residual)
+            tensordict[residual_key] = residual
+        scaled_residual = residual * float(
+            getattr(self.config, "action_residual_scale", 1.0)
+        )
+        action = base_action + scaled_residual
+        if bool(getattr(self.config, "action_residual_clamp_output", True)):
+            action = action.clamp(-1.0, 1.0)
+
+        tensordict[f"{prefix}_base_action_norm"] = base_action.detach().norm(dim=-1)
+        tensordict[f"{prefix}_action_residual_norm"] = scaled_residual.norm(dim=-1)
+        tensordict[f"{prefix}_action_residual_ratio"] = (
+            scaled_residual.norm(dim=-1)
+            / (base_action.detach().norm(dim=-1) + 1e-8)
+        )
+        return action
+
+    def _decode_action(
+        self,
+        tensordict: TensorDict,
+        prefix: str,
+    ) -> torch.Tensor:
+        tensordict = self._trunk(tensordict)
+        base_action = tensordict[self._trunk.out_keys[0]]
+        return self._apply_action_residual(tensordict, base_action, prefix)
 
     def _normalize_reconstruction_target(
         self,
@@ -1044,12 +1130,10 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             )
 
         tensordict["vae_latent"] = actor_latent
-        tensordict = self._trunk(tensordict)
-        action = tensordict[self._trunk.out_keys[0]]
+        action = self._decode_action(tensordict, "distill")
 
         tensordict["vae_latent"] = privileged_latent
-        tensordict = self._trunk(tensordict)
-        privileged_action = tensordict[self._trunk.out_keys[0]]
+        privileged_action = self._decode_action(tensordict, "distill_privileged")
 
         prior_alignment_loss = F.mse_loss(
             actor_latent, privileged_latent.detach(), reduction="none"
@@ -1131,8 +1215,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             actor_latent, tensordict
         )
         tensordict["vae_latent"] = actor_latent
-        tensordict = self._trunk(tensordict)
-        action = tensordict[self._trunk.out_keys[0]]
+        action = self._decode_action(tensordict, "distill")
         tensordict["action"] = action
         tensordict["prior_action"] = action
         tensordict["distill_actor_latent"] = actor_latent
@@ -1159,6 +1242,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
                     else self._prior.in_keys
                 )
                 + trunk_in_keys_without_latents
+                + self._action_residual_external_in_keys()
                 + self._text_input_keys()
             )
         )
@@ -1169,6 +1253,9 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         ]
         text_keys = self._text_input_keys()
         for key in text_keys:
+            if key not in decoder_input_keys:
+                decoder_input_keys.append(key)
+        for key in self._action_residual_external_in_keys():
             if key not in decoder_input_keys:
                 decoder_input_keys.append(key)
 
@@ -1193,8 +1280,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         decoder_inputs = self._build_soft_code_decoder_inputs(tensordict)
 
         def decode_actions(expanded_decoder_inputs: TensorDict) -> torch.Tensor:
-            decoded_td = self._trunk(expanded_decoder_inputs)
-            return decoded_td[self._trunk.out_keys[0]]
+            return self._decode_action(expanded_decoder_inputs, "distill")
 
         def transform_code_embeddings(
             expanded_code_embeddings: torch.Tensor,
@@ -1392,4 +1478,23 @@ class VQDistillModel(TextResidualMixin, BaseModel):
                 tensordict["vq_prior_entropy"].mean().detach()
             )
         self._add_text_residual_log_dict(tensordict, log_dict)
+        self._add_action_residual_log_dict(tensordict, log_dict)
         return total, log_dict
+
+    def _add_action_residual_log_dict(
+        self, tensordict: TensorDict, log_dict: Dict[str, torch.Tensor]
+    ) -> None:
+        if "distill_action_residual_norm" in tensordict.keys():
+            log_dict["distill/action_residual_norm"] = (
+                tensordict["distill_action_residual_norm"].mean().detach()
+            )
+            log_dict["distill/action_residual_ratio"] = (
+                tensordict["distill_action_residual_ratio"].mean().detach()
+            )
+        if "distill_privileged_action_residual_norm" in tensordict.keys():
+            log_dict["distill/privileged_action_residual_norm"] = (
+                tensordict["distill_privileged_action_residual_norm"].mean().detach()
+            )
+            log_dict["distill/privileged_action_residual_ratio"] = (
+                tensordict["distill_privileged_action_residual_ratio"].mean().detach()
+            )

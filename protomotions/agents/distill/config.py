@@ -231,6 +231,15 @@ class VQDistillModelConfig(BaseModelConfig):
         default_factory=ModuleContainerConfig,
         metadata={"help": "Optional text-conditioned categorical prior over VQ codebook entries."},
     )
+    action_residual: Optional[ModuleContainerConfig] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional residual action head. The model adds "
+                "action_residual_scale * action_residual(...) to the decoder action."
+            )
+        },
+    )
     reconstruction: Optional[ModuleContainerConfig] = field(
         default=None,
         metadata={"help": "Optional decoder from posterior VQ code to a reconstruction target."},
@@ -265,7 +274,12 @@ class VQDistillModelConfig(BaseModelConfig):
         "categorical_prior_transformer_obs_seq_mask"
     )
     train_categorical_prior_only: bool = False
+    train_action_residual_only: bool = False
     load_categorical_prior_parameters: bool = True
+    action_residual_scale: float = 0.02
+    action_residual_base_action_key: str = "decoder_action"
+    action_residual_clamp_output: bool = True
+    action_residual_zero_init: bool = True
     use_text_conditioning: bool = False
     text_obs_key: Optional[str] = None
     text_obs_dim: int = 0
