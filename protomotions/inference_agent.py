@@ -236,6 +236,7 @@ def _set_posterior_anchor_rotation_mode(env_config, mode: str) -> None:
         if key.endswith("mimic_reduced_coords_target_poses"):
             dynamic_vars["current_ref_anchor_rot"] = EnvContext.mimic.ref_anchor_rot
             static_params["anchor_rotation_mode"] = mode
+            static_params["ref_delta_prob"] = None
             patched.append(key)
 
     if patched:

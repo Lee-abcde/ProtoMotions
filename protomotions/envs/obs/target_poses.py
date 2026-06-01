@@ -372,6 +372,7 @@ def build_reduced_coords_target_poses(
     current_ref_anchor_rot: Tensor = None,
     zero_xy_offset: bool = False,
     anchor_rotation_mode: str = "current_to_ref",
+    ref_delta_prob: float = None,
 ):
     """Build target pose observations in reduced coordinates.
 
@@ -400,6 +401,8 @@ def build_reduced_coords_target_poses(
         anchor_rotation_mode: "current_to_ref" tracks the future reference anchor
             rotation from the current simulated anchor rotation. "ref_delta" uses
             the reference motion's own current-to-future anchor rotation delta.
+        ref_delta_prob: Optional probability of replacing each env/step anchor
+            rotation target with ref_delta during training-style stochastic mixing.
 
     Returns:
         Target pose observations [envs, features]
@@ -447,32 +450,61 @@ def build_reduced_coords_target_poses(
         .view(-1, 4)
     )
 
-    if anchor_rotation_mode == "current_to_ref":
-        anchor_rotation_origin = current_state_anchor_rot_expanded
-    elif anchor_rotation_mode == "ref_delta":
-        if current_ref_anchor_rot is None:
-            raise ValueError(
-                "current_ref_anchor_rot is required when "
-                "anchor_rotation_mode='ref_delta'."
-            )
-        anchor_rotation_origin = (
-            current_ref_anchor_rot.unsqueeze(1)
-            .expand(num_envs, future_steps, 4)
-            .contiguous()
-            .view(-1, 4)
-        )
-    else:
+    if anchor_rotation_mode not in ("current_to_ref", "ref_delta"):
         raise ValueError(
             "anchor_rotation_mode must be one of "
             "['current_to_ref', 'ref_delta'], got "
             f"{anchor_rotation_mode!r}."
         )
 
+    use_ref_delta = anchor_rotation_mode == "ref_delta"
+    if ref_delta_prob is not None:
+        if ref_delta_prob < 0.0 or ref_delta_prob > 1.0:
+            raise ValueError(
+                "ref_delta_prob must be in [0, 1], got "
+                f"{ref_delta_prob}."
+            )
+        use_ref_delta = ref_delta_prob > 0.0
+
     rel_target_anchor_rot = rotations.quat_mul(
-        rotations.quat_conjugate(anchor_rotation_origin, w_last),
+        rotations.quat_conjugate(current_state_anchor_rot_expanded, w_last),
         ref_state_anchor_rot,
         w_last,
     )
+
+    if use_ref_delta:
+        if current_ref_anchor_rot is None:
+            raise ValueError(
+                "current_ref_anchor_rot is required when "
+                "using ref_delta anchor rotation targets."
+            )
+        ref_anchor_rotation_origin = (
+            current_ref_anchor_rot.unsqueeze(1)
+            .expand(num_envs, future_steps, 4)
+            .contiguous()
+            .view(-1, 4)
+        )
+        ref_delta_anchor_rot = rotations.quat_mul(
+            rotations.quat_conjugate(ref_anchor_rotation_origin, w_last),
+            ref_state_anchor_rot,
+            w_last,
+        )
+        if ref_delta_prob is None:
+            rel_target_anchor_rot = ref_delta_anchor_rot
+        else:
+            ref_delta_mask = (
+                torch.rand(
+                    num_envs * future_steps,
+                    1,
+                    device=ref_delta_anchor_rot.device,
+                )
+                < ref_delta_prob
+            )
+            rel_target_anchor_rot = torch.where(
+                ref_delta_mask,
+                ref_delta_anchor_rot,
+                rel_target_anchor_rot,
+            )
     target_anchor_rot_obs = rotations.quat_to_tan_norm(rel_target_anchor_rot, w_last)
 
     # Build observation components

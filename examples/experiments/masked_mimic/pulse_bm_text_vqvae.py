@@ -102,10 +102,18 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         default="current_to_ref",
         choices=["current_to_ref", "ref_delta"],
         help=(
-            "Anchor rotation target encoding for reduced target poses. "
-            "Use current_to_ref for tracker/posterior training, and ref_delta "
-            "for prior fine-tuning where the posterior/expert should provide "
-            "reference-local rotation deltas instead of tracking GT global yaw."
+            "Anchor rotation target encoding for non-expert reduced target "
+            "poses. Expert observations keep their checkpoint encoding."
+        ),
+    )
+    parser.add_argument(
+        "--reduced-target-ref-delta-prob",
+        type=float,
+        default=None,
+        help=(
+            "Optional fixed probability of using ref_delta anchor rotation "
+            "targets in non-expert reduced target poses. Expert observations "
+            "keep their checkpoint encoding."
         ),
     )
     parser.add_argument(
@@ -257,7 +265,9 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     reduced_target_anchor_rotation_mode = getattr(
         args, "reduced_target_anchor_rotation_mode", "current_to_ref"
     )
-
+    reduced_target_ref_delta_prob = getattr(
+        args, "reduced_target_ref_delta_prob", None
+    )
     control_components = {
         "mimic": MimicControlConfig(
             bootstrap_on_episode_end=True,
@@ -277,6 +287,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 include_dof_vel=True,
                 include_xy_offset=False,
                 anchor_rotation_mode=reduced_target_anchor_rotation_mode,
+                ref_delta_prob=reduced_target_ref_delta_prob,
             )
         ),
         "clean_reduced_coords_obs": reduced_coords_obs_factory(
@@ -290,6 +301,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 include_dof_vel=True,
                 include_xy_offset=False,
                 anchor_rotation_mode=reduced_target_anchor_rotation_mode,
+                ref_delta_prob=reduced_target_ref_delta_prob,
             )
         ),
         "max_coords_obs": max_coords_obs_factory(
@@ -338,18 +350,6 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             expert_configs["agent"],
             existing_obs_keys=list(observation_components.keys()),
         )
-        for expert_target_key in (
-            "expert_noisy_mimic_reduced_coords_target_poses",
-            "expert_clean_mimic_reduced_coords_target_poses",
-        ):
-            if expert_target_key in expert_obs_components:
-                expert_component = expert_obs_components[expert_target_key]
-                expert_component.dynamic_vars["current_ref_anchor_rot"] = (
-                    EnvContext.mimic.ref_anchor_rot
-                )
-                expert_component.static_params["anchor_rotation_mode"] = (
-                    reduced_target_anchor_rotation_mode
-                )
         observation_components.update(expert_obs_components)
 
     reward_components = {
@@ -937,5 +937,6 @@ def apply_inference_overrides(
             anchor_rotation_mode=getattr(
                 args, "reduced_target_anchor_rotation_mode", "current_to_ref"
             ),
+            ref_delta_prob=None,
         )
     )

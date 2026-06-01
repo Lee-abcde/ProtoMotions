@@ -370,6 +370,7 @@ def mimic_target_poses_reduced_coords_factory(
     include_anchor_ang_vel: bool = False,
     zero_xy_offset: bool = False,
     anchor_rotation_mode: str = "current_to_ref",
+    ref_delta_prob: float = None,
 ) -> MdpComponent:
     """Factory for mimic target poses (reduced-coords format).
 
@@ -384,6 +385,8 @@ def mimic_target_poses_reduced_coords_factory(
         anchor_rotation_mode: "current_to_ref" uses the current simulated anchor
             rotation as the origin. "ref_delta" uses the reference motion's
             current-to-future anchor rotation delta.
+        ref_delta_prob: Optional probability of using ref_delta target rotation
+            for each env/step instead of the anchor_rotation_mode baseline.
 
     Returns:
         MdpComponent configured for reduced-coords target poses.
@@ -414,6 +417,7 @@ def mimic_target_poses_reduced_coords_factory(
             "include_anchor_ang_vel": include_anchor_ang_vel,
             "zero_xy_offset": zero_xy_offset,
             "anchor_rotation_mode": anchor_rotation_mode,
+            "ref_delta_prob": ref_delta_prob,
             "w_last": True,
         },
     )
