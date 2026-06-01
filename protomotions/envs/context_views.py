@@ -295,6 +295,7 @@ class MimicContext:
 
     # Current-frame reference anchor position (precomputed)
     ref_anchor_pos: Tensor = FieldPath()
+    ref_anchor_rot: Tensor = FieldPath()
 
     # Future anchor properties (precomputed)
     future_anchor_pos: Tensor = FieldPath()
@@ -365,8 +366,9 @@ class MimicContext:
         self.future_root_vel = future_vel[:, :, 0, :]
         self.future_root_ang_vel = future_ang_vel[:, :, 0, :]
 
-        # Precompute current-frame reference anchor position
+        # Precompute current-frame reference anchor pose
         self.ref_anchor_pos = ref_state.rigid_body_pos[:, anchor_idx, :]
+        self.ref_anchor_rot = ref_state.rigid_body_rot[:, anchor_idx, :]
 
         # Precompute future anchor properties
         self.future_anchor_pos = future_pos[:, :, anchor_idx, :]

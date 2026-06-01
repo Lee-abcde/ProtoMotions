@@ -369,6 +369,7 @@ def mimic_target_poses_reduced_coords_factory(
     include_anchor_vel: bool = False,
     include_anchor_ang_vel: bool = False,
     zero_xy_offset: bool = False,
+    anchor_rotation_mode: str = "current_to_ref",
 ) -> MdpComponent:
     """Factory for mimic target poses (reduced-coords format).
 
@@ -380,6 +381,9 @@ def mimic_target_poses_reduced_coords_factory(
         include_anchor_vel: If True, include anchor linear velocity.
         include_anchor_ang_vel: If True, include anchor angular velocity.
         zero_xy_offset: If True, emit zeros for XY offset (for inference).
+        anchor_rotation_mode: "current_to_ref" uses the current simulated anchor
+            rotation as the origin. "ref_delta" uses the reference motion's
+            current-to-future anchor rotation delta.
 
     Returns:
         MdpComponent configured for reduced-coords target poses.
@@ -400,6 +404,7 @@ def mimic_target_poses_reduced_coords_factory(
             "mimic_ref_anchor_vel": EnvContext.mimic.future_anchor_vel,
             "mimic_ref_anchor_ang_vel": EnvContext.mimic.future_anchor_ang_vel,
             "current_ref_anchor_pos": EnvContext.mimic.ref_anchor_pos,
+            "current_ref_anchor_rot": EnvContext.mimic.ref_anchor_rot,
         },
         static_params={
             "include_dof_vel": include_dof_vel,
@@ -408,6 +413,7 @@ def mimic_target_poses_reduced_coords_factory(
             "include_anchor_vel": include_anchor_vel,
             "include_anchor_ang_vel": include_anchor_ang_vel,
             "zero_xy_offset": zero_xy_offset,
+            "anchor_rotation_mode": anchor_rotation_mode,
             "w_last": True,
         },
     )

@@ -369,7 +369,9 @@ def build_reduced_coords_target_poses(
     include_anchor_ang_vel: bool = False,
     future_steps: Union[int, List[int]] = None,
     current_ref_anchor_pos: Tensor = None,
+    current_ref_anchor_rot: Tensor = None,
     zero_xy_offset: bool = False,
+    anchor_rotation_mode: str = "current_to_ref",
 ):
     """Build target pose observations in reduced coordinates.
 
@@ -392,7 +394,12 @@ def build_reduced_coords_target_poses(
             list for specific step indices (e.g., [1, 3, 5]). None = use all.
         current_ref_anchor_pos: Current-frame reference anchor position [envs, 3].
             Used with include_xy_offset to compute drift from current reference.
+        current_ref_anchor_rot: Current-frame reference anchor rotation [envs, 4].
+            Required when anchor_rotation_mode is "ref_delta".
         zero_xy_offset: If True, emit zeros for the XY offset (for inference).
+        anchor_rotation_mode: "current_to_ref" tracks the future reference anchor
+            rotation from the current simulated anchor rotation. "ref_delta" uses
+            the reference motion's own current-to-future anchor rotation delta.
 
     Returns:
         Target pose observations [envs, features]
@@ -440,9 +447,29 @@ def build_reduced_coords_target_poses(
         .view(-1, 4)
     )
 
-    # Target root rot relative to current root rot
+    if anchor_rotation_mode == "current_to_ref":
+        anchor_rotation_origin = current_state_anchor_rot_expanded
+    elif anchor_rotation_mode == "ref_delta":
+        if current_ref_anchor_rot is None:
+            raise ValueError(
+                "current_ref_anchor_rot is required when "
+                "anchor_rotation_mode='ref_delta'."
+            )
+        anchor_rotation_origin = (
+            current_ref_anchor_rot.unsqueeze(1)
+            .expand(num_envs, future_steps, 4)
+            .contiguous()
+            .view(-1, 4)
+        )
+    else:
+        raise ValueError(
+            "anchor_rotation_mode must be one of "
+            "['current_to_ref', 'ref_delta'], got "
+            f"{anchor_rotation_mode!r}."
+        )
+
     rel_target_anchor_rot = rotations.quat_mul(
-        rotations.quat_conjugate(current_state_anchor_rot_expanded, w_last),
+        rotations.quat_conjugate(anchor_rotation_origin, w_last),
         ref_state_anchor_rot,
         w_last,
     )
