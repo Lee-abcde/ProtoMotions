@@ -172,6 +172,18 @@ def create_parser():
         default=1,
         help="Repeat full evaluation this many times and report per-run plus averaged metrics.",
     )
+    parser.add_argument(
+        "--posterior-anchor-rotation-mode",
+        type=str,
+        default=None,
+        choices=["current_to_ref", "ref_delta"],
+        help=(
+            "Override non-expert reduced target pose anchor rotation encoding "
+            "at inference. Use ref_delta only for posterior distribution-shift "
+            "checks; checkpoints trained with current_to_ref should normally "
+            "use current_to_ref."
+        ),
+    )
 
     return parser
 
@@ -201,6 +213,43 @@ from dataclasses import asdict  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
 
 log = logging.getLogger(__name__)
+
+
+def _set_posterior_anchor_rotation_mode(env_config, mode: str) -> None:
+    from protomotions.envs.context_views import EnvContext
+
+    if mode not in ("current_to_ref", "ref_delta"):
+        raise ValueError(
+            "reduced target anchor rotation mode must be one of "
+            f"['current_to_ref', 'ref_delta'], got {mode!r}."
+        )
+
+    observation_components = getattr(env_config, "observation_components", {}) or {}
+    patched = []
+    for key, component in observation_components.items():
+        static_params = getattr(component, "static_params", None)
+        dynamic_vars = getattr(component, "dynamic_vars", None)
+        if static_params is None or dynamic_vars is None:
+            continue
+        if key.startswith("expert_"):
+            continue
+        if key.endswith("mimic_reduced_coords_target_poses"):
+            dynamic_vars["current_ref_anchor_rot"] = EnvContext.mimic.ref_anchor_rot
+            static_params["anchor_rotation_mode"] = mode
+            patched.append(key)
+
+    if patched:
+        log.info(
+            "CLI override: posterior anchor rotation mode = %s for %s",
+            mode,
+            patched,
+        )
+    else:
+        log.warning(
+            "Requested posterior anchor rotation mode %r, but no non-expert "
+            "reduced mimic target pose observation components were found.",
+            mode,
+        )
 
 
 def _print_evaluation_results(
@@ -356,6 +405,11 @@ def main():
             terrain_config,
             motion_lib_config,
             scene_lib_config,
+        )
+
+    if args.posterior_anchor_rotation_mode is not None:
+        _set_posterior_anchor_rotation_mode(
+            env_config, args.posterior_anchor_rotation_mode
         )
 
     # Create fabric config for inference (simplified)
