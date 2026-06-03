@@ -49,6 +49,7 @@ from protomotions.agents.distill.ae_config import (
 from protomotions.agents.distill.multi_harmonic_pae_config import (
     DistillMultiHarmonicPAEModelConfig,
 )
+from protomotions.agents.distill.langwbc_config import LangWBCModelConfig
 
 
 @dataclass
@@ -306,6 +307,7 @@ class DistillAgentConfig(BaseAgentConfig):
         DistillFlowPolicyModelConfig,
         DistillAEModelConfig,
         DistillMultiHarmonicPAEModelConfig,
+        LangWBCModelConfig,
     ] = field(
         default_factory=DistillModelConfig,
         metadata={"help": "Model configuration (VAE or FeedForward variant)."}
