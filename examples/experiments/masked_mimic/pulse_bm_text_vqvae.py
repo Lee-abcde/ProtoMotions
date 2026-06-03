@@ -826,7 +826,7 @@ def agent_config(
             use_privileged_success_for_motion_weights=True,
             evaluation_components={
                 "anchor_ori": anchor_ori_metric_factory(),
-                "relative_body_pos": relative_body_pos_metric_factory(),
+                "relative_body_pos": relative_body_pos_metric_factory(threshold=0.425),
                 "anchor_height_error": anchor_height_error_metric_factory(
                     threshold=0.25
                 ),
