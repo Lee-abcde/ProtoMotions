@@ -30,12 +30,14 @@ Functions:
 
 import torch
 from torch import nn
+from typing import List, Tuple
 from tensordict import TensorDict
 from tensordict.nn import TensorDictModuleBase
 from protomotions.agents.common.common import NormObsBase, apply_module_operations
 from protomotions.agents.utils.training import get_activation_func
 from protomotions.agents.common.config import (
     MLPWithConcatConfig,
+    MoEMLPWithConcatConfig,
 )
 
 
@@ -135,6 +137,111 @@ class MLPWithConcat(TensorDictModuleBase):
         if self.config.normalize_obs and result["norm_obs"] is not None:
             norm_obs = result["norm_obs"]
             # Only store if batch dimension matches (reshape operations may change it)
+            if norm_obs.shape[0] == tensordict.batch_size[0]:
+                tensordict[f"norm_{self.config.in_keys[0]}"] = norm_obs
+
+        return tensordict
+
+
+class MoEMLPWithConcat(TensorDictModuleBase):
+    """Top-k mixture-of-experts MLP operating on TensorDict inputs."""
+
+    config: MoEMLPWithConcatConfig
+
+    def __init__(self, config: MoEMLPWithConcatConfig):
+        TensorDictModuleBase.__init__(self)
+        self.config = config
+
+        assert config.in_keys, "MoE MLP requires input keys."
+        assert config.out_keys, "MoE MLP requires an output key."
+        assert len(config.out_keys) == 1, "MoE MLP requires exactly one output key."
+
+        self.norm = NormObsBase(config)
+        self.experts = nn.ModuleList(
+            [build_mlp(config) for _ in range(config.num_experts)]
+        )
+        self.router = nn.LazyLinear(config.num_experts)
+        self.output_activation = None
+        if self.config.output_activation is not None:
+            self.output_activation = get_activation_func(self.config.output_activation)
+
+        self.in_keys = list(dict.fromkeys(config.in_keys + config.gate_in_keys))
+        self.out_keys = [
+            config.out_keys[0],
+            config.balance_loss_key,
+            config.gate_probs_key,
+            config.topk_indices_key,
+            config.expert_load_key,
+        ]
+
+    def _concat_inputs(self, tensordict: TensorDict, keys: List[str]) -> torch.Tensor:
+        return torch.cat([tensordict[key] for key in keys], dim=-1)
+
+    def _load_balance_loss(
+        self,
+        gate_probs: torch.Tensor,
+        topk_indices: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        num_experts = gate_probs.shape[-1]
+        reduction_dims = tuple(range(gate_probs.ndim - 1))
+        importance = gate_probs.mean(dim=reduction_dims)
+        selected = torch.nn.functional.one_hot(
+            topk_indices,
+            num_classes=num_experts,
+        ).to(dtype=gate_probs.dtype)
+        load = selected.mean(dim=tuple(range(selected.ndim - 1)))
+        target = torch.full_like(load, 1.0 / num_experts)
+        loss = (importance - target).pow(2).mean() + (load - target).pow(2).mean()
+        return loss, load
+
+    def forward(self, tensordict: TensorDict) -> TensorDict:
+        expert_input = self._concat_inputs(tensordict, self.config.in_keys)
+        result = apply_module_operations(
+            expert_input,
+            self.config.module_operations,
+            normalizer=self.norm,
+            forward_model=None,
+        )
+        expert_input = result["output"]
+
+        gate_keys = self.config.gate_in_keys or self.config.in_keys
+        gate_input = self._concat_inputs(tensordict, gate_keys)
+        gate_logits = self.router(gate_input)
+        gate_probs = torch.softmax(gate_logits, dim=-1)
+        topk = torch.topk(gate_probs, k=self.config.top_k, dim=-1)
+        topk_weights = topk.values / topk.values.sum(dim=-1, keepdim=True).clamp_min(
+            1e-8
+        )
+        topk_indices = topk.indices
+
+        expert_outputs = torch.stack(
+            [expert(expert_input) for expert in self.experts],
+            dim=-2,
+        )
+        gather_indices = topk_indices.unsqueeze(-1).expand(
+            *topk_indices.shape,
+            expert_outputs.shape[-1],
+        )
+        selected_outputs = torch.gather(expert_outputs, dim=-2, index=gather_indices)
+        outs = (selected_outputs * topk_weights.unsqueeze(-1)).sum(dim=-2)
+
+        if self.output_activation is not None:
+            outs = self.output_activation(outs)
+
+        balance_loss, expert_load = self._load_balance_loss(gate_probs, topk_indices)
+
+        tensordict[self.config.out_keys[0]] = outs
+        tensordict[self.config.balance_loss_key] = balance_loss.expand(
+            tensordict.batch_size
+        )
+        tensordict[self.config.gate_probs_key] = gate_probs
+        tensordict[self.config.topk_indices_key] = topk_indices
+        expert_load_shape = (1,) * len(tensordict.batch_size) + (expert_load.shape[-1],)
+        tensordict[self.config.expert_load_key] = expert_load.reshape(
+            expert_load_shape
+        ).expand(*tensordict.batch_size, -1)
+        if self.config.normalize_obs and result["norm_obs"] is not None:
+            norm_obs = result["norm_obs"]
             if norm_obs.shape[0] == tensordict.batch_size[0]:
                 tensordict[f"norm_{self.config.in_keys[0]}"] = norm_obs
 

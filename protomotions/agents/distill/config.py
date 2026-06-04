@@ -247,6 +247,7 @@ class VQDistillModelConfig(BaseModelConfig):
     use_categorical_prior: bool = False
     categorical_prior_loss_weight: float = 1.0
     categorical_prior_temperature: float = 1.0
+    categorical_prior_moe_balance_weight: float = 0.0
     categorical_prior_history_steps: int = 0
     categorical_prior_history_key: str = "vq_code_history_indices"
     categorical_prior_future_steps: int = 0

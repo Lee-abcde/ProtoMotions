@@ -129,6 +129,29 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         help="Use a causal Transformer categorical VQ prior over recent observations.",
     )
     parser.add_argument(
+        "--use-categorical-prior-moe",
+        action="store_true",
+        help="Use a top-k MoE MLP for the categorical VQ prior.",
+    )
+    parser.add_argument(
+        "--categorical-prior-moe-num-experts",
+        type=int,
+        default=4,
+        help="Number of experts in the categorical-prior MoE.",
+    )
+    parser.add_argument(
+        "--categorical-prior-moe-top-k",
+        type=int,
+        default=2,
+        help="Number of experts selected per sample in the categorical-prior MoE.",
+    )
+    parser.add_argument(
+        "--categorical-prior-moe-balance-weight",
+        type=float,
+        default=1e-2,
+        help="Weight for the categorical-prior MoE load-balancing loss.",
+    )
+    parser.add_argument(
         "--vq-prior-transformer-context-steps",
         type=int,
         default=16,
@@ -421,6 +444,7 @@ def agent_config(
         FiLMConfig,
         MLPWithConcatConfig,
         MLPLayerConfig,
+        MoEMLPWithConcatConfig,
         ModuleContainerConfig,
         ModuleOperationForwardConfig,
         ObsProcessorConfig,
@@ -530,11 +554,25 @@ def agent_config(
     use_categorical_prior_transformer = bool(
         getattr(args, "use_categorical_prior_transformer", False)
     )
+    use_categorical_prior_moe = bool(
+        getattr(args, "use_categorical_prior_moe", False)
+    )
     if use_categorical_prior_transformer and use_categorical_prior_film:
         raise ValueError(
             "--use-categorical-prior-transformer and "
             "--use-categorical-prior-film are separate prior architectures; "
             "enable only one for this ablation."
+        )
+    if use_categorical_prior_moe and use_categorical_prior_transformer:
+        raise ValueError(
+            "--use-categorical-prior-moe and "
+            "--use-categorical-prior-transformer are separate prior architectures; "
+            "enable only one for this ablation."
+        )
+    if use_categorical_prior_moe and use_categorical_prior_film:
+        raise ValueError(
+            "--use-categorical-prior-moe and --use-categorical-prior-film are "
+            "separate prior architectures; enable only one for this ablation."
         )
     if use_categorical_prior_transformer and vq_prior_history_steps > 0:
         raise ValueError(
@@ -661,6 +699,28 @@ def agent_config(
                 ],
             ),
         ]
+    elif use_categorical_prior_moe:
+        categorical_prior_mlp_in_keys = categorical_prior_context_in_keys + [
+            "text_embedding_obs"
+        ]
+        categorical_prior_models.append(
+            MoEMLPWithConcatConfig(
+                in_keys=categorical_prior_mlp_in_keys,
+                out_keys=["prior_code_logits"],
+                num_out=categorical_prior_num_out,
+                layers=[
+                    MLPLayerConfig(units=1024, activation="relu") for _ in range(4)
+                ],
+                num_experts=int(
+                    getattr(args, "categorical_prior_moe_num_experts", 4)
+                ),
+                top_k=int(getattr(args, "categorical_prior_moe_top_k", 2)),
+                balance_loss_key="categorical_prior_moe_balance_loss",
+                gate_probs_key="categorical_prior_moe_gate_probs",
+                topk_indices_key="categorical_prior_moe_topk_indices",
+                expert_load_key="categorical_prior_moe_expert_load",
+            )
+        )
     elif not use_categorical_prior_transformer:
         categorical_prior_mlp_in_keys = categorical_prior_context_in_keys + [
             "text_embedding_obs"
@@ -775,6 +835,9 @@ def agent_config(
         dead_code_threshold=2,
         dead_code_revive_every=100,
         use_categorical_prior=True,
+        categorical_prior_moe_balance_weight=float(
+            getattr(args, "categorical_prior_moe_balance_weight", 1e-2)
+        ),
         categorical_prior_history_steps=vq_prior_history_steps,
         categorical_prior_future_steps=vq_prior_future_steps,
         use_categorical_prior_transformer=use_categorical_prior_transformer,

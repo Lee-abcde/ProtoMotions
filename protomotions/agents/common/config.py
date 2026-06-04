@@ -209,6 +209,79 @@ class MLPWithConcatConfig(NormObsBaseConfig):
 
 
 @dataclass
+class MoEMLPWithConcatConfig(NormObsBaseConfig):
+    """Top-k mixture-of-experts MLP with optional input normalization."""
+
+    num_out: int = field(
+        default=None,
+        metadata={"help": "Output dimension of each expert. Required.", "min": 1}
+    )
+    layers: List[MLPLayerConfig] = field(
+        default_factory=list,
+        metadata={"help": "List of layer configurations defining each expert MLP."}
+    )
+    num_experts: int = field(
+        default=4,
+        metadata={"help": "Number of expert MLPs.", "min": 1}
+    )
+    top_k: int = field(
+        default=2,
+        metadata={"help": "Number of experts selected per sample.", "min": 1}
+    )
+    _target_: str = "protomotions.agents.common.mlp.MoEMLPWithConcat"
+    in_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Input tensor keys to read and concatenate for experts."}
+    )
+    gate_in_keys: List[str] = field(
+        default_factory=list,
+        metadata={
+            "help": (
+                "Optional input tensor keys for the router. If empty, uses in_keys."
+            )
+        }
+    )
+    out_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Output tensor key for the combined expert output."}
+    )
+    output_activation: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Activation function for the combined expert output.",
+            "options": ["relu", "tanh", "elu", "selu", "gelu", "silu", "sigmoid", None],
+        }
+    )
+    balance_loss_key: str = field(
+        default="moe_load_balance_loss",
+        metadata={"help": "TensorDict key for the MoE load-balancing loss."}
+    )
+    gate_probs_key: str = field(
+        default="moe_gate_probs",
+        metadata={"help": "TensorDict key for router probabilities."}
+    )
+    topk_indices_key: str = field(
+        default="moe_topk_indices",
+        metadata={"help": "TensorDict key for selected expert indices."}
+    )
+    expert_load_key: str = field(
+        default="moe_expert_load",
+        metadata={"help": "TensorDict key for batch expert load fractions."}
+    )
+    module_operations: List[ModuleOperationConfig] = field(
+        default_factory=lambda: [ModuleOperationForwardConfig()],
+        metadata={"help": "Sequence of operations applied before expert MLPs."}
+    )
+
+    def __post_init__(self):
+        assert self.num_out is not None, "num_out must be provided"
+        assert self.layers is not None, "layers must be provided"
+        assert self.num_experts > 0, "num_experts must be positive"
+        assert self.top_k > 0, "top_k must be positive"
+        assert self.top_k <= self.num_experts, "top_k must be <= num_experts"
+
+
+@dataclass
 class ModuleContainerConfig:
     """Configuration for a container of modules that are executed sequentially.
     

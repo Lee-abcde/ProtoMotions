@@ -1249,6 +1249,8 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         future_prior_match_rate = torch.zeros_like(prior_alignment)
         future_prior_step_log_dict: Dict[str, torch.Tensor] = {}
         total_prior_loss = torch.zeros_like(prior_alignment)
+        moe_balance_loss = torch.zeros_like(prior_alignment)
+        moe_balance_loss_weighted = torch.zeros_like(prior_alignment)
         soft_log_dict: Dict[str, torch.Tensor] = {}
         if "vq_prior_categorical_loss" in tensordict.keys():
             hard_prior_ce_loss = tensordict["vq_prior_categorical_loss"].mean()
@@ -1337,6 +1339,17 @@ class VQDistillModel(TextResidualMixin, BaseModel):
                                 future_predictions[:, idx][step_valid]
                                 == future_targets[:, idx][step_valid]
                             ).float().mean().detach()
+            if "categorical_prior_moe_balance_loss" in tensordict.keys():
+                moe_balance_loss = tensordict[
+                    "categorical_prior_moe_balance_loss"
+                ].mean()
+                moe_balance_loss_weight = float(
+                    getattr(self.config, "categorical_prior_moe_balance_weight", 0.0)
+                )
+                moe_balance_loss_weighted = (
+                    moe_balance_loss * moe_balance_loss_weight
+                )
+                total_prior_loss = total_prior_loss + moe_balance_loss_weighted
             prior_categorical = (
                 total_prior_loss * self.config.categorical_prior_loss_weight
             )
@@ -1372,6 +1385,12 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             ),
             "distill/future_prior_valid_ratio": future_prior_valid_ratio.detach(),
             "distill/future_prior_match_rate": future_prior_match_rate.detach(),
+            "distill/categorical_prior_moe_balance_loss": (
+                moe_balance_loss.detach()
+            ),
+            "distill/categorical_prior_moe_balance_loss_weighted": (
+                moe_balance_loss_weighted.detach()
+            ),
             "distill/total_prior_loss": total_prior_loss.detach(),
             "distill/total_prior_loss_weighted": prior_categorical.detach(),
             "distill/vq_perplexity": tensordict["vq_perplexity"].mean().detach(),
@@ -1391,5 +1410,22 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             log_dict["distill/vq_prior_entropy"] = (
                 tensordict["vq_prior_entropy"].mean().detach()
             )
+        if "categorical_prior_moe_gate_probs" in tensordict.keys():
+            gate_probs = tensordict["categorical_prior_moe_gate_probs"]
+            log_dict["distill/categorical_prior_moe_gate_entropy"] = (
+                -(gate_probs * gate_probs.clamp_min(1e-8).log())
+                .sum(dim=-1)
+                .mean()
+                .detach()
+            )
+        if "categorical_prior_moe_expert_load" in tensordict.keys():
+            expert_load = tensordict["categorical_prior_moe_expert_load"].mean(dim=0)
+            log_dict["distill/categorical_prior_moe_expert_load_std"] = (
+                expert_load.std(unbiased=False).detach()
+            )
+            for expert_idx, load in enumerate(expert_load):
+                log_dict[
+                    f"distill/categorical_prior_moe_expert_{expert_idx}_load"
+                ] = load.detach()
         self._add_text_residual_log_dict(tensordict, log_dict)
         return total, log_dict
