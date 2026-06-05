@@ -857,6 +857,20 @@ class DistillAgent(BaseAgent):
                 "checkpoint parameters at current initialization due to missing "
                 "keys or shape mismatch."
             )
+        elif self._checkpoint_has_mlp_prior_for_current_moe(state_dict["model"]):
+            state_dict = dict(state_dict)
+            merged_model_state, load_stats = self._merge_mlp_prior_into_moe_experts(
+                state_dict["model"],
+                self.model.state_dict(),
+            )
+            state_dict["model"] = merged_model_state
+            log.info(
+                "Loading categorical prior MLP checkpoint into MoE prior: loaded "
+                f"{load_stats['direct_loaded']} matching parameters, copied "
+                f"{load_stats['expert_loaded']} MLP parameters into MoE experts, "
+                f"kept {load_stats['kept_current']} current parameters "
+                "(including router parameters) at current initialization."
+            )
         super().load_parameters(state_dict)
         if bool(getattr(self.config.model, "train_categorical_prior_only", False)):
             log.info(
@@ -871,6 +885,92 @@ class DistillAgent(BaseAgent):
             )
             return
         self.distill_optimizer.load_state_dict(state_dict["distill_optimizer"])
+
+    def _checkpoint_has_mlp_prior_for_current_moe(self, checkpoint_model_state) -> bool:
+        current_model_state = self.model.state_dict()
+        current_has_moe_prior = any(
+            key.startswith("_categorical_prior.")
+            and ".experts." in key
+            for key in current_model_state.keys()
+        )
+        checkpoint_has_mlp_prior = any(
+            key.startswith("_categorical_prior.")
+            and ".mlp." in key
+            for key in checkpoint_model_state.keys()
+        )
+        checkpoint_has_moe_prior = any(
+            key.startswith("_categorical_prior.")
+            and ".experts." in key
+            for key in checkpoint_model_state.keys()
+        )
+        return (
+            current_has_moe_prior
+            and checkpoint_has_mlp_prior
+            and not checkpoint_has_moe_prior
+        )
+
+    @staticmethod
+    def _merge_mlp_prior_into_moe_experts(
+        checkpoint_model_state,
+        current_model_state,
+    ):
+        merged_model_state = current_model_state.copy()
+        direct_loaded = 0
+        expert_loaded = 0
+        loaded_current_keys = set()
+
+        for key, value in checkpoint_model_state.items():
+            if (
+                key in merged_model_state
+                and merged_model_state[key].shape == value.shape
+            ):
+                merged_model_state[key] = value
+                direct_loaded += 1
+                loaded_current_keys.add(key)
+
+        mlp_prior_prefixes = set()
+        for key in checkpoint_model_state.keys():
+            if key.startswith("_categorical_prior.") and ".mlp." in key:
+                mlp_prefix, _ = key.split(".mlp.", maxsplit=1)
+                mlp_prior_prefixes.add(mlp_prefix)
+
+        for mlp_prefix in sorted(mlp_prior_prefixes):
+            expert_prefix = f"{mlp_prefix}.experts."
+            expert_indices = set()
+            for key in current_model_state.keys():
+                if not key.startswith(expert_prefix):
+                    continue
+                expert_rest = key[len(expert_prefix):]
+                expert_index = expert_rest.split(".", maxsplit=1)[0]
+                if expert_index.isdigit():
+                    expert_indices.add(int(expert_index))
+
+            for key, value in checkpoint_model_state.items():
+                if not key.startswith(f"{mlp_prefix}.mlp."):
+                    continue
+                expert_suffix = key.split(".mlp.", maxsplit=1)[1]
+                for expert_index in sorted(expert_indices):
+                    expert_key = (
+                        f"{mlp_prefix}.experts.{expert_index}.{expert_suffix}"
+                    )
+                    if (
+                        expert_key in merged_model_state
+                        and merged_model_state[expert_key].shape == value.shape
+                    ):
+                        merged_model_state[expert_key] = value
+                        expert_loaded += 1
+                        loaded_current_keys.add(expert_key)
+
+        kept_current = sum(
+            1
+            for key in merged_model_state.keys()
+            if key not in loaded_current_keys
+        )
+        return merged_model_state, {
+            "direct_loaded": direct_loaded,
+            "expert_loaded": expert_loaded,
+            "kept_current": kept_current,
+        }
 
     # -----------------------------
     # Training Loop and Dataset Processing
