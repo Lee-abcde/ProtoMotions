@@ -146,6 +146,17 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         help="Number of experts selected per sample in the categorical-prior MoE.",
     )
     parser.add_argument(
+        "--categorical-prior-moe-gate-input",
+        type=str,
+        default="text",
+        choices=["text", "full"],
+        help=(
+            "Input used by the MoE router. 'text' routes only from the text "
+            "embedding for smoother expert selection; 'full' routes from the "
+            "same state/context/text input used by the experts."
+        ),
+    )
+    parser.add_argument(
         "--categorical-prior-moe-balance-weight",
         type=float,
         default=1e-2,
@@ -703,9 +714,17 @@ def agent_config(
         categorical_prior_mlp_in_keys = categorical_prior_context_in_keys + [
             "text_embedding_obs"
         ]
+        categorical_prior_moe_gate_input = getattr(
+            args, "categorical_prior_moe_gate_input", "text"
+        )
+        if categorical_prior_moe_gate_input == "text":
+            categorical_prior_moe_gate_in_keys = ["text_embedding_obs"]
+        else:
+            categorical_prior_moe_gate_in_keys = categorical_prior_mlp_in_keys
         categorical_prior_models.append(
             MoEMLPWithConcatConfig(
                 in_keys=categorical_prior_mlp_in_keys,
+                gate_in_keys=categorical_prior_moe_gate_in_keys,
                 out_keys=["prior_code_logits"],
                 num_out=categorical_prior_num_out,
                 layers=[
