@@ -117,6 +117,15 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         ),
     )
     parser.add_argument(
+        "--use-posterior-oracle-motion-command",
+        action="store_true",
+        help=(
+            "Add local target root vx/vy and yaw-rate command as a student "
+            "posterior-only observation. This is not exposed to the prior unless "
+            "--use-prior-oracle-motion-command is also set."
+        ),
+    )
+    parser.add_argument(
         "--use-categorical-prior-film",
         action="store_true",
         help="Use text FiLM modulation in the categorical VQ prior.",
@@ -359,7 +368,9 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             },
         ),
     }
-    if bool(getattr(args, "use_prior_oracle_motion_command", False)):
+    if bool(getattr(args, "use_prior_oracle_motion_command", False)) or bool(
+        getattr(args, "use_posterior_oracle_motion_command", False)
+    ):
         observation_components["target_root_velocity_yaw_command"] = (
             target_root_velocity_yaw_command_factory(use_noisy=True)
         )
@@ -475,20 +486,20 @@ def agent_config(
 
     vq_latent_dim = int(getattr(args, "vq_latent_dim", VQ_LATENT_DIM))
 
+    encoder_motion_obs_in_keys = [
+        "noisy_reduced_coords_obs",
+        "noisy_mimic_reduced_coords_target_poses",
+        "historical_previous_processed_actions",
+    ]
+    if bool(getattr(args, "use_posterior_oracle_motion_command", False)):
+        encoder_motion_obs_in_keys.append("target_root_velocity_yaw_command")
+
     encoder_config = ModuleContainerConfig(
-        in_keys=[
-            "noisy_reduced_coords_obs",
-            "noisy_mimic_reduced_coords_target_poses",
-            "historical_previous_processed_actions",
-        ],
+        in_keys=encoder_motion_obs_in_keys,
         out_keys=["encoder_latent"],
         models=[
             ObsProcessorConfig(
-                in_keys=[
-                    "noisy_reduced_coords_obs",
-                    "noisy_mimic_reduced_coords_target_poses",
-                    "historical_previous_processed_actions",
-                ],
+                in_keys=encoder_motion_obs_in_keys,
                 out_keys=["encoder_motion_obs_norm"],
                 normalize_obs=True,
                 norm_clamp_value=5,
@@ -984,6 +995,7 @@ def apply_inference_overrides(
     from protomotions.envs.component_factories import (
         reduced_coords_obs_factory,
         mimic_target_poses_reduced_coords_factory,
+        target_root_velocity_yaw_command_factory,
     )
 
     if hasattr(env_cfg, "termination_components") and env_cfg.termination_components:
@@ -1022,3 +1034,7 @@ def apply_inference_overrides(
             ref_delta_prob=None,
         )
     )
+    if "target_root_velocity_yaw_command" in env_cfg.observation_components:
+        env_cfg.observation_components["target_root_velocity_yaw_command"] = (
+            target_root_velocity_yaw_command_factory(use_noisy=False)
+        )
