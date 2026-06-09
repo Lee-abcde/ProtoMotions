@@ -319,7 +319,7 @@ def agent_config(
         evaluator=MimicEvaluatorConfig(
             evaluation_components={
                 "anchor_ori": anchor_ori_metric_factory(),
-                "relative_body_pos": relative_body_pos_metric_factory(),
+                "relative_body_pos": relative_body_pos_metric_factory(threshold=0.20),
                 "anchor_height_error": anchor_height_error_metric_factory(
                     threshold=0.25
                 ),
