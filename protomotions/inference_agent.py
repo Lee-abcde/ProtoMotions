@@ -52,6 +52,8 @@ During inference, these controls are available:
 - **R**: Reset all environments
 - **O**: Toggle camera view
 - **L**: Start/stop video recording
+- **F8**: Edit live text prompt when supported by the evaluator
+- **F9**: Enter a motion id and reset all environments to that motion
 - **Q**: Quit
 
 Example
@@ -434,7 +436,7 @@ def main():
         simulator_extra_params["simulation_app"] = app_launcher.app
 
     runtime_hooks = {}
-    custom_key_handler_targets = {"F8": None}
+    custom_key_handler_targets = {"F8": None, "F9": None}
 
     def _edit_text_prompt_handler() -> None:
         target = custom_key_handler_targets["F8"]
@@ -443,7 +445,15 @@ def main():
             return
         target()
 
+    def _motion_id_handler() -> None:
+        target = custom_key_handler_targets["F9"]
+        if target is None:
+            log.warning("Motion switch requested before evaluator was initialized.")
+            return
+        target()
+
     runtime_hooks["F8"] = _edit_text_prompt_handler
+    runtime_hooks["F9"] = _motion_id_handler
     simulator_extra_params["custom_key_handlers"] = runtime_hooks
 
     # Convert friction for simulator compatibility
@@ -560,8 +570,14 @@ def main():
             custom_key_handler_targets["F8"] = (
                 agent.evaluator.interactive_edit_text_prompt
             )
+        if hasattr(agent.evaluator, "request_interactive_motion_id"):
+            custom_key_handler_targets["F9"] = (
+                agent.evaluator.request_interactive_motion_id
+            )
         if not args.headless and custom_key_handler_targets["F8"] is not None:
             log.info("Live text prompt editor available on key 'F8'.")
+        if not args.headless and custom_key_handler_targets["F9"] is not None:
+            log.info("Interactive motion-id reset available on key 'F9'.")
 
     agent.setup()
     agent.load(args.checkpoint, load_env=False)

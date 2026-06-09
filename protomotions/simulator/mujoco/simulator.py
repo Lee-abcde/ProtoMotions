@@ -62,6 +62,7 @@ class MujocoSimulator(Simulator):
 
     config: MujocoSimulatorConfig
     _MJKEY_F8 = 297
+    _MJKEY_F9 = 298
 
     def __init__(
         self,
@@ -1063,6 +1064,11 @@ class MujocoSimulator(Simulator):
             handler = self._custom_key_handlers.get("F8")
             if handler is not None:
                 print("[mujoco-key-debug] invoking custom handler for key 'F8'")
+                handler()
+        elif keycode == self._MJKEY_F9:
+            handler = self._custom_key_handlers.get("F9")
+            if handler is not None:
+                print("[mujoco-key-debug] invoking custom handler for key 'F9'")
                 handler()
 
     def _write_viewport_to_file(self, file_name: str) -> None:

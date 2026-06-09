@@ -1131,7 +1131,21 @@ class DistillEvaluator(MimicEvaluator):
             )
         try:
             while True:
-                obs, _ = self.env.reset(done_indices)
+                switch_env_ids = self._consume_interactive_motion_id_request()
+                if switch_env_ids is not None:
+                    obs, _ = self.env.reset(
+                        switch_env_ids, disable_motion_resample=True
+                    )
+                    done_indices = None
+                    if hasattr(self.agent, "reset_vq_code_history"):
+                        self.agent.reset_vq_code_history()
+                    if hasattr(
+                        self.agent, "reset_categorical_prior_transformer_history"
+                    ):
+                        self.agent.reset_categorical_prior_transformer_history()
+                    self._reset_vq_latent_loop(switch_env_ids)
+                else:
+                    obs, _ = self.env.reset(done_indices)
                 obs = self.agent.add_agent_info_to_obs(obs)
                 obs_td = self.agent.obs_dict_to_tensordict(obs)
                 configured_motion_speed_scale = getattr(

@@ -99,6 +99,7 @@ class BaseEvaluator:
         
         # Instance state for metrics collection during evaluation
         self._metrics: Optional[Dict] = None
+        self._interactive_motion_id_request: Optional[int] = None
 
     @property
     def device(self) -> torch.device:
@@ -114,6 +115,106 @@ class BaseEvaluator:
     def root_dir(self):
         """Root directory for saving outputs (from agent)."""
         return self.agent.root_dir
+
+    def request_interactive_motion_id(self) -> None:
+        """Prompt for a reference motion id to use at runtime."""
+        motion_manager = getattr(self.env, "motion_manager", None)
+        motion_lib = getattr(self.env, "motion_lib", None)
+        if motion_manager is None or motion_lib is None:
+            print("Interactive motion switch skipped: no motion manager/lib.")
+            return
+
+        num_motions = motion_lib.num_motions()
+        if num_motions <= 0:
+            print("Interactive motion switch skipped: no motions loaded.")
+            return
+
+        current_motion_id = int(motion_manager.motion_ids[0].item())
+        prompt = (
+            "\n[motion-debug] Enter motion id "
+            f"[0, {num_motions - 1}] (current {current_motion_id}, empty to cancel): "
+        )
+        try:
+            raw_motion_id = input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            print("\n[motion-debug] Motion switch cancelled.")
+            return
+
+        raw_motion_id = raw_motion_id.strip()
+        if raw_motion_id == "":
+            print("[motion-debug] Motion switch cancelled.")
+            return
+
+        try:
+            motion_id = int(raw_motion_id)
+        except ValueError:
+            print(f"[motion-debug] Invalid motion id: {raw_motion_id!r}")
+            return
+
+        if motion_id < 0 or motion_id >= num_motions:
+            print(
+                "[motion-debug] Motion id out of range: "
+                f"{motion_id}; valid range is [0, {num_motions - 1}]"
+            )
+            return
+
+        self._interactive_motion_id_request = motion_id
+        print(f"[motion-debug] Scheduled motion switch to id {motion_id}.")
+
+    def _consume_interactive_motion_id_request(self) -> Optional[Tensor]:
+        """Apply a pending interactive motion-id switch request.
+
+        Returns the environment ids that should be reset with the updated motion
+        ids, or None if there was no pending request.
+        """
+        if self._interactive_motion_id_request is None:
+            return None
+
+        requested_motion_id = self._interactive_motion_id_request
+        self._interactive_motion_id_request = None
+
+        motion_manager = getattr(self.env, "motion_manager", None)
+        motion_lib = getattr(self.env, "motion_lib", None)
+        if motion_manager is None or motion_lib is None:
+            print("Interactive motion switch skipped: no motion manager/lib.")
+            return None
+
+        num_motions = motion_lib.num_motions()
+        if num_motions <= 0:
+            print("Interactive motion switch skipped: no motions loaded.")
+            return None
+
+        env_ids = torch.arange(self.env.num_envs, device=self.device, dtype=torch.long)
+        old_motion_ids = motion_manager.motion_ids[env_ids].clone()
+        new_motion_ids = torch.full_like(old_motion_ids, requested_motion_id)
+
+        motion_manager.motion_ids[env_ids] = new_motion_ids
+        motion_manager.motion_times[env_ids] = 0.0
+
+        available_motion_ids = getattr(motion_manager, "available_motion_ids", None)
+        if (
+            available_motion_ids is not None
+            and len(available_motion_ids) == self.env.num_envs
+        ):
+            available_motion_ids[env_ids] = new_motion_ids
+
+        fixed_motion_ids = getattr(motion_manager, "_fixed_motion_ids_per_env", None)
+        if (
+            fixed_motion_ids is not None
+            and fixed_motion_ids.shape[0] == self.env.num_envs
+        ):
+            fixed_motion_ids[env_ids] = new_motion_ids
+            motion_manager._env_has_fixed_motion[env_ids] = True
+
+        old_ids_list = old_motion_ids.detach().cpu().tolist()
+        new_ids_list = new_motion_ids.detach().cpu().tolist()
+        max_print = 16
+        if len(old_ids_list) > max_print:
+            old_ids_list = old_ids_list[:max_print] + ["..."]
+            new_ids_list = new_ids_list[:max_print] + ["..."]
+        print(f"[motion-debug] Interactive motion switch: {old_ids_list} -> {new_ids_list}")
+
+        return env_ids
 
     @torch.no_grad()
     def evaluate(self) -> Tuple[Dict, Optional[float]]:
@@ -635,7 +736,14 @@ class BaseEvaluator:
         print("Evaluating policy... (Ctrl+C to stop)")
         try:
             while True:
-                obs, _ = self.env.reset(done_indices)
+                switch_env_ids = self._consume_interactive_motion_id_request()
+                if switch_env_ids is not None:
+                    obs, _ = self.env.reset(
+                        switch_env_ids, disable_motion_resample=True
+                    )
+                    done_indices = None
+                else:
+                    obs, _ = self.env.reset(done_indices)
                 obs = self.agent.add_agent_info_to_obs(obs)
                 obs_td = self.agent.obs_dict_to_tensordict(obs)
 
