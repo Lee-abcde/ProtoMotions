@@ -186,6 +186,87 @@ def create_parser():
             "use current_to_ref."
         ),
     )
+    parser.add_argument(
+        "--random-text-videos",
+        action="store_true",
+        default=False,
+        help=(
+            "Sample random text prompts from a GT text MotionLib and record one "
+            "fresh MuJoCo worker process per prompt."
+        ),
+    )
+    parser.add_argument(
+        "--random-text-gt-motion-file",
+        type=str,
+        default=None,
+        help="GT packaged MotionLib .pt containing text metadata and embeddings.",
+    )
+    parser.add_argument(
+        "--random-text-video-count",
+        type=int,
+        default=10,
+        help="Number of random prompt videos to record.",
+    )
+    parser.add_argument(
+        "--random-text-prompts",
+        nargs="+",
+        default=None,
+        help=(
+            "English prompt texts or substrings to include before random "
+            "sampling fills the remaining video count."
+        ),
+    )
+    parser.add_argument(
+        "--random-text-video-seconds",
+        type=float,
+        default=5.0,
+        help="Simulation seconds to record for each random text prompt.",
+    )
+    parser.add_argument(
+        "--random-text-video-output-dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory for random text videos. Defaults to "
+            "<checkpoint_dir>/random_text_videos_new."
+        ),
+    )
+    parser.add_argument(
+        "--random-text-video-seed",
+        type=int,
+        default=0,
+        help="Random seed for prompt sampling.",
+    )
+    parser.add_argument(
+        "--random-text-video-worker",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--random-text-worker-embedding-idx",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--random-text-worker-prompt",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--random-text-worker-output-path",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--random-text-worker-sample-idx",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
 
     return parser
 
@@ -203,8 +284,15 @@ from protomotions.utils.simulator_imports import import_simulator_before_torch  
 AppLauncher = import_simulator_before_torch(args.simulator)
 
 # Now safe to import everything else including torch
+import json  # noqa: E402
 import logging  # noqa: E402
+import math  # noqa: E402
+import os  # noqa: E402
 from pathlib import Path  # noqa: E402
+import random  # noqa: E402
+import re  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
 import torch  # noqa: E402
 from protomotions.utils.hydra_replacement import get_class  # noqa: E402
 from protomotions.utils.fabric_config import FabricConfig  # noqa: E402
@@ -284,6 +372,464 @@ def _average_evaluation_logs(evaluation_runs: list[dict]) -> dict:
     return averaged
 
 
+def _is_transition_text_segment(segment: dict) -> bool:
+    proc_label = str(segment.get("proc_label", "")).strip().lower()
+    if proc_label == "transition":
+        return True
+    text = str(segment.get("text", "")).strip().lower()
+    return text == "transition" or text.startswith("transition to ")
+
+
+def _prompt_slug(prompt: str, max_len: int = 48) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", prompt.strip().lower()).strip("_")
+    if not slug:
+        slug = "prompt"
+    return slug[:max_len].strip("_") or "prompt"
+
+
+def _prompt_key(prompt: str) -> str:
+    return " ".join(prompt.strip().lower().split())
+
+
+def _find_text_embedding_idx(
+    segment: dict, text_embedding_texts: tuple[str, ...]
+) -> int | None:
+    embedding_idx = segment.get("text_embedding_idx")
+    if embedding_idx is not None:
+        return int(embedding_idx)
+
+    text = str(segment.get("text", "")).strip()
+    if not text:
+        return None
+
+    for idx, candidate in enumerate(text_embedding_texts):
+        if candidate == text:
+            return idx
+
+    lower_text = text.lower()
+    for idx, candidate in enumerate(text_embedding_texts):
+        if candidate.lower() == lower_text:
+            return idx
+    return None
+
+
+def _load_random_text_prompt_samples(args) -> list[dict]:
+    gt_motion_file = Path(args.random_text_gt_motion_file)
+    if not gt_motion_file.exists():
+        raise FileNotFoundError(f"GT motion file not found: {gt_motion_file}")
+
+    payload = torch.load(gt_motion_file, map_location="cpu", weights_only=False)
+    motion_text_data = payload.get("motion_text_data")
+    text_embedding_table = payload.get("text_embedding_table")
+    text_embedding_texts = payload.get("text_embedding_texts")
+    if motion_text_data is None:
+        raise ValueError(f"{gt_motion_file} does not contain motion_text_data.")
+    if text_embedding_table is None or text_embedding_texts is None:
+        raise ValueError(
+            f"{gt_motion_file} must contain text_embedding_table and "
+            "text_embedding_texts for prompt override."
+        )
+
+    text_embedding_texts = tuple(str(text) for text in text_embedding_texts)
+    num_embeddings = int(text_embedding_table.shape[0])
+    candidates = []
+    for motion_idx, meta in enumerate(motion_text_data):
+        if meta is None:
+            continue
+        segments = meta.get("segments")
+        if not isinstance(segments, list):
+            segments = [meta]
+
+        for segment_idx, segment in enumerate(segments):
+            prompt = str(segment.get("text", "")).strip()
+            if not prompt:
+                continue
+            if _is_transition_text_segment(segment):
+                continue
+            embedding_idx = _find_text_embedding_idx(segment, text_embedding_texts)
+            if embedding_idx is None or not 0 <= embedding_idx < num_embeddings:
+                continue
+            candidates.append(
+                {
+                    "source_motion_idx": motion_idx,
+                    "source_segment_idx": segment_idx,
+                    "english_prompt": prompt,
+                    "embedding_idx": embedding_idx,
+                    "source_file": meta.get("source_file"),
+                    "motion_key": meta.get("motion_key"),
+                }
+            )
+
+    if not candidates:
+        raise ValueError(
+            "No text prompt candidates found in GT motion file. "
+            "Transition labels are always skipped."
+        )
+    if args.random_text_video_count <= 0:
+        raise ValueError("--random-text-video-count must be positive.")
+
+    rng = random.Random(args.random_text_video_seed)
+    unique_by_prompt = {}
+    shuffled_candidates = candidates[:]
+    rng.shuffle(shuffled_candidates)
+    for candidate in shuffled_candidates:
+        prompt_key = candidate["english_prompt"].strip().lower()
+        unique_by_prompt.setdefault(prompt_key, candidate)
+    unique_candidates = list(unique_by_prompt.values())
+    if args.random_text_video_count > len(unique_candidates):
+        raise ValueError(
+            f"Requested {args.random_text_video_count} videos, but only "
+            f"{len(unique_candidates)} unique prompts are available."
+        )
+
+    requested_samples = _select_requested_text_prompt_samples(
+        args.random_text_prompts,
+        unique_candidates,
+        rng,
+    )
+    if len(requested_samples) > args.random_text_video_count:
+        raise ValueError(
+            f"Received {len(requested_samples)} requested prompts, but "
+            f"--random-text-video-count is {args.random_text_video_count}."
+        )
+
+    used_prompt_keys = {
+        _prompt_key(sample["english_prompt"]) for sample in requested_samples
+    }
+    remaining_candidates = [
+        candidate
+        for candidate in unique_candidates
+        if _prompt_key(candidate["english_prompt"]) not in used_prompt_keys
+    ]
+    remaining_count = args.random_text_video_count - len(requested_samples)
+    if remaining_count > len(remaining_candidates):
+        raise ValueError(
+            f"Need {remaining_count} additional random prompts, but only "
+            f"{len(remaining_candidates)} unused unique prompts are available."
+        )
+
+    return requested_samples + rng.sample(remaining_candidates, remaining_count)
+
+
+def _select_requested_text_prompt_samples(
+    requested_prompts: list[str] | None,
+    unique_candidates: list[dict],
+    rng: random.Random,
+) -> list[dict]:
+    if not requested_prompts:
+        return []
+
+    selected = []
+    used_prompt_keys = set()
+    for raw_query in requested_prompts:
+        query = str(raw_query).strip()
+        query_key = _prompt_key(query)
+        if not query_key:
+            raise ValueError("Empty text is not allowed in --random-text-prompts.")
+
+        exact_matches = [
+            candidate
+            for candidate in unique_candidates
+            if _prompt_key(candidate["english_prompt"]) == query_key
+        ]
+        substring_matches = [
+            candidate
+            for candidate in unique_candidates
+            if query_key in _prompt_key(candidate["english_prompt"])
+        ]
+        match_type = "exact" if exact_matches else "substring"
+        matches = exact_matches or substring_matches
+        if not matches:
+            raise ValueError(
+                f"No dataset prompt matches requested text/fragment: {query!r}."
+            )
+
+        matches = matches[:]
+        rng.shuffle(matches)
+        chosen = None
+        for candidate in matches:
+            candidate_key = _prompt_key(candidate["english_prompt"])
+            if candidate_key not in used_prompt_keys:
+                chosen = candidate
+                break
+        if chosen is None:
+            raise ValueError(
+                f"Requested text/fragment {query!r} only matches prompts that "
+                "were already selected."
+            )
+
+        chosen_sample = dict(chosen)
+        chosen_sample["requested_prompt"] = query
+        chosen_sample["prompt_match_type"] = match_type
+        selected.append(chosen_sample)
+        used_prompt_keys.add(_prompt_key(chosen_sample["english_prompt"]))
+
+    return selected
+
+
+def _build_random_text_worker_command(args, sample: dict, output_path: Path) -> list[str]:
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--checkpoint",
+        str(args.checkpoint),
+        "--simulator",
+        "mujoco",
+        "--num-envs",
+        "1",
+        "--random-text-video-worker",
+        "--random-text-gt-motion-file",
+        str(args.random_text_gt_motion_file),
+        "--random-text-video-seconds",
+        str(args.random_text_video_seconds),
+        "--random-text-worker-embedding-idx",
+        str(sample["embedding_idx"]),
+        "--random-text-worker-prompt",
+        sample["english_prompt"],
+        "--random-text-worker-output-path",
+        str(output_path),
+        "--random-text-worker-sample-idx",
+        str(sample["sample_idx"]),
+    ]
+    if args.motion_file is not None:
+        cmd.extend(["--motion-file", str(args.motion_file)])
+    if args.scenes_file is not None:
+        cmd.extend(["--scenes-file", str(args.scenes_file)])
+    if args.overrides:
+        cmd.append("--overrides")
+        cmd.extend(str(override) for override in args.overrides)
+    if args.posterior_anchor_rotation_mode is not None:
+        cmd.extend(
+            [
+                "--posterior-anchor-rotation-mode",
+                str(args.posterior_anchor_rotation_mode),
+            ]
+        )
+    cmd.extend(["--vq-motion-speed-scale", str(args.vq_motion_speed_scale)])
+    cmd.extend(["--vq-prior-frequency-scale", str(args.vq_prior_frequency_scale)])
+    if args.vq_prior_frequency_override is not None:
+        cmd.extend(
+            [
+                "--vq-prior-frequency-override",
+                str(args.vq_prior_frequency_override),
+            ]
+        )
+    return cmd
+
+
+def _run_random_text_video_coordinator(args) -> None:
+    if args.random_text_video_worker:
+        raise ValueError("Worker mode must not also use --random-text-videos.")
+    if args.simulator != "mujoco":
+        raise ValueError("--random-text-videos requires --simulator mujoco.")
+    if args.headless:
+        raise ValueError("--random-text-videos requires non-headless rendering.")
+    if args.random_text_gt_motion_file is None:
+        raise ValueError("--random-text-gt-motion-file is required.")
+    if args.random_text_video_seconds <= 0.0:
+        raise ValueError("--random-text-video-seconds must be positive.")
+
+    checkpoint = Path(args.checkpoint)
+    output_dir = (
+        Path(args.random_text_video_output_dir)
+        if args.random_text_video_output_dir is not None
+        else checkpoint.parent / "random_text_videos_new"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "manifest.jsonl"
+
+    samples = _load_random_text_prompt_samples(args)
+    log.info(
+        "Recording %s random text prompt videos to %s",
+        len(samples),
+        output_dir,
+    )
+    for sample in samples:
+        if "requested_prompt" in sample:
+            log.info(
+                "Requested text %r matched dataset prompt %r (%s match).",
+                sample["requested_prompt"],
+                sample["english_prompt"],
+                sample["prompt_match_type"],
+            )
+
+    records = []
+    with manifest_path.open("w") as manifest_file:
+        for sample_idx, sample in enumerate(samples):
+            sample["sample_idx"] = sample_idx
+            slug = _prompt_slug(sample["english_prompt"])
+            output_path = output_dir / f"sample_{sample_idx:03d}_{slug}.mp4"
+            cmd = _build_random_text_worker_command(args, sample, output_path)
+            log.info(
+                "Recording sample %03d/%03d: %r",
+                sample_idx + 1,
+                len(samples),
+                sample["english_prompt"],
+            )
+            result = subprocess.run(cmd)
+            record = {
+                **sample,
+                "checkpoint": str(args.checkpoint),
+                "gt_motion_file": str(args.random_text_gt_motion_file),
+                "mp4_path": str(output_path),
+                "artifact_dir": str(output_dir / "artifacts"),
+                "return_code": result.returncode,
+                "worker_command": cmd,
+            }
+            output_ok = output_path.exists() and output_path.stat().st_size > 0
+            if result.returncode != 0 and output_ok:
+                record["accepted_after_worker_crash"] = True
+                log.warning(
+                    "Worker exited with code %s after writing %s; continuing.",
+                    result.returncode,
+                    output_path,
+                )
+            manifest_file.write(json.dumps(record) + "\n")
+            manifest_file.flush()
+            records.append(record)
+            if result.returncode != 0 and not output_ok:
+                raise subprocess.CalledProcessError(result.returncode, cmd)
+
+    overview_path = _write_random_text_video_grid(records, output_dir)
+    if overview_path is not None:
+        print(f"Random text overview video saved to {overview_path}")
+    print(f"Random text video manifest saved to {manifest_path}")
+
+
+def _random_text_video_grid_shape(num_videos: int) -> tuple[int, int]:
+    cols = int(math.ceil(math.sqrt(num_videos)))
+    rows = int(math.ceil(num_videos / cols))
+    return rows, cols
+
+
+def _write_random_text_video_grid(records: list[dict], output_dir: Path) -> Path | None:
+    video_paths = []
+    for record in records:
+        path = Path(record["mp4_path"])
+        if path.exists() and path.stat().st_size > 0:
+            video_paths.append(path)
+
+    if not video_paths:
+        return None
+
+    rows, cols = _random_text_video_grid_shape(len(video_paths))
+    overview_path = output_dir / f"zz_overview_{rows}x{cols}.mp4"
+    try:
+        from moviepy import ColorClip, VideoFileClip, clips_array
+
+        clips = [VideoFileClip(str(path)) for path in video_paths]
+        target_size = (clips[0].w, clips[0].h)
+        fps = clips[0].fps or 30
+        duration = max(float(clip.duration or 0.0) for clip in clips)
+        resized_clips = [
+            clip.resized(new_size=target_size).without_audio() for clip in clips
+        ]
+        blank = ColorClip(target_size, color=(0, 0, 0), duration=duration).with_fps(fps)
+        cells = resized_clips + [
+            blank.copy() for _ in range(rows * cols - len(resized_clips))
+        ]
+        grid = [cells[row * cols : (row + 1) * cols] for row in range(rows)]
+        overview = clips_array(grid)
+        overview.write_videofile(
+            str(overview_path),
+            fps=fps,
+            codec="libx264",
+            audio=False,
+            threads=32,
+            preset="veryfast",
+            ffmpeg_params=[
+                "-profile:v",
+                "main",
+                "-level",
+                "4.0",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-crf",
+                "23",
+                "-x264-params",
+                "keyint=60:min-keyint=30",
+            ],
+        )
+        overview.close()
+        blank.close()
+        for clip in clips:
+            clip.close()
+        return overview_path
+    except Exception as exc:
+        log.warning("Failed to create overview video: %s", exc)
+        return None
+
+
+def _inject_gt_text_embeddings(motion_lib, gt_motion_file: str) -> None:
+    payload = torch.load(gt_motion_file, map_location="cpu", weights_only=False)
+    text_embedding_table = payload.get("text_embedding_table")
+    text_embedding_texts = payload.get("text_embedding_texts")
+    if text_embedding_table is None or text_embedding_texts is None:
+        raise ValueError(
+            f"{gt_motion_file} must contain text_embedding_table and "
+            "text_embedding_texts."
+        )
+
+    motion_lib.text_embedding_table = text_embedding_table.to(device=motion_lib.device)
+    motion_lib.text_embedding_texts = tuple(str(text) for text in text_embedding_texts)
+    motion_lib.text_embedding_model_name = payload.get("text_embedding_model_name")
+    motion_lib.motion_text_data = payload.get("motion_text_data")
+    motion_lib.text_embedding_indices = None
+    motion_lib._text_embedding_lookup = None
+    motion_lib.clear_text_embedding_override()
+
+
+def _run_random_text_video_worker(agent, env, args) -> None:
+    if args.simulator != "mujoco":
+        raise ValueError("Random text video worker requires --simulator mujoco.")
+    if args.headless:
+        raise ValueError("Random text video worker requires non-headless rendering.")
+    if args.num_envs != 1:
+        raise ValueError("Random text video worker requires --num-envs 1.")
+    if args.random_text_gt_motion_file is None:
+        raise ValueError("--random-text-gt-motion-file is required in worker mode.")
+    if args.random_text_worker_embedding_idx is None:
+        raise ValueError("Missing worker text embedding index.")
+    if args.random_text_worker_prompt is None:
+        raise ValueError("Missing worker prompt.")
+    if args.random_text_worker_output_path is None:
+        raise ValueError("Missing worker output path.")
+
+    _inject_gt_text_embeddings(agent.motion_lib, args.random_text_gt_motion_file)
+    agent.motion_lib.set_text_embedding_override_by_index(
+        args.random_text_worker_embedding_idx
+    )
+    active_label = agent.motion_lib.get_text_embedding_override_label()
+    log.info(
+        "Worker sample=%s prompt=%r active_embedding_label=%r output=%s",
+        args.random_text_worker_sample_idx,
+        args.random_text_worker_prompt,
+        active_label,
+        args.random_text_worker_output_path,
+    )
+
+    if hasattr(agent, "reset_vq_code_history"):
+        agent.reset_vq_code_history()
+    if hasattr(agent, "reset_categorical_prior_transformer_history"):
+        agent.reset_categorical_prior_transformer_history()
+
+    max_steps = int(math.ceil(args.random_text_video_seconds / float(env.dt)))
+    agent.evaluator.simple_test_policy(
+        collect_metrics=False,
+        max_steps=max_steps,
+        video_output_path=args.random_text_worker_output_path,
+        video_text_overlay=args.random_text_worker_prompt,
+    )
+    # MuJoCo passive viewer teardown can segfault after a successful recording on
+    # some drivers. This worker is intentionally one-shot, so let the OS reclaim
+    # the process resources instead of running viewer shutdown hooks.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
 # def tmp_enable_domain_randomization(robot_cfg, simulator_cfg, env_cfg):
 #     """Temporary function to enable domain randomization for testing.
 
@@ -321,6 +867,10 @@ def main():
     # Re-use the parser and args from module level
     global parser, args
     args = parser.parse_args()
+
+    if args.random_text_videos:
+        _run_random_text_video_coordinator(args)
+        return
 
     checkpoint = Path(args.checkpoint)
 
@@ -583,6 +1133,9 @@ def main():
     agent.load(args.checkpoint, load_env=False)
 
     try:
+        if args.random_text_video_worker:
+            _run_random_text_video_worker(agent, env, args)
+            return
         if args.full_eval:
             evaluation_runs = []
             evaluated_scores = []

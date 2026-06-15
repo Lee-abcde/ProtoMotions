@@ -91,6 +91,7 @@ class MujocoSimulator(Simulator):
         self.data: Optional[mujoco.MjData] = None
         self.viewer = None
         self._viewer_initialized = False
+        self._recording_renderer = None
         self._custom_key_handlers = custom_key_handlers or {}
 
         # Cached control parameters
@@ -618,7 +619,7 @@ class MujocoSimulator(Simulator):
         # Set up camera tracking
         self.viewer.cam.distance = 3.0
         self.viewer.cam.elevation = -10.0
-        self.viewer.cam.azimuth = 180.0
+        self.viewer.cam.azimuth = 0.0
         self.viewer.cam.trackbodyid = 1  # Track pelvis (first non-world body)
         self.viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
 
@@ -636,6 +637,12 @@ class MujocoSimulator(Simulator):
 
     def shutdown(self) -> None:
         """Clean shutdown of the MuJoCo simulator and viewer."""
+        if self._recording_renderer is not None:
+            try:
+                self._recording_renderer.close()
+            except Exception:
+                pass
+            self._recording_renderer = None
         self._close_viewer()
 
     def _get_sim_body_ordering(self) -> SimBodyOrdering:
@@ -1073,14 +1080,31 @@ class MujocoSimulator(Simulator):
 
     def _write_viewport_to_file(self, file_name: str) -> None:
         """Render current view to file."""
-        renderer = mujoco.Renderer(self.model, height=480, width=640)
-        renderer.update_scene(self.data)
-        pixels = renderer.render()
+        if self._recording_renderer is None:
+            self._recording_renderer = mujoco.Renderer(
+                self.model, height=480, width=640
+            )
 
-        import matplotlib.pyplot as plt
+        camera = mujoco.MjvCamera()
+        if self.viewer is not None and self._viewer_initialized:
+            camera.type = self.viewer.cam.type
+            camera.trackbodyid = self.viewer.cam.trackbodyid
+            camera.distance = self.viewer.cam.distance
+            camera.elevation = self.viewer.cam.elevation
+            camera.azimuth = self.viewer.cam.azimuth
+            camera.lookat[:] = self.viewer.cam.lookat[:]
+        else:
+            camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+            camera.trackbodyid = 1
+            camera.distance = 3.0
+            camera.elevation = -10.0
+            camera.azimuth = 0.0
+        self._recording_renderer.update_scene(self.data, camera=camera)
+        pixels = self._recording_renderer.render()
 
-        plt.imsave(file_name, pixels)
-        renderer.close()
+        from PIL import Image
+
+        Image.fromarray(pixels).save(file_name)
 
     def _init_camera(self) -> None:
         """Initialize camera position and orientation."""

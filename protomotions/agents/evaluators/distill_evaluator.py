@@ -1056,7 +1056,13 @@ class DistillEvaluator(MimicEvaluator):
             ),
         )
 
-    def simple_test_policy(self, collect_metrics: bool = False) -> None:
+    def simple_test_policy(
+        self,
+        collect_metrics: bool = False,
+        max_steps: Optional[int] = None,
+        video_output_path: Optional[str] = None,
+        video_text_overlay: Optional[str] = None,
+    ) -> None:
         """Interactive policy loop using the configured main action head."""
         self.agent.eval()
         done_indices = None
@@ -1113,6 +1119,7 @@ class DistillEvaluator(MimicEvaluator):
 
         metric_sums: Dict[str, float] = {}
         metric_counts: Dict[str, int] = {}
+        recording_started = False
         original_motion_speed_scale = None
         if motion_manager is not None:
             original_motion_speed_scale = float(
@@ -1120,6 +1127,14 @@ class DistillEvaluator(MimicEvaluator):
             )
 
         print("Evaluating policy... (Ctrl+C to stop)")
+        if video_output_path is not None:
+            recording_fps = max(1, int(round(1.0 / float(self.env.dt))))
+            self.env.simulator.start_video_recording(
+                output_path=video_output_path,
+                text_overlay=video_text_overlay,
+                fps=recording_fps,
+            )
+            recording_started = True
         if hasattr(self.agent, "reset_vq_code_history"):
             self.agent.reset_vq_code_history()
         if hasattr(self.agent, "reset_categorical_prior_transformer_history"):
@@ -1556,6 +1571,9 @@ class DistillEvaluator(MimicEvaluator):
                                 f"clip_end={clip_end} terminated={terminated_flag} reason={reason}"
                             )
                 step += 1
+                if max_steps is not None and step >= max_steps:
+                    print(f"\nStopped after {step} steps.")
+                    break
         except KeyboardInterrupt:
             print(f"\nStopped after {step} steps.")
             if collect_metrics and metric_counts:
@@ -1564,6 +1582,8 @@ class DistillEvaluator(MimicEvaluator):
                     avg = metric_sums[k] / metric_counts[k]
                     print(f"  {k}: {avg:.4f}")
         finally:
+            if recording_started:
+                self.env.simulator.stop_video_recording()
             if motion_manager is not None and original_motion_speed_scale is not None:
                 motion_manager.speed_scale = original_motion_speed_scale
 
