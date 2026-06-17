@@ -126,6 +126,15 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         ),
     )
     parser.add_argument(
+        "--use-posterior-text-input",
+        action="store_true",
+        help=(
+            "Append text_embedding_obs directly to the posterior VQ encoder "
+            "input. This is separate from the latent text residual controlled "
+            "by agent.model.use_text_conditioning."
+        ),
+    )
+    parser.add_argument(
         "--use-categorical-prior-film",
         action="store_true",
         help="Use text FiLM modulation in the categorical VQ prior.",
@@ -493,6 +502,8 @@ def agent_config(
     ]
     if bool(getattr(args, "use_posterior_oracle_motion_command", False)):
         encoder_motion_obs_in_keys.append("target_root_velocity_yaw_command")
+    if bool(getattr(args, "use_posterior_text_input", False)):
+        encoder_motion_obs_in_keys.append("text_embedding_obs")
 
     encoder_config = ModuleContainerConfig(
         in_keys=encoder_motion_obs_in_keys,
