@@ -196,10 +196,13 @@ def create_parser():
         ),
     )
     parser.add_argument(
-        "--random-text-gt-motion-file",
-        type=str,
-        default=None,
-        help="GT packaged MotionLib .pt containing text metadata and embeddings.",
+        "--random-text-single-video",
+        action="store_true",
+        default=False,
+        help=(
+            "Record all sampled random text prompts consecutively in one MuJoCo "
+            "environment and one mp4."
+        ),
     )
     parser.add_argument(
         "--random-text-video-count",
@@ -414,7 +417,7 @@ def _find_text_embedding_idx(
 
 
 def _load_random_text_prompt_samples(args) -> list[dict]:
-    gt_motion_file = Path(args.random_text_gt_motion_file)
+    gt_motion_file = Path(_resolve_random_text_motion_file(args))
     if not gt_motion_file.exists():
         raise FileNotFoundError(f"GT motion file not found: {gt_motion_file}")
 
@@ -578,8 +581,6 @@ def _build_random_text_worker_command(args, sample: dict, output_path: Path) -> 
         "--num-envs",
         "1",
         "--random-text-video-worker",
-        "--random-text-gt-motion-file",
-        str(args.random_text_gt_motion_file),
         "--random-text-video-seconds",
         str(args.random_text_video_seconds),
         "--random-text-worker-embedding-idx",
@@ -617,6 +618,32 @@ def _build_random_text_worker_command(args, sample: dict, output_path: Path) -> 
     return cmd
 
 
+def _random_text_video_output_dir(args) -> Path:
+    checkpoint = Path(args.checkpoint)
+    return (
+        Path(args.random_text_video_output_dir)
+        if args.random_text_video_output_dir is not None
+        else checkpoint.parent / "random_text_videos_new"
+    )
+
+
+def _resolve_random_text_motion_file(args) -> str:
+    if args.motion_file is None:
+        raise ValueError("--motion-file is required for random text videos.")
+    return str(args.motion_file)
+
+
+def _log_requested_text_prompt_matches(samples: list[dict]) -> None:
+    for sample in samples:
+        if "requested_prompt" in sample:
+            log.info(
+                "Requested text %r matched dataset prompt %r (%s match).",
+                sample["requested_prompt"],
+                sample["english_prompt"],
+                sample["prompt_match_type"],
+            )
+
+
 def _run_random_text_video_coordinator(args) -> None:
     if args.random_text_video_worker:
         raise ValueError("Worker mode must not also use --random-text-videos.")
@@ -624,17 +651,11 @@ def _run_random_text_video_coordinator(args) -> None:
         raise ValueError("--random-text-videos requires --simulator mujoco.")
     if args.headless:
         raise ValueError("--random-text-videos requires non-headless rendering.")
-    if args.random_text_gt_motion_file is None:
-        raise ValueError("--random-text-gt-motion-file is required.")
     if args.random_text_video_seconds <= 0.0:
         raise ValueError("--random-text-video-seconds must be positive.")
 
-    checkpoint = Path(args.checkpoint)
-    output_dir = (
-        Path(args.random_text_video_output_dir)
-        if args.random_text_video_output_dir is not None
-        else checkpoint.parent / "random_text_videos_new"
-    )
+    gt_motion_file = _resolve_random_text_motion_file(args)
+    output_dir = _random_text_video_output_dir(args)
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "manifest.jsonl"
 
@@ -644,14 +665,7 @@ def _run_random_text_video_coordinator(args) -> None:
         len(samples),
         output_dir,
     )
-    for sample in samples:
-        if "requested_prompt" in sample:
-            log.info(
-                "Requested text %r matched dataset prompt %r (%s match).",
-                sample["requested_prompt"],
-                sample["english_prompt"],
-                sample["prompt_match_type"],
-            )
+    _log_requested_text_prompt_matches(samples)
 
     records = []
     with manifest_path.open("w") as manifest_file:
@@ -670,7 +684,7 @@ def _run_random_text_video_coordinator(args) -> None:
             record = {
                 **sample,
                 "checkpoint": str(args.checkpoint),
-                "gt_motion_file": str(args.random_text_gt_motion_file),
+                "gt_motion_file": gt_motion_file,
                 "mp4_path": str(output_path),
                 "artifact_dir": str(output_dir / "artifacts"),
                 "return_code": result.returncode,
@@ -694,6 +708,69 @@ def _run_random_text_video_coordinator(args) -> None:
     if overview_path is not None:
         print(f"Random text overview video saved to {overview_path}")
     print(f"Random text video manifest saved to {manifest_path}")
+
+
+def _run_random_text_single_video(agent, env, args) -> None:
+    if args.random_text_video_worker:
+        raise ValueError("Worker mode must not use --random-text-single-video.")
+    if not args.random_text_videos:
+        raise ValueError("--random-text-single-video requires --random-text-videos.")
+    if args.simulator != "mujoco":
+        raise ValueError("--random-text-single-video requires --simulator mujoco.")
+    if args.headless:
+        raise ValueError("--random-text-single-video requires non-headless rendering.")
+    if args.num_envs != 1:
+        raise ValueError("--random-text-single-video requires --num-envs 1.")
+    if args.random_text_video_seconds <= 0.0:
+        raise ValueError("--random-text-video-seconds must be positive.")
+
+    gt_motion_file = _resolve_random_text_motion_file(args)
+    output_dir = _random_text_video_output_dir(args)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"zz_single_video_{args.random_text_video_count:03d}_prompts.mp4"
+    manifest_path = output_dir / "single_video_manifest.jsonl"
+
+    samples = _load_random_text_prompt_samples(args)
+    for sample_idx, sample in enumerate(samples):
+        sample["sample_idx"] = sample_idx
+    _log_requested_text_prompt_matches(samples)
+
+    _inject_gt_text_embeddings(agent.motion_lib, gt_motion_file)
+    segment_steps = int(math.ceil(args.random_text_video_seconds / float(env.dt)))
+    max_steps = segment_steps * len(samples)
+    log.info(
+        "Recording %s text prompts consecutively to %s "
+        "(%s steps per prompt, %s total steps).",
+        len(samples),
+        output_path,
+        segment_steps,
+        max_steps,
+    )
+
+    agent.evaluator.simple_test_policy(
+        collect_metrics=False,
+        max_steps=max_steps,
+        video_output_path=str(output_path),
+        video_text_overlay=samples[0]["english_prompt"],
+        text_prompt_sequence=samples,
+        text_prompt_segment_steps=segment_steps,
+    )
+
+    with manifest_path.open("w") as manifest_file:
+        for sample in samples:
+            record = {
+                **sample,
+                "checkpoint": str(args.checkpoint),
+                "gt_motion_file": gt_motion_file,
+                "mp4_path": str(output_path),
+                "artifact_dir": str(output_dir / "artifacts"),
+                "video_segment_seconds": float(args.random_text_video_seconds),
+                "video_segment_steps": segment_steps,
+            }
+            manifest_file.write(json.dumps(record) + "\n")
+
+    print(f"Random text single video saved to {output_path}")
+    print(f"Random text single video manifest saved to {manifest_path}")
 
 
 def _random_text_video_grid_shape(num_videos: int) -> tuple[int, int]:
@@ -788,8 +865,6 @@ def _run_random_text_video_worker(agent, env, args) -> None:
         raise ValueError("Random text video worker requires non-headless rendering.")
     if args.num_envs != 1:
         raise ValueError("Random text video worker requires --num-envs 1.")
-    if args.random_text_gt_motion_file is None:
-        raise ValueError("--random-text-gt-motion-file is required in worker mode.")
     if args.random_text_worker_embedding_idx is None:
         raise ValueError("Missing worker text embedding index.")
     if args.random_text_worker_prompt is None:
@@ -797,7 +872,8 @@ def _run_random_text_video_worker(agent, env, args) -> None:
     if args.random_text_worker_output_path is None:
         raise ValueError("Missing worker output path.")
 
-    _inject_gt_text_embeddings(agent.motion_lib, args.random_text_gt_motion_file)
+    gt_motion_file = _resolve_random_text_motion_file(args)
+    _inject_gt_text_embeddings(agent.motion_lib, gt_motion_file)
     agent.motion_lib.set_text_embedding_override_by_index(
         args.random_text_worker_embedding_idx
     )
@@ -868,7 +944,10 @@ def main():
     global parser, args
     args = parser.parse_args()
 
-    if args.random_text_videos:
+    if args.random_text_single_video and not args.random_text_videos:
+        raise ValueError("--random-text-single-video requires --random-text-videos.")
+
+    if args.random_text_videos and not args.random_text_single_video:
         _run_random_text_video_coordinator(args)
         return
 
@@ -1133,6 +1212,9 @@ def main():
     agent.load(args.checkpoint, load_env=False)
 
     try:
+        if args.random_text_videos and args.random_text_single_video:
+            _run_random_text_single_video(agent, env, args)
+            return
         if args.random_text_video_worker:
             _run_random_text_video_worker(agent, env, args)
             return

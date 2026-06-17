@@ -1062,6 +1062,8 @@ class DistillEvaluator(MimicEvaluator):
         max_steps: Optional[int] = None,
         video_output_path: Optional[str] = None,
         video_text_overlay: Optional[str] = None,
+        text_prompt_sequence: Optional[list[dict]] = None,
+        text_prompt_segment_steps: Optional[int] = None,
     ) -> None:
         """Interactive policy loop using the configured main action head."""
         self.agent.eval()
@@ -1121,10 +1123,57 @@ class DistillEvaluator(MimicEvaluator):
         metric_counts: Dict[str, int] = {}
         recording_started = False
         original_motion_speed_scale = None
+        prompt_sequence = text_prompt_sequence or []
+        prompt_sequence_motion_lib = (
+            motion_lib if motion_lib is not None else getattr(self.agent, "motion_lib", None)
+        )
+        prompt_sequence_segment_steps = (
+            int(text_prompt_segment_steps)
+            if text_prompt_segment_steps is not None
+            else None
+        )
+        active_prompt_sequence_idx = -1
         if motion_manager is not None:
             original_motion_speed_scale = float(
                 getattr(motion_manager, "speed_scale", motion_manager.config.speed_scale)
             )
+        if prompt_sequence:
+            if prompt_sequence_motion_lib is None:
+                raise RuntimeError("Text prompt sequence requires a motion library.")
+            if prompt_sequence_segment_steps is None or prompt_sequence_segment_steps <= 0:
+                raise ValueError(
+                    "text_prompt_segment_steps must be positive when using "
+                    "text_prompt_sequence."
+                )
+            video_text_overlay = str(prompt_sequence[0]["english_prompt"])
+
+        def activate_prompt_sequence_idx(prompt_sequence_idx: int) -> None:
+            nonlocal active_prompt_sequence_idx
+            if not prompt_sequence:
+                return
+            prompt_sequence_idx = min(prompt_sequence_idx, len(prompt_sequence) - 1)
+            if prompt_sequence_idx == active_prompt_sequence_idx:
+                return
+
+            sample = prompt_sequence[prompt_sequence_idx]
+            prompt_sequence_motion_lib.set_text_embedding_override_by_index(
+                int(sample["embedding_idx"])
+            )
+            prompt_text = str(sample["english_prompt"])
+            if hasattr(self.env.simulator, "set_video_recording_text_overlay"):
+                self.env.simulator.set_video_recording_text_overlay(prompt_text)
+            else:
+                self.env.simulator._recording_text_overlay = prompt_text
+            active_prompt_sequence_idx = prompt_sequence_idx
+            print(
+                "[text-sequence] "
+                f"segment={prompt_sequence_idx + 1}/{len(prompt_sequence)} "
+                f"prompt={prompt_text!r}"
+            )
+            if hasattr(self.agent, "reset_vq_code_history"):
+                self.agent.reset_vq_code_history()
+            if hasattr(self.agent, "reset_categorical_prior_transformer_history"):
+                self.agent.reset_categorical_prior_transformer_history()
 
         print("Evaluating policy... (Ctrl+C to stop)")
         if video_output_path is not None:
@@ -1146,6 +1195,8 @@ class DistillEvaluator(MimicEvaluator):
             )
         try:
             while True:
+                if prompt_sequence:
+                    activate_prompt_sequence_idx(step // prompt_sequence_segment_steps)
                 switch_env_ids = self._consume_interactive_motion_id_request()
                 if switch_env_ids is not None:
                     obs, _ = self.env.reset(

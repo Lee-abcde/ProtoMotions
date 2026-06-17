@@ -120,6 +120,12 @@ class RecordingMixin:
         self.render()
         return self._last_recorded_video_path
 
+    def set_video_recording_text_overlay(
+        self, text_overlay: Optional[str] = None
+    ) -> None:
+        """Update the text overlay used for subsequently recorded frames."""
+        self._recording_text_overlay = text_overlay
+
     def _resolve_recording_paths(self) -> None:
         if self._recording_output_path_override is None:
             curr_date_time = datetime.now().strftime("%Y-%m-%d-%H-%M-%S-%f")
