@@ -598,6 +598,109 @@ def build_reduced_coords_target_poses(
     return obs.view(num_envs, -1)
 
 
+def build_masked_root_target_poses(
+    current_state_anchor_rot: Tensor,
+    mimic_ref_anchor_rot: Tensor,
+    mimic_ref_anchor_pos: Tensor,
+    current_ref_anchor_rot: Tensor,
+    current_ref_anchor_pos: Tensor,
+    target_bodies_masks: Tensor,
+    w_last: bool = True,
+    future_steps: Union[int, List[int]] = None,
+    anchor_rotation_mode: str = "current_to_ref",
+    ref_delta_prob: float = None,
+) -> Tensor:
+    """Build masked root/anchor target observations.
+
+    Per future step feature order is [root_rot_6d, xy_ref_delta, height_ref_delta].
+    Translation masks gate XY+height and rotation masks gate root_rot_6d.
+    """
+    num_envs = current_state_anchor_rot.shape[0]
+
+    if future_steps is not None:
+        mimic_ref_anchor_rot = select_step_indices(mimic_ref_anchor_rot, future_steps)
+        mimic_ref_anchor_pos = select_step_indices(mimic_ref_anchor_pos, future_steps)
+
+    num_steps = mimic_ref_anchor_rot.shape[1]
+    ref_state_anchor_rot = mimic_ref_anchor_rot.reshape(-1, 4)
+
+    current_state_anchor_rot_expanded = (
+        current_state_anchor_rot.unsqueeze(1)
+        .expand(num_envs, num_steps, 4)
+        .contiguous()
+        .view(-1, 4)
+    )
+
+    if anchor_rotation_mode not in ("current_to_ref", "ref_delta"):
+        raise ValueError(
+            "anchor_rotation_mode must be one of "
+            "['current_to_ref', 'ref_delta'], got "
+            f"{anchor_rotation_mode!r}."
+        )
+
+    rel_target_anchor_rot = rotations.quat_mul(
+        rotations.quat_conjugate(current_state_anchor_rot_expanded, w_last),
+        ref_state_anchor_rot,
+        w_last,
+    )
+
+    use_ref_delta = anchor_rotation_mode == "ref_delta"
+    if ref_delta_prob is not None:
+        if ref_delta_prob < 0.0 or ref_delta_prob > 1.0:
+            raise ValueError(
+                "ref_delta_prob must be in [0, 1], got "
+                f"{ref_delta_prob}."
+            )
+        use_ref_delta = ref_delta_prob > 0.0
+
+    if use_ref_delta:
+        ref_anchor_rotation_origin = (
+            current_ref_anchor_rot.unsqueeze(1)
+            .expand(num_envs, num_steps, 4)
+            .contiguous()
+            .view(-1, 4)
+        )
+        ref_delta_anchor_rot = rotations.quat_mul(
+            rotations.quat_conjugate(ref_anchor_rotation_origin, w_last),
+            ref_state_anchor_rot,
+            w_last,
+        )
+        if ref_delta_prob is None:
+            rel_target_anchor_rot = ref_delta_anchor_rot
+        else:
+            ref_delta_mask = (
+                torch.rand(
+                    num_envs * num_steps,
+                    1,
+                    device=ref_delta_anchor_rot.device,
+                )
+                < ref_delta_prob
+            )
+            rel_target_anchor_rot = torch.where(
+                ref_delta_mask,
+                ref_delta_anchor_rot,
+                rel_target_anchor_rot,
+            )
+
+    root_rot_obs = rotations.quat_to_tan_norm(rel_target_anchor_rot, w_last).view(
+        num_envs, num_steps, 6
+    )
+
+    ref_delta_pos = mimic_ref_anchor_pos - current_ref_anchor_pos.unsqueeze(1)
+    xy_ref_delta = ref_delta_pos[..., :2]
+    height_ref_delta = ref_delta_pos[..., 2:3]
+    pos_obs = torch.cat((xy_ref_delta, height_ref_delta), dim=-1)
+
+    masks = target_bodies_masks.view(num_envs, num_steps, 1, 2)
+    translation_mask = masks[..., 0].to(pos_obs.dtype)
+    rotation_mask = masks[..., 1].to(root_rot_obs.dtype)
+
+    root_rot_obs = root_rot_obs * rotation_mask
+    pos_obs = pos_obs * translation_mask
+
+    return torch.cat((root_rot_obs, pos_obs), dim=-1).reshape(num_envs, -1)
+
+
 # Context mapping for reduced coords target poses
 
 

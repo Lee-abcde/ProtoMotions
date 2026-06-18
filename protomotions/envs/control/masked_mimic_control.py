@@ -57,6 +57,10 @@ class MaskedMimicControlConfig(MimicControlConfig):
         num_masked_future_steps: Number of future pose samples for masked mimic conditioning.
         time_alpha: Alpha parameter for beta distribution time sampling.
         time_beta: Beta parameter for beta distribution time sampling.
+        conditionable_body_names: Optional explicit body names that can be conditioned on.
+            Defaults to robot_config.trackable_bodies_subset.
+        fixed_target_steps: Optional fixed future frame offsets. If set, target
+            times are current motion time plus step * env.dt instead of beta sampled.
         repeat_mask_probability: Probability of repeating previous body mask.
         force_max_conditioned_bodies_prob: Probability of conditioning on all bodies.
         force_small_num_conditioned_bodies_prob: Probability of using small number of bodies.
@@ -76,6 +80,8 @@ class MaskedMimicControlConfig(MimicControlConfig):
     time_beta: float = 5.0
     
     # Joint masking
+    conditionable_body_names: Optional[List[str]] = None
+    fixed_target_steps: Optional[List[int]] = None
     repeat_mask_probability: float = 0.8
     force_max_conditioned_bodies_prob: float = 0.1
     force_small_num_conditioned_bodies_prob: float = 0.1
@@ -114,12 +120,30 @@ class MaskedMimicControl(MimicControl):
         """
         super().__init__(config, env)
         
-        # Get conditionable body IDs from robot config
+        if (
+            self.config.fixed_target_steps is not None
+            and len(self.config.fixed_target_steps)
+            != self.config.num_masked_future_steps
+        ):
+            raise ValueError(
+                "fixed_target_steps length must match "
+                "num_masked_future_steps, got "
+                f"{len(self.config.fixed_target_steps)} and "
+                f"{self.config.num_masked_future_steps}."
+            )
+
+        # Get conditionable body IDs from robot config or explicit config.
         self._all_body_names = self.env.robot_config.kinematic_info.body_names
+        conditionable_body_names = (
+            self.config.conditionable_body_names
+            if self.config.conditionable_body_names is not None
+            else self.env.robot_config.trackable_bodies_subset
+        )
+        self.conditionable_body_names = conditionable_body_names
         self.conditionable_body_ids = torch.tensor(
             [
                 self._all_body_names.index(name)
-                for name in self.env.robot_config.trackable_bodies_subset
+                for name in conditionable_body_names
             ],
             device=self.env.device,
             dtype=torch.long,
@@ -150,7 +174,19 @@ class MaskedMimicControl(MimicControl):
             dtype=torch.float,
             device=self.env.device,
         )
-        
+
+        if self.config.fixed_target_steps is None:
+            self.fixed_target_step_offsets = None
+        else:
+            self.fixed_target_step_offsets = (
+                torch.tensor(
+                    self.config.fixed_target_steps,
+                    dtype=torch.float,
+                    device=self.env.device,
+                )
+                * self.env.dt
+            )
+
         self._initialized = False
     
     def reset(self, env_ids: Tensor):
@@ -175,6 +211,13 @@ class MaskedMimicControl(MimicControl):
         # Reset masks
         self.masked_mimic_target_poses_masks[env_ids] = False
         self.masked_mimic_target_bodies_masks[env_ids] = False
+
+        if self.fixed_target_step_offsets is not None:
+            self._set_fixed_target_time_steps(env_ids)
+            for _ in range(self.config.num_masked_future_steps):
+                self._shift_and_sample_body_masks(env_ids)
+            self._initialized = True
+            return
         
         # Sample all future steps
         for _ in range(self.config.num_masked_future_steps):
@@ -194,6 +237,12 @@ class MaskedMimicControl(MimicControl):
         
         if not self._initialized:
             return
+
+        if self.fixed_target_step_offsets is not None:
+            all_env_ids = torch.arange(self.env.num_envs, device=self.env.device)
+            self._set_fixed_target_time_steps(all_env_ids)
+            self._shift_and_sample_body_masks(all_env_ids)
+            return
         
         current_time = self.env.motion_manager.motion_times
         
@@ -204,7 +253,15 @@ class MaskedMimicControl(MimicControl):
         if len(resample_env_ids) > 0:
             self._shift_and_sample_time_steps(resample_env_ids)
             self._shift_and_sample_body_masks(resample_env_ids)
-    
+
+    def _set_fixed_target_time_steps(self, env_ids: Tensor):
+        """Set target times from configured fixed frame offsets."""
+        current_times = self.env.motion_manager.motion_times[env_ids]
+        self.target_times[env_ids] = (
+            current_times.unsqueeze(-1)
+            + self.fixed_target_step_offsets.unsqueeze(0)
+        )
+
     def _shift_and_sample_time_steps(self, env_ids: Tensor):
         """Shift target time steps forward and sample a new future time step.
         
@@ -468,8 +525,11 @@ class MaskedMimicControl(MimicControl):
             num_envs, num_future_steps, num_bodies, 4
         )
         
-        # Compute time offsets from current time
-        masked_mimic_time_offsets = self.target_times - motion_times.unsqueeze(-1)
+        # Compute time offsets from the clipped target times used for pose lookup.
+        masked_mimic_time_offsets = (
+            flat_target_times.view(num_envs, num_future_steps)
+            - motion_times.unsqueeze(-1)
+        )
         
         # Populate the masked_mimic view
         ctx.masked_mimic = MaskedMimicContext(
@@ -502,8 +562,8 @@ class MaskedMimicControl(MimicControl):
         
         visualization_markers = {}
         
-        # Use trackable_bodies_subset for masked mimic (not all bodies)
-        body_names = self.env.robot_config.trackable_bodies_subset
+        # Use the same body set as mask sampling.
+        body_names = self.conditionable_body_names
         
         body_markers = []
         for body_name in body_names:

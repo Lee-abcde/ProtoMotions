@@ -140,6 +140,25 @@ class FiLMConfig:
     )
 
 
+@dataclass
+class TokenDropoutConfig:
+    """Training-time token dropout that also emits an attention keep mask."""
+
+    _target_: str = "protomotions.agents.common.common.TokenDropout"
+    in_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Single token tensor key to randomly drop."}
+    )
+    out_keys: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Output keys [dropped_token, keep_mask]."}
+    )
+    keep_prob: float = field(
+        default=1.0,
+        metadata={"help": "Probability of keeping the token during training."}
+    )
+
+
 # =============================================================================
 # MLP Configurations (from mlp.py)
 # =============================================================================

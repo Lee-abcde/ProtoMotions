@@ -40,6 +40,7 @@ from protomotions.agents.utils.normalization import RunningMeanStd
 from protomotions.agents.common.config import (
     NormObsBaseConfig,
     FiLMConfig,
+    TokenDropoutConfig,
     ObsProcessorConfig,
     ModuleContainerConfig,
     ModuleOperationConfig,
@@ -253,6 +254,41 @@ class FiLM(TensorDictModuleBase):
         gamma, beta = film_params.chunk(2, dim=-1)
         scale = float(self.config.scale)
         tensordict[self.out_keys[0]] = features * (1.0 + scale * gamma) + scale * beta
+        return tensordict
+
+
+class TokenDropout(TensorDictModuleBase):
+    """Drop a token during training and expose its attention keep mask."""
+
+    config: TokenDropoutConfig
+
+    def __init__(self, config: TokenDropoutConfig):
+        TensorDictModuleBase.__init__(self)
+        self.config = config
+        assert len(config.in_keys) == 1, "TokenDropout expects exactly one input key."
+        assert len(config.out_keys) == 2, (
+            "TokenDropout expects output keys [dropped_token, keep_mask]."
+        )
+        if config.keep_prob < 0.0 or config.keep_prob > 1.0:
+            raise ValueError(f"keep_prob must be in [0, 1], got {config.keep_prob}.")
+        self.in_keys = config.in_keys
+        self.out_keys = config.out_keys
+
+    def forward(self, tensordict: TensorDict) -> TensorDict:
+        token = tensordict[self.in_keys[0]]
+        mask_shape = token.shape[:-1]
+
+        if self.training and self.config.keep_prob < 1.0:
+            keep_mask = (
+                torch.rand(mask_shape, device=token.device)
+                < self.config.keep_prob
+            )
+        else:
+            keep_mask = torch.ones(mask_shape, dtype=torch.bool, device=token.device)
+
+        dropped_token = token * keep_mask.unsqueeze(-1).to(token.dtype)
+        tensordict[self.out_keys[0]] = dropped_token
+        tensordict[self.out_keys[1]] = keep_mask
         return tensordict
 
 

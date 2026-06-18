@@ -46,6 +46,8 @@ from protomotions.agents.distill.config import (
 
 VQ_LATENT_DIM = 64
 NUM_EMBEDDINGS = 512
+MIMIC_FUTURE_STEPS = [1, 2, 4, 8]
+MASKED_ROOT_TARGET_FEATURE_DIM = 9
 
 
 def additional_experiment_arguments(parser: argparse.ArgumentParser):
@@ -132,6 +134,31 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
             "Append text_embedding_obs directly to the posterior VQ encoder "
             "input. This is separate from the latent text residual controlled "
             "by agent.model.use_text_conditioning."
+        ),
+    )
+    parser.add_argument(
+        "--use-masked-root-target-condition",
+        action="store_true",
+        help=(
+            "Add a masked root/anchor future target condition with fixed "
+            "future steps matching the reduced target pose steps."
+        ),
+    )
+    parser.add_argument(
+        "--use-masked-multimodal-prior",
+        action="store_true",
+        help=(
+            "Use a Transformer categorical prior over current state, last "
+            "action, state history, masked root target, and masked text tokens."
+        ),
+    )
+    parser.add_argument(
+        "--masked-text-visible-prob",
+        type=float,
+        default=0.8,
+        help=(
+            "Training-time probability of keeping the text token in the "
+            "masked multimodal prior. Evaluation keeps full text."
         ),
     )
     parser.add_argument(
@@ -292,6 +319,7 @@ def motion_lib_config(args: argparse.Namespace):
 def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     from protomotions.envs.motion_manager.config import MimicMotionManagerConfig
     from protomotions.envs.control.mimic_control import MimicControlConfig
+    from protomotions.envs.control.masked_mimic_control import MaskedMimicControlConfig
     from protomotions.envs.mdp_component import MdpComponent
     from protomotions.envs.context_views import EnvContext
     from protomotions.envs.component_factories import (
@@ -312,20 +340,43 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     )
     from protomotions.envs.rewards import compute_soft_pos_limit_rew
     from protomotions.envs.action import make_bm_pd_action_config
+    from protomotions.envs.obs import (
+        build_masked_root_target_poses,
+        compute_target_time_offsets,
+        to_float,
+    )
     from protomotions.envs.obs.vq_pae_bm import passthrough_text_embedding
 
+    use_masked_root_target_condition = bool(
+        getattr(args, "use_masked_root_target_condition", False)
+    )
     reduced_target_anchor_rotation_mode = getattr(
         args, "reduced_target_anchor_rotation_mode", "current_to_ref"
     )
     reduced_target_ref_delta_prob = getattr(
         args, "reduced_target_ref_delta_prob", None
     )
-    control_components = {
-        "mimic": MimicControlConfig(
-            bootstrap_on_episode_end=True,
-            future_steps=[1, 2, 4, 8],
-        )
-    }
+    if use_masked_root_target_condition:
+        control_components = {
+            "masked_mimic": MaskedMimicControlConfig(
+                bootstrap_on_episode_end=True,
+                future_steps=MIMIC_FUTURE_STEPS,
+                num_masked_future_steps=len(MIMIC_FUTURE_STEPS),
+                fixed_target_steps=MIMIC_FUTURE_STEPS,
+                conditionable_body_names=[robot_cfg.anchor_body_name],
+                repeat_mask_probability=0.8,
+                force_max_conditioned_bodies_prob=0.1,
+                force_small_num_conditioned_bodies_prob=0.1,
+                visible_target_pose_prob=0.8,
+            )
+        }
+    else:
+        control_components = {
+            "mimic": MimicControlConfig(
+                bootstrap_on_episode_end=True,
+                future_steps=MIMIC_FUTURE_STEPS,
+            )
+        }
 
     observation_components = {
         "noisy_reduced_coords_obs": reduced_coords_obs_factory(
@@ -377,6 +428,51 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             },
         ),
     }
+    if use_masked_root_target_condition:
+        observation_components.update(
+            {
+                "masked_mimic_root_target_poses": MdpComponent(
+                    compute_func=build_masked_root_target_poses,
+                    dynamic_vars={
+                        "current_state_anchor_rot": EnvContext.noisy.anchor_rot,
+                        "mimic_ref_anchor_rot": EnvContext.mimic.future_anchor_rot,
+                        "mimic_ref_anchor_pos": EnvContext.mimic.future_anchor_pos,
+                        "current_ref_anchor_rot": EnvContext.mimic.ref_anchor_rot,
+                        "current_ref_anchor_pos": EnvContext.mimic.ref_anchor_pos,
+                        "target_bodies_masks": (
+                            EnvContext.masked_mimic.target_bodies_masks
+                        ),
+                    },
+                    static_params={
+                        "w_last": True,
+                        "anchor_rotation_mode": (
+                            reduced_target_anchor_rotation_mode
+                        ),
+                        "ref_delta_prob": reduced_target_ref_delta_prob,
+                    },
+                ),
+                "masked_mimic_target_bodies_masks": MdpComponent(
+                    compute_func=to_float,
+                    dynamic_vars={
+                        "x": EnvContext.masked_mimic.target_bodies_masks,
+                    },
+                ),
+                "masked_mimic_target_times": MdpComponent(
+                    compute_func=compute_target_time_offsets,
+                    dynamic_vars={
+                        "masked_mimic_time_offsets": (
+                            EnvContext.masked_mimic.time_offsets
+                        ),
+                    },
+                ),
+                "masked_mimic_target_poses_masks": MdpComponent(
+                    compute_func=to_float,
+                    dynamic_vars={
+                        "x": EnvContext.masked_mimic.target_poses_masks,
+                    },
+                ),
+            }
+        )
     if bool(getattr(args, "use_prior_oracle_motion_command", False)) or bool(
         getattr(args, "use_posterior_oracle_motion_command", False)
     ):
@@ -478,7 +574,10 @@ def agent_config(
         MoEMLPWithConcatConfig,
         ModuleContainerConfig,
         ModuleOperationForwardConfig,
+        ModuleOperationReshapeConfig,
         ObsProcessorConfig,
+        TokenDropoutConfig,
+        TransformerConfig,
     )
     from protomotions.agents.evaluators.config import (
         DistillEvaluatorConfig,
@@ -494,12 +593,25 @@ def agent_config(
     )
 
     vq_latent_dim = int(getattr(args, "vq_latent_dim", VQ_LATENT_DIM))
+    use_masked_root_target_condition = bool(
+        getattr(args, "use_masked_root_target_condition", False)
+    )
+    use_masked_multimodal_prior = bool(
+        getattr(args, "use_masked_multimodal_prior", False)
+    )
 
     encoder_motion_obs_in_keys = [
         "noisy_reduced_coords_obs",
         "noisy_mimic_reduced_coords_target_poses",
         "historical_previous_processed_actions",
     ]
+    if use_masked_root_target_condition:
+        encoder_motion_obs_in_keys += [
+            "masked_mimic_root_target_poses",
+            "masked_mimic_target_bodies_masks",
+            "masked_mimic_target_times",
+            "masked_mimic_target_poses_masks",
+        ]
     if bool(getattr(args, "use_posterior_oracle_motion_command", False)):
         encoder_motion_obs_in_keys.append("target_root_velocity_yaw_command")
     if bool(getattr(args, "use_posterior_text_input", False)):
@@ -590,11 +702,39 @@ def agent_config(
     use_categorical_prior_moe = bool(
         getattr(args, "use_categorical_prior_moe", False)
     )
+    if use_masked_multimodal_prior and not use_masked_root_target_condition:
+        raise ValueError(
+            "--use-masked-multimodal-prior requires "
+            "--use-masked-root-target-condition."
+        )
+    if use_masked_multimodal_prior and not bool(
+        getattr(args, "use_prior_state_history", False)
+    ):
+        raise ValueError(
+            "--use-masked-multimodal-prior requires "
+            "--use-prior-state-history so the prior can consume history state."
+        )
     if use_categorical_prior_transformer and use_categorical_prior_film:
         raise ValueError(
             "--use-categorical-prior-transformer and "
             "--use-categorical-prior-film are separate prior architectures; "
             "enable only one for this ablation."
+        )
+    if use_masked_multimodal_prior and use_categorical_prior_transformer:
+        raise ValueError(
+            "--use-masked-multimodal-prior and "
+            "--use-categorical-prior-transformer are separate prior "
+            "architectures; enable only one."
+        )
+    if use_masked_multimodal_prior and use_categorical_prior_film:
+        raise ValueError(
+            "--use-masked-multimodal-prior and --use-categorical-prior-film "
+            "are separate prior architectures; enable only one."
+        )
+    if use_masked_multimodal_prior and use_categorical_prior_moe:
+        raise ValueError(
+            "--use-masked-multimodal-prior and --use-categorical-prior-moe "
+            "are separate prior architectures; enable only one."
         )
     if use_categorical_prior_moe and use_categorical_prior_transformer:
         raise ValueError(
@@ -611,6 +751,11 @@ def agent_config(
         raise ValueError(
             "--vq-prior-history-steps is not wired into the Transformer prior "
             "yet; keep it at 0 for this ablation."
+        )
+    if use_masked_multimodal_prior and vq_prior_history_steps > 0:
+        raise ValueError(
+            "--vq-prior-history-steps is not wired into the masked multimodal "
+            "Transformer prior yet; keep it at 0 for this ablation."
         )
     categorical_prior_film_hidden_dim = int(
         getattr(args, "categorical_prior_film_hidden_dim", 1024)
@@ -632,6 +777,15 @@ def agent_config(
         "historical_previous_processed_actions",
     ]
     categorical_prior_context_in_keys = ["categorical_prior_motion_obs_norm"]
+    if use_masked_root_target_condition:
+        masked_root_obs_keys = [
+            "masked_mimic_root_target_poses",
+            "masked_mimic_target_bodies_masks",
+            "masked_mimic_target_times",
+            "masked_mimic_target_poses_masks",
+        ]
+        categorical_prior_container_in_keys += masked_root_obs_keys
+        categorical_prior_motion_obs_in_keys += masked_root_obs_keys
     if bool(getattr(args, "use_prior_oracle_motion_command", False)):
         categorical_prior_container_in_keys.append("target_root_velocity_yaw_command")
         categorical_prior_motion_obs_in_keys.append("target_root_velocity_yaw_command")
@@ -680,6 +834,222 @@ def agent_config(
                     getattr(args, "vq_prior_transformer_num_layers", 2)
                 ),
                 dropout=float(getattr(args, "vq_prior_transformer_dropout", 0.1)),
+            ),
+        ]
+    elif use_masked_multimodal_prior:
+        num_root_target_steps = len(MIMIC_FUTURE_STEPS)
+        prior_state_history_steps = int(
+            getattr(args, "prior_state_history_steps", 4)
+        )
+        transformer_token_size = int(
+            getattr(args, "vq_prior_transformer_d_model", 512)
+        )
+        token_encoder_hidden_dim = int(
+            getattr(args, "vq_prior_transformer_ff_size", 1024)
+        )
+        categorical_prior_container_in_keys = [
+            "noisy_reduced_coords_obs",
+            "historical_previous_processed_actions",
+            "noisy_historical_reduced_coords_obs",
+            "masked_mimic_root_target_poses",
+            "masked_mimic_target_bodies_masks",
+            "masked_mimic_target_times",
+            "masked_mimic_target_poses_masks",
+            "text_embedding_obs",
+        ]
+        categorical_prior_models = [
+            ObsProcessorConfig(
+                in_keys=["noisy_historical_reduced_coords_obs"],
+                out_keys=["prior_history_state_obs_seq"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                module_operations=[
+                    ModuleOperationReshapeConfig(
+                        new_shape=[
+                            "batch_size",
+                            prior_state_history_steps,
+                            -1,
+                        ]
+                    ),
+                    ModuleOperationForwardConfig(),
+                ],
+            ),
+            ObsProcessorConfig(
+                in_keys=["masked_mimic_root_target_poses"],
+                out_keys=["prior_root_target_poses_seq"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                module_operations=[
+                    ModuleOperationReshapeConfig(
+                        new_shape=[
+                            "batch_size",
+                            num_root_target_steps,
+                            MASKED_ROOT_TARGET_FEATURE_DIM,
+                        ]
+                    ),
+                    ModuleOperationForwardConfig(),
+                ],
+            ),
+            ObsProcessorConfig(
+                in_keys=["masked_mimic_target_bodies_masks"],
+                out_keys=["prior_root_target_bodies_masks_seq"],
+                normalize_obs=False,
+                module_operations=[
+                    ModuleOperationReshapeConfig(
+                        new_shape=["batch_size", num_root_target_steps, -1]
+                    ),
+                ],
+            ),
+            ObsProcessorConfig(
+                in_keys=["masked_mimic_target_times"],
+                out_keys=["prior_root_target_times_seq"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                module_operations=[
+                    ModuleOperationReshapeConfig(
+                        new_shape=["batch_size", num_root_target_steps, -1]
+                    ),
+                    ModuleOperationForwardConfig(),
+                ],
+            ),
+            MLPWithConcatConfig(
+                in_keys=["noisy_reduced_coords_obs"],
+                out_keys=["prior_current_state_token"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                num_out=transformer_token_size,
+                layers=[
+                    MLPLayerConfig(
+                        units=token_encoder_hidden_dim, activation="relu"
+                    )
+                    for _ in range(2)
+                ],
+                module_operations=[
+                    ModuleOperationReshapeConfig(
+                        new_shape=["batch_size", 1, -1]
+                    ),
+                    ModuleOperationForwardConfig(),
+                ],
+            ),
+            MLPWithConcatConfig(
+                in_keys=["historical_previous_processed_actions"],
+                out_keys=["prior_last_action_token"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                num_out=transformer_token_size,
+                layers=[
+                    MLPLayerConfig(
+                        units=token_encoder_hidden_dim, activation="relu"
+                    )
+                    for _ in range(2)
+                ],
+                module_operations=[
+                    ModuleOperationReshapeConfig(
+                        new_shape=["batch_size", 1, -1]
+                    ),
+                    ModuleOperationForwardConfig(),
+                ],
+            ),
+            MLPWithConcatConfig(
+                in_keys=["prior_history_state_obs_seq"],
+                out_keys=["prior_history_state_token"],
+                normalize_obs=False,
+                num_out=transformer_token_size,
+                layers=[
+                    MLPLayerConfig(
+                        units=token_encoder_hidden_dim, activation="relu"
+                    )
+                    for _ in range(2)
+                ],
+                module_operations=[
+                    ModuleOperationReshapeConfig(
+                        new_shape=[
+                            "batch_size",
+                            prior_state_history_steps,
+                            -1,
+                        ]
+                    ),
+                    ModuleOperationForwardConfig(),
+                ],
+            ),
+            MLPWithConcatConfig(
+                in_keys=[
+                    "prior_root_target_poses_seq",
+                    "prior_root_target_bodies_masks_seq",
+                    "prior_root_target_times_seq",
+                ],
+                out_keys=["prior_root_target_token"],
+                normalize_obs=False,
+                num_out=transformer_token_size,
+                layers=[
+                    MLPLayerConfig(
+                        units=token_encoder_hidden_dim, activation="relu"
+                    )
+                    for _ in range(2)
+                ],
+                module_operations=[
+                    ModuleOperationReshapeConfig(
+                        new_shape=["batch_size", num_root_target_steps, -1]
+                    ),
+                    ModuleOperationForwardConfig(),
+                ],
+            ),
+            MLPWithConcatConfig(
+                in_keys=["text_embedding_obs"],
+                out_keys=["prior_text_token"],
+                normalize_obs=False,
+                num_out=transformer_token_size,
+                layers=[
+                    MLPLayerConfig(
+                        units=token_encoder_hidden_dim, activation="relu"
+                    )
+                    for _ in range(2)
+                ],
+                module_operations=[
+                    ModuleOperationReshapeConfig(
+                        new_shape=["batch_size", 1, -1]
+                    ),
+                    ModuleOperationForwardConfig(),
+                ],
+            ),
+            TokenDropoutConfig(
+                in_keys=["prior_text_token"],
+                out_keys=["prior_text_token_dropped", "prior_text_token_mask"],
+                keep_prob=float(getattr(args, "masked_text_visible_prob", 0.8)),
+            ),
+            TransformerConfig(
+                in_keys=[
+                    "prior_current_state_token",
+                    "prior_last_action_token",
+                    "prior_history_state_token",
+                    "prior_root_target_token",
+                    "prior_text_token_dropped",
+                    "masked_mimic_target_poses_masks",
+                    "prior_text_token_mask",
+                ],
+                out_keys=["prior_multimodal_transformer_out"],
+                input_and_mask_mapping={
+                    "prior_root_target_token": "masked_mimic_target_poses_masks",
+                    "prior_text_token_dropped": "prior_text_token_mask",
+                },
+                transformer_token_size=transformer_token_size,
+                latent_dim=transformer_token_size,
+                num_heads=int(getattr(args, "vq_prior_transformer_num_heads", 4)),
+                ff_size=int(getattr(args, "vq_prior_transformer_ff_size", 1024)),
+                num_layers=int(
+                    getattr(args, "vq_prior_transformer_num_layers", 2)
+                ),
+                dropout=float(getattr(args, "vq_prior_transformer_dropout", 0.1)),
+                output_activation="relu",
+            ),
+            MLPWithConcatConfig(
+                in_keys=["prior_multimodal_transformer_out"],
+                out_keys=["prior_code_logits"],
+                num_out=categorical_prior_num_out,
+                layers=[
+                    MLPLayerConfig(units=1024, activation="relu")
+                    for _ in range(2)
+                ],
             ),
         ]
     else:
@@ -762,7 +1132,7 @@ def agent_config(
                 expert_load_key="categorical_prior_moe_expert_load",
             )
         )
-    elif not use_categorical_prior_transformer:
+    elif not use_categorical_prior_transformer and not use_masked_multimodal_prior:
         categorical_prior_mlp_in_keys = categorical_prior_context_in_keys + [
             "text_embedding_obs"
         ]
@@ -1008,6 +1378,9 @@ def apply_inference_overrides(
         mimic_target_poses_reduced_coords_factory,
         target_root_velocity_yaw_command_factory,
     )
+    from protomotions.envs.context_views import EnvContext
+    from protomotions.envs.mdp_component import MdpComponent
+    from protomotions.envs.obs import build_masked_root_target_poses
 
     if hasattr(env_cfg, "termination_components") and env_cfg.termination_components:
         env_cfg.termination_components = {}
@@ -1048,4 +1421,29 @@ def apply_inference_overrides(
     if "target_root_velocity_yaw_command" in env_cfg.observation_components:
         env_cfg.observation_components["target_root_velocity_yaw_command"] = (
             target_root_velocity_yaw_command_factory(use_noisy=False)
+        )
+    if "masked_mimic_root_target_poses" in env_cfg.observation_components:
+        env_cfg.observation_components["masked_mimic_root_target_poses"] = (
+            MdpComponent(
+                compute_func=build_masked_root_target_poses,
+                dynamic_vars={
+                    "current_state_anchor_rot": EnvContext.current.anchor_rot,
+                    "mimic_ref_anchor_rot": EnvContext.mimic.future_anchor_rot,
+                    "mimic_ref_anchor_pos": EnvContext.mimic.future_anchor_pos,
+                    "current_ref_anchor_rot": EnvContext.mimic.ref_anchor_rot,
+                    "current_ref_anchor_pos": EnvContext.mimic.ref_anchor_pos,
+                    "target_bodies_masks": (
+                        EnvContext.masked_mimic.target_bodies_masks
+                    ),
+                },
+                static_params={
+                    "w_last": True,
+                    "anchor_rotation_mode": getattr(
+                        args,
+                        "reduced_target_anchor_rotation_mode",
+                        "current_to_ref",
+                    ),
+                    "ref_delta_prob": None,
+                },
+            )
         )
