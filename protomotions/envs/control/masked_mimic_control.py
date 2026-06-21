@@ -592,6 +592,17 @@ class MaskedMimicControl(MimicControl):
             type="sphere", color=(1.0, 0.0, 0.0), markers=body_markers
         )
         visualization_markers["body_markers_red"] = body_markers_red_cfg
+
+        # Matching arrows show target 3D rotation when rotation conditioning is visible.
+        visualization_markers["body_rotation_markers_blue"] = VisualizationMarkerConfig(
+            type="arrow", color=(0.0, 0.0, 1.0), markers=body_markers
+        )
+        visualization_markers["body_rotation_markers_yellow"] = VisualizationMarkerConfig(
+            type="arrow", color=(1.0, 1.0, 0.0), markers=body_markers
+        )
+        visualization_markers["body_rotation_markers_red"] = VisualizationMarkerConfig(
+            type="arrow", color=(1.0, 0.0, 0.0), markers=body_markers
+        )
         
         return visualization_markers
     
@@ -637,6 +648,7 @@ class MaskedMimicControl(MimicControl):
         
         # Extract only conditionable bodies
         target_pos = target_pos[:, self.conditionable_body_ids, :]
+        target_rot = ref_state.rigid_body_rot[:, self.conditionable_body_ids, :]
         
         # Get translation mask for first visible pose
         bodies_masks_reshaped = self.masked_mimic_target_bodies_masks.view(
@@ -646,7 +658,9 @@ class MaskedMimicControl(MimicControl):
             2,
         )
         translation_view = bodies_masks_reshaped[env_indices, first_valid_indices, :, 0]
+        rotation_view = bodies_masks_reshaped[env_indices, first_valid_indices, :, 1]
         active_translations = (translation_view == 1)  # [num_envs, num_conditionable_bodies]
+        active_rotations = (rotation_view == 1)  # [num_envs, num_conditionable_bodies]
         
         # Create masks for each time range
         blue_time_mask = (
@@ -665,16 +679,28 @@ class MaskedMimicControl(MimicControl):
         blue_markers = active_translations & blue_time_mask
         yellow_markers = active_translations & yellow_time_mask
         red_markers = active_translations & red_time_mask
+        blue_rotation_markers = active_rotations & blue_time_mask
+        yellow_rotation_markers = active_rotations & yellow_time_mask
+        red_rotation_markers = active_rotations & red_time_mask
         
         # Create separate target positions for each color group
         target_pos_blue = target_pos.clone()
         target_pos_yellow = target_pos.clone()
         target_pos_red = target_pos.clone()
+        target_rotation_pos_blue = target_pos.clone()
+        target_rotation_pos_yellow = target_pos.clone()
+        target_rotation_pos_red = target_pos.clone()
+        target_rotation_pos_blue[..., 2] += 0.08
+        target_rotation_pos_yellow[..., 2] += 0.08
+        target_rotation_pos_red[..., 2] += 0.08
         
         # Move inactive markers off screen (add large offset)
         target_pos_blue[~blue_markers] += 100
         target_pos_yellow[~yellow_markers] += 100
         target_pos_red[~red_markers] += 100
+        target_rotation_pos_blue[~blue_rotation_markers] += 100
+        target_rotation_pos_yellow[~yellow_rotation_markers] += 100
+        target_rotation_pos_red[~red_rotation_markers] += 100
         
         # Add marker states for each color group
         markers_state["body_markers_blue"] = MarkerState(
@@ -694,6 +720,18 @@ class MaskedMimicControl(MimicControl):
             orientation=torch.zeros(
                 self.env.num_envs, self.num_conditionable_bodies, 4, device=self.env.device
             ),
+        )
+        markers_state["body_rotation_markers_blue"] = MarkerState(
+            translation=target_rotation_pos_blue.view(self.env.num_envs, -1, 3),
+            orientation=target_rot.view(self.env.num_envs, -1, 4),
+        )
+        markers_state["body_rotation_markers_yellow"] = MarkerState(
+            translation=target_rotation_pos_yellow.view(self.env.num_envs, -1, 3),
+            orientation=target_rot.view(self.env.num_envs, -1, 4),
+        )
+        markers_state["body_rotation_markers_red"] = MarkerState(
+            translation=target_rotation_pos_red.view(self.env.num_envs, -1, 3),
+            orientation=target_rot.view(self.env.num_envs, -1, 4),
         )
         
         return markers_state
