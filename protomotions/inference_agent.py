@@ -109,6 +109,52 @@ def create_parser():
         help="Path to motion file for inference. If not provided, will use the motion file from the checkpoint.",
     )
     parser.add_argument(
+        "--mask-text-token",
+        action="store_true",
+        default=False,
+        help=(
+            "Force the masked multimodal prior text token to be dropped and "
+            "attention-masked during inference."
+        ),
+    )
+    parser.add_argument(
+        "--mask-root-condition",
+        dest="mask_root_condition",
+        action="store_true",
+        default=False,
+        help=(
+            "Force the masked multimodal prior root target condition token to "
+            "be attention-masked during inference."
+        ),
+    )
+    parser.add_argument(
+        "--force-all-root-condition",
+        action="store_true",
+        default=False,
+        help=(
+            "Force all masked-mimic root target future steps to expose both "
+            "translation and rotation during inference."
+        ),
+    )
+    parser.add_argument(
+        "--force-all-root-translation-condition",
+        action="store_true",
+        default=False,
+        help=(
+            "Force all masked-mimic root target future steps to expose only "
+            "translation during inference."
+        ),
+    )
+    parser.add_argument(
+        "--force-all-root-rotation-condition",
+        action="store_true",
+        default=False,
+        help=(
+            "Force all masked-mimic root target future steps to expose only "
+            "rotation during inference."
+        ),
+    )
+    parser.add_argument(
         "--scenes-file", type=str, default=None, help="Path to scenes file (optional)"
     )
     parser.add_argument(
@@ -297,6 +343,7 @@ import re  # noqa: E402
 import subprocess  # noqa: E402
 import sys  # noqa: E402
 import torch  # noqa: E402
+from protomotions.agents.common.transformer import Transformer  # noqa: E402
 from protomotions.utils.hydra_replacement import get_class  # noqa: E402
 from protomotions.utils.fabric_config import FabricConfig  # noqa: E402
 from lightning.fabric import Fabric  # noqa: E402
@@ -306,6 +353,40 @@ from dataclasses import asdict  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
 
 log = logging.getLogger(__name__)
+
+
+def _iter_agent_model_modules(agent):
+    model = getattr(agent, "model", None)
+    if model is None:
+        return
+
+    visited = set()
+    module_roots = [model]
+    wrapped_model = getattr(model, "module", None)
+    if wrapped_model is not None and wrapped_model is not model:
+        module_roots.append(wrapped_model)
+
+    for module_root in module_roots:
+        for module in module_root.modules():
+            module_id = id(module)
+            if module_id in visited:
+                continue
+            visited.add(module_id)
+            yield module
+
+
+def _force_mask_transformer_input(agent, input_key: str) -> int:
+    num_masked = 0
+    for module in _iter_agent_model_modules(agent):
+        if not isinstance(module, Transformer):
+            continue
+        input_and_mask_mapping = module.config.input_and_mask_mapping or {}
+        if input_key not in input_and_mask_mapping:
+            continue
+        module.force_mask_input_keys.add(input_key)
+        num_masked += 1
+
+    return num_masked
 
 
 def _set_posterior_anchor_rotation_mode(env_config, mode: str) -> None:
@@ -344,6 +425,59 @@ def _set_posterior_anchor_rotation_mode(env_config, mode: str) -> None:
             "reduced mimic target pose observation components were found.",
             mode,
         )
+
+
+def _force_root_condition_config(
+    env_config, force_translation: bool, force_rotation: bool, flag_name: str
+) -> None:
+    if not force_translation and not force_rotation:
+        return
+
+    control_components = getattr(env_config, "control_components", {}) or {}
+    masked_mimic_config = control_components.get("masked_mimic")
+    if masked_mimic_config is None:
+        log.warning(
+            "%s was set, but env.control_components "
+            "does not contain 'masked_mimic'.",
+            flag_name,
+        )
+        return
+
+    conditionable_body_names = getattr(
+        masked_mimic_config, "conditionable_body_names", None
+    )
+    if not conditionable_body_names:
+        raise ValueError(
+            f"{flag_name} requires masked_mimic.conditionable_body_names "
+            "to be set. This avoids changing the checkpoint's expected input "
+            "dimension at inference."
+        )
+
+    from protomotions.envs.control.masked_mimic_control import FixedBodyCondition
+
+    if force_translation and force_rotation:
+        constraint_state = 1
+        condition_description = "translation + rotation"
+    elif force_translation:
+        constraint_state = 0
+        condition_description = "translation only"
+    else:
+        constraint_state = 2
+        condition_description = "rotation only"
+
+    masked_mimic_config.fixed_conditioning = [
+        FixedBodyCondition(body_name=str(body_name), constraint_state=constraint_state)
+        for body_name in conditionable_body_names
+    ]
+    masked_mimic_config.visible_target_pose_prob = 1.0
+    masked_mimic_config.force_max_conditioned_bodies_prob = 1.0
+    masked_mimic_config.force_small_num_conditioned_bodies_prob = 0.0
+    log.info(
+        "CLI override: forcing all masked root conditions visible for bodies %s "
+        "(%s, all future target steps).",
+        list(conditionable_body_names),
+        condition_description,
+    )
 
 
 def _print_evaluation_results(
@@ -606,6 +740,16 @@ def _build_random_text_worker_command(args, sample: dict, output_path: Path) -> 
                 str(args.posterior_anchor_rotation_mode),
             ]
         )
+    if args.mask_text_token:
+        cmd.append("--mask-text-token")
+    if args.mask_root_condition:
+        cmd.append("--mask-root-condition")
+    if args.force_all_root_condition:
+        cmd.append("--force-all-root-condition")
+    if args.force_all_root_translation_condition:
+        cmd.append("--force-all-root-translation-condition")
+    if args.force_all_root_rotation_condition:
+        cmd.append("--force-all-root-rotation-condition")
     cmd.extend(["--vq-motion-speed-scale", str(args.vq_motion_speed_scale)])
     cmd.extend(["--vq-prior-frequency-scale", str(args.vq_prior_frequency_scale)])
     if args.vq_prior_frequency_override is not None:
@@ -946,6 +1090,17 @@ def main():
 
     if args.random_text_single_video and not args.random_text_videos:
         raise ValueError("--random-text-single-video requires --random-text-videos.")
+    force_root_condition = (
+        args.force_all_root_condition
+        or args.force_all_root_translation_condition
+        or args.force_all_root_rotation_condition
+    )
+    if force_root_condition and args.mask_root_condition:
+        raise ValueError(
+            "The force-root-condition flags and --mask-root-condition conflict: "
+            "one forces root targets visible in the env, the other forces the "
+            "Transformer to ignore the root target token."
+        )
 
     if args.random_text_videos and not args.random_text_single_video:
         _run_random_text_video_coordinator(args)
@@ -1042,6 +1197,28 @@ def main():
     if args.posterior_anchor_rotation_mode is not None:
         _set_posterior_anchor_rotation_mode(
             env_config, args.posterior_anchor_rotation_mode
+        )
+    force_root_translation = (
+        args.force_all_root_condition
+        or args.force_all_root_translation_condition
+    )
+    force_root_rotation = (
+        args.force_all_root_condition
+        or args.force_all_root_rotation_condition
+    )
+    if force_root_translation or force_root_rotation:
+        active_force_flags = []
+        if args.force_all_root_condition:
+            active_force_flags.append("--force-all-root-condition")
+        if args.force_all_root_translation_condition:
+            active_force_flags.append("--force-all-root-translation-condition")
+        if args.force_all_root_rotation_condition:
+            active_force_flags.append("--force-all-root-rotation-condition")
+        _force_root_condition_config(
+            env_config,
+            force_translation=force_root_translation,
+            force_rotation=force_root_rotation,
+            flag_name=", ".join(active_force_flags),
         )
 
     # Create fabric config for inference (simplified)
@@ -1210,6 +1387,34 @@ def main():
 
     agent.setup()
     agent.load(args.checkpoint, load_env=False)
+    if args.mask_text_token:
+        num_masked = _force_mask_transformer_input(agent, "prior_text_token_dropped")
+        if num_masked == 0:
+            log.warning(
+                "--mask-text-token was set, but no Transformer input mapping "
+                "for prior_text_token_dropped was found. This checkpoint may "
+                "not use the masked multimodal prior."
+            )
+        else:
+            log.info(
+                "Forced %s Transformer module(s) to mask the prior text token "
+                "during inference.",
+                num_masked,
+            )
+    if args.mask_root_condition:
+        num_masked = _force_mask_transformer_input(agent, "prior_root_target_token")
+        if num_masked == 0:
+            log.warning(
+                "--mask-root-condition was set, but no Transformer input mapping "
+                "for prior_root_target_token was found. This checkpoint may not "
+                "use the masked multimodal prior."
+            )
+        else:
+            log.info(
+                "Forced %s Transformer module(s) to mask the prior root target "
+                "condition during inference.",
+                num_masked,
+            )
 
     try:
         if args.random_text_videos and args.random_text_single_video:

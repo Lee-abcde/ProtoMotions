@@ -88,6 +88,7 @@ class Transformer(TensorDictModuleBase):
             if in_key not in mask_keys:
                 token_input_keys.append(in_key)
         self._token_input_keys = token_input_keys
+        self.force_mask_input_keys = set()
 
         # Transformer layers
         seqTransEncoderLayer = nn.TransformerEncoderLayer(
@@ -131,7 +132,10 @@ class Transformer(TensorDictModuleBase):
 
                 # Our mask is 1 for valid and 0 for invalid
                 # The transformer expects the mask to be 0 for valid and 1 for invalid
-                mask = tensordict[mask_key].logical_not()
+                if in_key in self.force_mask_input_keys:
+                    mask = torch.ones_like(tensordict[mask_key], dtype=torch.bool)
+                else:
+                    mask = tensordict[mask_key].logical_not()
                 if tensordict[mask_key].dim() == 1:
                     all_masks.append(mask.unsqueeze(1))
                 else:
