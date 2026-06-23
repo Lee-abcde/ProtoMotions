@@ -26,7 +26,7 @@ from datetime import datetime
 import logging
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch
 
@@ -145,7 +145,7 @@ class RecordingMixin:
         self._curr_user_recording_video_path = str(output_path)
         self._curr_user_recording_artifact_base = str(artifact_base)
 
-    def _wrap_text_to_width(self, draw, text: str, font, max_width: int) -> list[str]:
+    def _wrap_text_to_width(self, draw, text: str, font, max_width: int) -> List[str]:
         words = text.split()
         if not words:
             return []
