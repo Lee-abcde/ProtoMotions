@@ -27,7 +27,7 @@ from pathlib import Path
 from protomotions.agents.ppo.config import PPOAgentConfig
 from protomotions.agents.distill.model import DistillModel
 from protomotions.agents.distill.config import DistillAgentConfig, VaeNoiseType
-from protomotions.agents.common.common import TokenDropout, weight_init
+from protomotions.agents.common.common import weight_init
 from protomotions.agents.base_agent.agent import BaseAgent
 from protomotions.agents.base_agent.model import BaseModel
 from protomotions.agents.utils.training import handle_model_grad_clipping
@@ -60,27 +60,6 @@ class DistillAgent(BaseAgent):
                 f"model outputs. Available keys: {available_keys}."
             )
         return output_td[action_key]
-
-    def _enable_categorical_prior_dropout_modules(self):
-        categorical_prior = getattr(self.model, "_categorical_prior", None)
-        if categorical_prior is None:
-            return []
-
-        dropout_types = (
-            torch.nn.Dropout,
-            torch.nn.Dropout1d,
-            torch.nn.Dropout2d,
-            torch.nn.Dropout3d,
-            torch.nn.AlphaDropout,
-            torch.nn.FeatureAlphaDropout,
-            torch.nn.MultiheadAttention,
-        )
-        original_training_modes = []
-        for module in categorical_prior.modules():
-            if isinstance(module, (TokenDropout, *dropout_types)):
-                original_training_modes.append((module, module.training))
-                module.train()
-        return original_training_modes
 
     def _uses_vae(self) -> bool:
         return hasattr(self.config.model, "vae") and self.config.model.vae is not None
@@ -1284,21 +1263,18 @@ class DistillAgent(BaseAgent):
             getattr(self.config.model, "train_categorical_prior_only", False)
         )
         model_was_training = self.model.training
-        prior_dropout_training_modes = []
         if train_categorical_prior_only:
             self.model.eval()
-            prior_dropout_training_modes = (
-                self._enable_categorical_prior_dropout_modules()
-            )
+            # Keep frozen encoder/trunk deterministic while allowing prior
+            # dropout and prior-only observation normalizers to adapt.
+            categorical_prior = getattr(self.model, "_categorical_prior", None)
+            if categorical_prior is not None:
+                categorical_prior.train()
         try:
             batch_td = self.model(batch_td)
         finally:
-            if train_categorical_prior_only:
-                if model_was_training:
-                    self.model.train()
-                else:
-                    for module, was_training in prior_dropout_training_modes:
-                        module.train(was_training)
+            if train_categorical_prior_only and model_was_training:
+                self.model.train()
 
         # Extract outputs
         actions = batch_td["privileged_action"]
