@@ -1,18 +1,6 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 The ProtoMotions Developers
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
+
 """MuJoCo CPU-only simulator implementation."""
 
 import atexit
@@ -92,7 +80,7 @@ class MujocoSimulator(Simulator):
         self.viewer = None
         self._viewer_initialized = False
         self._recording_renderer = None
-        self._custom_key_handlers = custom_key_handlers or {}
+        self._register_custom_user_interface_keys(custom_key_handlers or {})
 
         # Cached control parameters
         self._kp = None  # [num_dofs] stiffness in common DOF order
@@ -118,6 +106,15 @@ class MujocoSimulator(Simulator):
 
         # Debug counter
         self._step_count = 0
+
+    def _register_custom_user_interface_keys(self, handlers: Dict[str, callable]) -> None:
+        for key_name, handler in handlers.items():
+            self.user_interface.register_key(
+                key_name,
+                owner="simulator.custom",
+                description=f"Custom simulator key handler for {key_name}",
+                on_press=handler,
+            )
 
     @staticmethod
     def _load_mjcf_stripped(
@@ -297,8 +294,8 @@ class MujocoSimulator(Simulator):
         asset_file = self.robot_config.asset.asset_file_name
         asset_path = os.path.join(asset_root, asset_file)
 
-        # Pre-create projectile config so we can inject bodies into MJCF
-        self._proj_config = ProjectileConfig()
+        # MJCF injection below needs _proj_config before _init_projectiles runs
+        self._resolve_proj_config()
 
         log.info("Loading MuJoCo model from: %s", asset_path)
         self.model = self._load_mjcf_stripped(asset_path, self._proj_config)
@@ -1058,25 +1055,23 @@ class MujocoSimulator(Simulator):
         mujoco.mj_forward(self.model, self.data)
 
     def _mujoco_key_callback(self, keycode: int) -> None:
-        """Handle keyboard events from MuJoCo passive viewer."""
-        if keycode == ord("J") or keycode == ord("j"):
-            self._throw_projectile()
-        elif keycode == ord("R") or keycode == ord("r"):
-            self._requested_reset()
-        elif keycode == ord("L") or keycode == ord("l"):
-            self._toggle_video_record()
-        elif keycode == ord("M") or keycode == ord("m"):
-            self._toggle_markers()
-        elif keycode == self._MJKEY_F8:
-            handler = self._custom_key_handlers.get("F8")
-            if handler is not None:
-                print("[mujoco-key-debug] invoking custom handler for key 'F8'")
-                handler()
-        elif keycode == self._MJKEY_F9:
-            handler = self._custom_key_handlers.get("F9")
-            if handler is not None:
-                print("[mujoco-key-debug] invoking custom handler for key 'F9'")
-                handler()
+        """Handle ASCII keyboard events from MuJoCo passive viewer.
+
+        MuJoCo special keys use non-ASCII key codes that do not correspond to
+        the string keys registered in ``UserInterface``. Translate the special
+        keys used by inference hooks explicitly and ignore the rest.
+        """
+        if keycode == self._MJKEY_F8:
+            self.user_interface.handle_key_event("F8", pressed=True)
+            self.user_interface.handle_key_event("F8", pressed=False)
+            return
+        if keycode == self._MJKEY_F9:
+            self.user_interface.handle_key_event("F9", pressed=True)
+            self.user_interface.handle_key_event("F9", pressed=False)
+            return
+        if keycode < 0 or keycode > 127:
+            return
+        self.user_interface.handle_key_event(chr(keycode), pressed=True)
 
     def _write_viewport_to_file(self, file_name: str) -> None:
         """Render current view to file."""

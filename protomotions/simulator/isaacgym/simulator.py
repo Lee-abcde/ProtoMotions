@@ -1,18 +1,6 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 The ProtoMotions Developers
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
+
 import logging
 import sys
 from dataclasses import asdict
@@ -74,8 +62,13 @@ class IsaacGymSimulator(Simulator):
             device=device,
         )
 
-        # Store custom key handlers
-        self._custom_key_handlers = custom_key_handlers or {}
+        self.user_interface.register_key(
+            "V",
+            owner="simulator",
+            description="Toggle IsaacGym viewer sync",
+            on_press=self._toggle_viewer_sync,
+        )
+        self._register_custom_user_interface_keys(custom_key_handlers or {})
 
         # Create temporary directory for primitive URDFs
         self._temp_dir = tempfile.TemporaryDirectory()
@@ -116,8 +109,8 @@ class IsaacGymSimulator(Simulator):
         Called by base class _initialize_with_markers() after visualization markers
         are set. Creates simulation, viewer, and acquires tensors.
         """
-        # Pre-create projectile config (needed before _init_projectiles runs)
-        self._proj_config = ProjectileConfig()
+        # Scene construction below needs _proj_config before _init_projectiles runs
+        self._resolve_proj_config()
 
         # Update marker names ordering from visualization markers
         self._marker_names_ordering = (
@@ -134,35 +127,9 @@ class IsaacGymSimulator(Simulator):
 
         # if running with a viewer, set up keyboard shortcuts and camera
         if not self.headless:
-            # subscribe to keyboard shortcuts
             self._viewer = self._gym.create_viewer(self._sim, gymapi.CameraProperties())
-            self._gym.subscribe_viewer_keyboard_event(
-                self._viewer, gymapi.KEY_Q, "QUIT"
-            )
-            self._gym.subscribe_viewer_keyboard_event(
-                self._viewer, gymapi.KEY_V, "toggle_viewer_sync"
-            )
-            self._gym.subscribe_viewer_keyboard_event(
-                self._viewer, gymapi.KEY_J, "throw_projectile"
-            )
-            self._gym.subscribe_viewer_keyboard_event(
-                self._viewer, gymapi.KEY_L, "toggle_video_record"
-            )
-            self._gym.subscribe_viewer_keyboard_event(
-                self._viewer, gymapi.KEY_SEMICOLON, "cancel_video_record"
-            )
-            self._gym.subscribe_viewer_keyboard_event(
-                self._viewer, gymapi.KEY_R, "reset_envs"
-            )
-            self._gym.subscribe_viewer_keyboard_event(
-                self._viewer, gymapi.KEY_O, "toggle_camera_target"
-            )
-            self._gym.subscribe_viewer_keyboard_event(
-                self._viewer, gymapi.KEY_M, "toggle_markers"
-            )
-
-            # Subscribe to custom key handlers
-            self._register_custom_key_handlers()
+            self._subscribed_user_interface_keys = set()
+            self._subscribe_user_interface_keys()
 
             # set the camera position based on up axis
             sim_params = self._gym.get_sim_params(self._sim)
@@ -294,32 +261,44 @@ class IsaacGymSimulator(Simulator):
         if self._visualization_markers:
             self._build_marker_state_tensors()
 
-    def _register_custom_key_handlers(self) -> None:
-        """Register custom keyboard event handlers"""
-        # Define available keys for custom handlers (1-0 for consistency with IsaacLab)
-        available_keys = {
-            "1": gymapi.KEY_1,
-            "2": gymapi.KEY_2,
-            "3": gymapi.KEY_3,
-            "4": gymapi.KEY_4,
-            "5": gymapi.KEY_5,
-            "6": gymapi.KEY_6,
-            "7": gymapi.KEY_7,
-            "8": gymapi.KEY_8,
-            "9": gymapi.KEY_9,
-            "0": gymapi.KEY_0,
-        }
+    def _register_custom_user_interface_keys(self, handlers: Dict[str, callable]) -> None:
+        for key_name, handler in handlers.items():
+            self.user_interface.register_key(
+                key_name,
+                owner="simulator.custom",
+                description=f"Custom simulator key handler for {key_name}",
+                on_press=handler,
+            )
 
-        # Register custom key handlers
-        for key_name, handler in self._custom_key_handlers.items():
-            if key_name in available_keys:
-                action_name = f"custom_{key_name}"
-                self._gym.subscribe_viewer_keyboard_event(
-                    self._viewer, available_keys[key_name], action_name
-                )
-            else:
-                print(f"Warning: Key '{key_name}' not available for custom handlers")
-                print(f"Available keys: {list(available_keys.keys())}")
+    def _toggle_viewer_sync(self) -> None:
+        self._enable_viewer_sync = not self._enable_viewer_sync
+
+    def _subscribe_user_interface_keys(self) -> None:
+        self.user_interface.add_registration_callback(
+            self._subscribe_user_interface_key,
+            replay_existing=True,
+        )
+
+    def _subscribe_user_interface_key(self, handle) -> None:
+        key_name = handle.key
+        if key_name in self._subscribed_user_interface_keys:
+            return
+        self._gym.subscribe_viewer_keyboard_event(
+            self._viewer,
+            self._gym_key_for_user_interface_key(key_name),
+            key_name,
+        )
+        self._subscribed_user_interface_keys.add(key_name)
+
+    @staticmethod
+    def _gym_key_for_user_interface_key(key_name: str):
+        if key_name == ";":
+            return gymapi.KEY_SEMICOLON
+        if len(key_name) == 1 and key_name.isalpha():
+            return getattr(gymapi, f"KEY_{key_name.upper()}")
+        if len(key_name) == 1 and key_name.isdigit():
+            return getattr(gymapi, f"KEY_{key_name}")
+        raise ValueError(f"Unsupported IsaacGym user-interface key: {key_name}")
 
     # ===== Group 2: Environment Setup & Configuration =====
     def _create_humanoid_asset_options(self) -> gymapi.AssetOptions:
@@ -536,11 +515,15 @@ class IsaacGymSimulator(Simulator):
     def _load_object_assets(self) -> None:
         if self.scene_lib.num_scenes() > 0:
             self._object_names = []
+            num_asset_buckets = self._num_object_asset_randomization_buckets()
 
             # Count assets
             asset_count = sum(
-                1 for scene in self.scene_lib.scenes for obj in scene.objects
-            )
+                1
+                for scene in self.scene_lib.scenes
+                for obj in scene.objects
+                if obj.is_first_instance
+            ) * num_asset_buckets
 
             with Progress() as progress:
                 task = progress.add_task(
@@ -553,55 +536,75 @@ class IsaacGymSimulator(Simulator):
                     for obj in scene.objects:
                         # Skip if we've already processed this object type
                         if not obj.is_first_instance:
-                            progress.update(task, advance=1)
                             continue
 
                         first_object_id = obj.first_instance_id
-                        if isinstance(obj, PrimitiveSceneObject):
-                            # Handle primitive shapes by creating temporary URDFs
-                            urdf_path = self._create_primitive_urdf(obj)
-                            object_name = os.path.splitext(os.path.basename(urdf_path))[
-                                0
-                            ]
-                            asset_path = urdf_path
-                        else:
-                            # Handle mesh objects
-                            assert isinstance(obj, MeshSceneObject)
-                            object_name = os.path.splitext(
-                                os.path.basename(obj.object_path)
-                            )[0]
-                            asset_path = obj.object_path
+                        for bucket_id in range(num_asset_buckets):
+                            object_options = (
+                                self._get_object_options_for_randomized_asset(
+                                    obj, bucket_id=bucket_id
+                                )
+                            )
+                            if isinstance(obj, PrimitiveSceneObject):
+                                # Handle primitive shapes by creating temporary URDFs
+                                urdf_path = self._create_primitive_urdf(
+                                    obj,
+                                    options=object_options,
+                                    variant_id=bucket_id
+                                    if num_asset_buckets > 1
+                                    else None,
+                                )
+                                object_name = os.path.splitext(
+                                    os.path.basename(urdf_path)
+                                )[0]
+                                asset_path = urdf_path
+                            else:
+                                # Handle mesh objects
+                                assert isinstance(obj, MeshSceneObject)
+                                object_name = os.path.splitext(
+                                    os.path.basename(obj.object_path)
+                                )[0]
+                                asset_path = obj.object_path
 
-                        asset_root = os.path.dirname(asset_path)
-                        asset_file = os.path.basename(asset_path)
+                            asset_root = os.path.dirname(asset_path)
+                            asset_file = os.path.basename(asset_path)
 
-                        # Create asset options
-                        object_asset_options = self._create_asset_options(obj)
+                            # Create asset options
+                            object_asset_options = self._create_asset_options(
+                                obj, options=object_options
+                            )
 
-                        # Load object asset and store in dictionary
-                        object_asset = self._gym.load_asset(
-                            self._sim, asset_root, asset_file, object_asset_options
-                        )
+                            # Load object asset and store in dictionary
+                            object_asset = self._gym.load_asset(
+                                self._sim, asset_root, asset_file, object_asset_options
+                            )
+                            self._apply_object_material_properties_to_asset(
+                                object_asset, object_options
+                            )
 
-                        # Add force sensor - common for both types
-                        sensor_pose = gymapi.Transform()
-                        sensor_options = gymapi.ForceSensorProperties()
-                        sensor_options.enable_forward_dynamics_forces = False
-                        sensor_options.enable_constraint_solver_forces = True
-                        sensor_options.use_world_frame = False
-                        self._gym.create_asset_force_sensor(
-                            object_asset, 0, sensor_pose, sensor_options
-                        )
-                        self._object_names.append(object_name)
-                        self._object_assets[first_object_id] = object_asset
+                            # Add force sensor - common for both types
+                            sensor_pose = gymapi.Transform()
+                            sensor_options = gymapi.ForceSensorProperties()
+                            sensor_options.enable_forward_dynamics_forces = False
+                            sensor_options.enable_constraint_solver_forces = True
+                            sensor_options.use_world_frame = False
+                            self._gym.create_asset_force_sensor(
+                                object_asset, 0, sensor_pose, sensor_options
+                            )
+                            self._object_names.append(object_name)
+                            self._object_assets[
+                                self._object_asset_key(first_object_id, bucket_id)
+                            ] = object_asset
 
-                        progress.update(task, advance=1)
+                            progress.update(task, advance=1)
 
             print(
-                f"=========== Total number of unique objects is {len(self._object_assets)}"
+                f"=========== Total number of object asset variants is {len(self._object_assets)}"
             )
 
-    def _create_asset_options(self, obj: SceneObject) -> gymapi.AssetOptions:
+    def _create_asset_options(
+        self, obj: SceneObject, options=None
+    ) -> gymapi.AssetOptions:
         """
         Create asset options for an object based on its configuration.
 
@@ -613,14 +616,17 @@ class IsaacGymSimulator(Simulator):
         """
         object_asset_options = gymapi.AssetOptions()
         object_asset_options.default_dof_drive_mode = gymapi.DOF_MODE_NONE
-        object_options_dict = obj.options.to_dict()
+        options = options or obj.options
+        object_options_dict = options.to_dict()
 
         # Without override_inertia the URDF's placeholder <inertial>
         # block takes precedence over AssetOptions.density.
-        if isinstance(obj, PrimitiveSceneObject) and obj.options.mass is None:
+        if isinstance(obj, PrimitiveSceneObject) and options.mass is None:
             object_asset_options.override_inertia = True
 
         object_options_dict.pop("mass", None)
+        for key in options.physics_material_kwargs():
+            object_options_dict.pop(key, None)
 
         if object_options_dict.get("vhacd_enabled", False):
             object_asset_options.vhacd_params = gymapi.VhacdParams()
@@ -644,7 +650,40 @@ class IsaacGymSimulator(Simulator):
                     print(f"Warning: {key} is not a valid option for object asset")
         return object_asset_options
 
-    def _create_primitive_urdf(self, obj: PrimitiveSceneObject) -> str:
+    def _apply_object_material_properties_to_asset(self, asset, options) -> None:
+        """Apply object material options to IsaacGym asset shape properties."""
+        material_kwargs = options.single_friction_material_kwargs()
+        if not material_kwargs:
+            return
+
+        shape_props = self._gym.get_asset_rigid_shape_properties(asset)
+        for shape_prop in shape_props:
+            if "friction" in material_kwargs:
+                shape_prop.friction = material_kwargs["friction"]
+            if "restitution" in material_kwargs:
+                shape_prop.restitution = material_kwargs["restitution"]
+        self._gym.set_asset_rigid_shape_properties(asset, shape_props)
+
+    def _object_asset_key(self, first_object_id: int, bucket_id: int):
+        if self._num_object_asset_randomization_buckets() == 1:
+            return first_object_id
+        return (first_object_id, bucket_id)
+
+    def _get_object_asset_for_env(self, env_id: int, obj: SceneObject):
+        bucket_id = 0
+        if self._domain_randomization is not None:
+            object_dr = self._domain_randomization.get("object_assets")
+            if object_dr is not None:
+                bucket_id = int(object_dr["bucket_ids"][env_id].item())
+        asset_key = self._object_asset_key(obj.first_instance_id, bucket_id)
+        return self._object_assets[asset_key]
+
+    def _create_primitive_urdf(
+        self,
+        obj: PrimitiveSceneObject,
+        options=None,
+        variant_id: Optional[int] = None,
+    ) -> str:
         """
         Create a URDF file for a primitive shape.
 
@@ -658,7 +697,9 @@ class IsaacGymSimulator(Simulator):
         temp_dir = self._temp_dir.name
 
         # Generate a unique filename based on the primitive ID
-        urdf_filename = f"{obj.object_identifier}.urdf"
+        options = options or obj.options
+        variant_suffix = "" if variant_id is None else f"_bucket_{variant_id}"
+        urdf_filename = f"{obj.object_identifier}{variant_suffix}.urdf"
         urdf_path = os.path.join(temp_dir, urdf_filename)
 
         # Skip if the file already exists
@@ -679,7 +720,7 @@ class IsaacGymSimulator(Simulator):
         else:
             raise ValueError(f"Unsupported primitive shape: {obj.object_identifier}")
 
-        mass_value = obj.options.mass if obj.options.mass is not None else 1.0
+        mass_value = options.mass if options.mass is not None else 1.0
 
         # Create the URDF XML content
         urdf_content = f"""<?xml version="1.0"?>
@@ -823,7 +864,7 @@ class IsaacGymSimulator(Simulator):
         # Objects spawned at scene offset (x,y) with z=0 - actual positions set via reset_envs()
         for obj_idx, obj in enumerate(scene.objects):
             # Get the asset directly using first_instance_id
-            object_asset = self._object_assets[obj.first_instance_id]
+            object_asset = self._get_object_asset_for_env(env_id, obj)
 
             # Spawn at scene offset to avoid collision, actual pose set via reset
             object_pose = gymapi.Transform()
@@ -841,6 +882,17 @@ class IsaacGymSimulator(Simulator):
                 col_filter,
                 segmentation_id,
             )
+            self._apply_object_body_properties_to_actor(
+                env_ptr, object_handle, obj, env_id
+            )
+
+            # Apply per-actor scale for MeshSceneObjects
+            if isinstance(obj, MeshSceneObject) and obj.scale != (1.0, 1.0, 1.0):
+                if not (obj.scale[0] == obj.scale[1] == obj.scale[2]):
+                    raise ValueError(
+                        f"IsaacGym only supports uniform scale, got {obj.scale}"
+                    )
+                self._gym.set_actor_scale(env_ptr, object_handle, obj.scale[0])
 
             # Store handle and index for this object
             self._object_handles.append(object_handle)
@@ -867,6 +919,36 @@ class IsaacGymSimulator(Simulator):
                 texture_path = obj.options.to_dict().get("texture_path")
                 if texture_path and not self.headless:
                     self._apply_texture_to_object(env_ptr, object_handle, texture_path)
+
+    def _apply_object_body_properties_to_actor(
+        self, env_ptr, object_handle, obj: SceneObject, env_id: int
+    ) -> None:
+        """Apply object mass and COM properties that require an actor handle."""
+        options = self._get_object_options_for_randomized_asset(obj, env_id=env_id)
+        center_of_mass = self._get_object_center_of_mass_for_randomized_asset(
+            obj, env_id=env_id
+        )
+        if options.mass is None and center_of_mass is None:
+            return
+
+        body_props = self._gym.get_actor_rigid_body_properties(env_ptr, object_handle)
+        body_prop = body_props[0]
+
+        if options.mass is not None:
+            old_mass = body_prop.mass
+            if old_mass > 0:
+                self._scale_body_inertia(body_prop, options.mass / old_mass)
+            body_prop.mass = options.mass
+
+        if center_of_mass is not None:
+            new_com = center_of_mass.cpu().numpy().tolist()
+            current_com = [body_prop.com.x, body_prop.com.y, body_prop.com.z]
+            offset = [new_com[i] - current_com[i] for i in range(3)]
+            self._update_body_com_and_inertia(body_prop, offset)
+
+        self._gym.set_actor_rigid_body_properties(
+            env_ptr, object_handle, body_props, recomputeInertia=False
+        )
 
     def _build_projectile_actors(self, env_id: int, env_ptr) -> None:
         """Create projectile box actors for one environment.
@@ -1421,6 +1503,13 @@ class IsaacGymSimulator(Simulator):
         bucket_id = env_id % num_buckets
         return self._humanoid_assets_for_friction[bucket_id]
 
+    def _scale_body_inertia(self, body_prop, scale: float) -> None:
+        """Scale a single rigid body's inertia matrix in place."""
+        for row in ("x", "y", "z"):
+            row_vec = getattr(body_prop.inertia, row)
+            for col in ("x", "y", "z"):
+                setattr(row_vec, col, getattr(row_vec, col) * scale)
+
     def _update_body_com_and_inertia(self, body_prop, offset: List[float]) -> None:
         """
         Update a single rigid body's Center of Mass and inertia tensor using parallel axis theorem.
@@ -1546,32 +1635,9 @@ class IsaacGymSimulator(Simulator):
 
             # check for keyboard events
             for evt in self._gym.query_viewer_action_events(self._viewer):
-                if evt.action == "QUIT" and evt.value > 0:
-                    sys.exit()
-                elif evt.action == "toggle_viewer_sync" and evt.value > 0:
-                    self._enable_viewer_sync = not self._enable_viewer_sync
-                elif evt.action == "throw_projectile" and evt.value > 0:
-                    self._throw_projectile()
-                elif evt.action == "toggle_video_record" and evt.value > 0:
-                    self._toggle_video_record()
-                elif evt.action == "cancel_video_record" and evt.value > 0:
-                    self._cancel_video_record()
-                elif evt.action == "reset_envs" and evt.value > 0:
-                    self._requested_reset()
-                elif evt.action == "toggle_camera_target" and evt.value > 0:
-                    self._toggle_camera_target()
-                elif evt.action == "toggle_markers" and evt.value > 0:
-                    self._toggle_markers()
-                elif evt.action.startswith("custom_") and evt.value > 0:
-                    # Handle custom key events
-                    key_name = evt.action[7:]  # Remove "custom_" prefix
-                    if key_name in self._custom_key_handlers:
-                        try:
-                            self._custom_key_handlers[key_name]()
-                        except Exception as e:
-                            print(
-                                f"Error executing custom key handler for '{key_name}': {e}"
-                            )
+                self.user_interface.handle_key_event(
+                    evt.action, pressed=evt.value > 0
+                )
 
             if self.device.type != "cpu":
                 self._gym.fetch_results(self._sim, True)
