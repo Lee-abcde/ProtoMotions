@@ -439,6 +439,7 @@ class MotionVisualizerSmoothness:
 
         # Create custom key handlers for speed and threshold control
         custom_key_handlers = {
+            "R": self._switch_to_next_motion,
             "1": self.increase_speed,  # Key 1: Increase playback speed
             "2": self.decrease_speed,  # Key 2: Decrease playback speed
             "3": self.increase_smoothness_threshold,  # Key 3: Increase smoothness threshold
@@ -493,9 +494,6 @@ class MotionVisualizerSmoothness:
                 f"| text selection: {self.text_selection} "
                 "(prints text annotations from packaged MotionLib data)"
             )
-
-        # Start playback from start_motion_idx instead of auto-advancing to the next motion.
-        self.simulator.user_requested_reset = False
 
         # Speed control state
         self.speed_change_factor = 1.5  # 150% speed change
@@ -1006,11 +1004,6 @@ class MotionVisualizerSmoothness:
 
         while True:
             frame_start = time.perf_counter()
-
-            # Check for reset request (R key press triggers this in simulator)
-            if self.simulator.user_requested_reset:
-                self._switch_to_next_motion()
-                self.simulator.user_requested_reset = False
 
             # Calculate playback parameters based on speed
             # For speed < 1.0: slow down by updating motion less frequently (frames_per_step > 1)
