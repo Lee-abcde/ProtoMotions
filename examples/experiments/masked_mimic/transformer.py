@@ -468,6 +468,7 @@ def agent_config(
     )
 
     evaluator_config = MimicEvaluatorConfig(
+        evaluation_action_key="action",
         evaluation_components={
             "gt_error": gt_error_factory(threshold=0.25),
             "gr_error": gr_error_factory(),

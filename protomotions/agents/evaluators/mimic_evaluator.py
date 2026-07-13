@@ -33,6 +33,26 @@ class MimicEvaluator(BaseEvaluator):
     def __init__(self, agent: Any, fabric: Any, config: MimicEvaluatorConfig):
         super().__init__(agent, fabric, config)
 
+    def _select_evaluation_actions(self, model_outs: Dict[str, Tensor]) -> Tensor:
+        """Select the configured model output for full mimic evaluation."""
+        action_key = self.config.evaluation_action_key
+        if action_key is not None:
+            if action_key not in model_outs:
+                raise KeyError(
+                    f"Configured evaluation_action_key={action_key!r} is not present "
+                    f"in model outputs. Available keys: {sorted(model_outs.keys())}."
+                )
+            return model_outs[action_key]
+
+        if "mean_action" in model_outs:
+            return model_outs["mean_action"]
+        if "action" in model_outs:
+            return model_outs["action"]
+        raise KeyError(
+            "Mimic evaluation requires a configured action output, 'mean_action', "
+            f"or 'action'. Available keys: {sorted(model_outs.keys())}."
+        )
+
     @property
     def motion_lib(self) -> MotionLib:
         """Motion library (from agent)."""
@@ -289,7 +309,7 @@ class MimicEvaluator(BaseEvaluator):
 
         for step_idx in range(max_steps):
             model_outs = self.agent.model(obs_td)
-            actions = model_outs.get("mean_action", model_outs.get("action"))
+            actions = self._select_evaluation_actions(model_outs)
 
             # Apply EMA smoothing (deployment simulation)
             if ema_alpha is not None:

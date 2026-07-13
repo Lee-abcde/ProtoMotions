@@ -51,6 +51,15 @@ class MimicEvaluatorConfig(EvaluatorConfig):
     """Configuration for Mimic evaluator."""
 
     _target_: str = "protomotions.agents.evaluators.mimic_evaluator.MimicEvaluator"
+    evaluation_action_key: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Explicit model output used to control the environment during "
+                "evaluation. None preserves the legacy mean_action/action fallback."
+            )
+        },
+    )
     collect_trajectory_metrics: bool = field(
         default=True,
         metadata={
