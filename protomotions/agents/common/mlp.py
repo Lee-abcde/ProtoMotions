@@ -137,13 +137,13 @@ class MLPWithConcat(ProtoMotionsTensorDictModule):
         return tensordict
 
 
-class MoEMLPWithConcat(TensorDictModuleBase):
+class MoEMLPWithConcat(ProtoMotionsTensorDictModule):
     """Top-k mixture-of-experts MLP operating on TensorDict inputs."""
 
     config: MoEMLPWithConcatConfig
 
     def __init__(self, config: MoEMLPWithConcatConfig):
-        TensorDictModuleBase.__init__(self)
+        super().__init__()
         self.config = config
 
         assert config.in_keys, "MoE MLP requires input keys."
@@ -188,7 +188,11 @@ class MoEMLPWithConcat(TensorDictModuleBase):
         loss = (importance - target).pow(2).mean() + (load - target).pow(2).mean()
         return loss, load
 
-    def forward(self, tensordict: TensorDict) -> TensorDict:
+    def forward(
+        self,
+        tensordict: TensorDict,
+        log_internals: bool = False,
+    ) -> TensorDict:
         expert_input = self._concat_inputs(tensordict, self.config.in_keys)
         result = apply_module_operations(
             expert_input,
