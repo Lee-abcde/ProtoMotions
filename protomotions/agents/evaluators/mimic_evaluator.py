@@ -34,7 +34,7 @@ class MimicEvaluator(BaseEvaluator):
         super().__init__(agent, fabric, config)
 
     def _select_evaluation_actions(self, model_outs: Dict[str, Tensor]) -> Tensor:
-        """Select the configured model output for full mimic evaluation."""
+        """Select the configured model output for full or interactive evaluation."""
         action_key = self.config.evaluation_action_key
         if action_key is not None:
             if action_key not in model_outs:
@@ -52,6 +52,50 @@ class MimicEvaluator(BaseEvaluator):
             "Mimic evaluation requires a configured action output, 'mean_action', "
             f"or 'action'. Available keys: {sorted(model_outs.keys())}."
         )
+
+    def simple_test_policy(self, collect_metrics: bool = False) -> None:
+        """Run interactive mimic evaluation with the configured action output."""
+        self.agent.eval()
+        done_indices = None
+        step = 0
+        metric_sums: Dict[str, float] = {}
+        metric_counts: Dict[str, int] = {}
+
+        print("Evaluating policy... (Ctrl+C to stop)")
+        try:
+            while True:
+                switch_env_ids = self._consume_interactive_motion_id_request()
+                if switch_env_ids is not None:
+                    obs, _ = self.env.reset(
+                        switch_env_ids, disable_motion_resample=True
+                    )
+                    done_indices = None
+                else:
+                    obs, _ = self.env.reset(done_indices)
+                self.agent.pre_collect_step(step)
+                obs = self.agent.add_agent_info_to_obs(obs)
+                obs_td = self.agent.obs_dict_to_tensordict(obs)
+
+                model_outs = self.agent.model(obs_td)
+                action = self._select_evaluation_actions(model_outs)
+                _, _, dones, _, extras = self.env.step(action)
+
+                if collect_metrics and "eval_values" in extras:
+                    for key, value in extras["eval_values"].items():
+                        metric_sums[key] = (
+                            metric_sums.get(key, 0.0) + value.mean().item()
+                        )
+                        metric_counts[key] = metric_counts.get(key, 0) + 1
+
+                done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
+                step += 1
+        except KeyboardInterrupt:
+            print(f"\nStopped after {step} steps.")
+            if collect_metrics and metric_counts:
+                print("Average metrics:")
+                for key in sorted(metric_counts):
+                    average = metric_sums[key] / metric_counts[key]
+                    print(f"  {key}: {average:.4f}")
 
     @property
     def motion_lib(self) -> MotionLib:
