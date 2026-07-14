@@ -823,7 +823,7 @@ class DistillAgent(BaseAgent):
             )
         return obs
 
-    def load_parameters(self, state_dict):
+    def load_parameters(self, state_dict, load_training_state: bool = True):
         load_categorical_prior_parameters = bool(
             getattr(self.config.model, "load_categorical_prior_parameters", True)
         )
@@ -871,7 +871,13 @@ class DistillAgent(BaseAgent):
                 f"kept {load_stats['kept_current']} current parameters "
                 "(including router parameters) at current initialization."
             )
-        super().load_parameters(state_dict)
+        super().load_parameters(
+            state_dict,
+            load_training_state=load_training_state,
+        )
+        if not load_training_state:
+            log.info("Skipping checkpoint training state for warm start/inference.")
+            return
         if bool(getattr(self.config.model, "train_categorical_prior_only", False)):
             log.info(
                 "Skipping checkpoint optimizer state because "

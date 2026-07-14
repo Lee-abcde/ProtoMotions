@@ -177,17 +177,23 @@ class DistillPPO(PPO):
                 f"Missing keys: {missing_keys}. Unexpected keys: {unexpected_keys}."
             )
 
-    def load_parameters(self, state_dict):
+    def load_parameters(self, state_dict, load_training_state: bool = True):
         checkpoint_model_state = state_dict["model"]
         is_native_ppo_checkpoint = any(
             key.startswith("_actor.") for key in checkpoint_model_state.keys()
         )
         if is_native_ppo_checkpoint:
-            super().load_parameters(state_dict)
+            super().load_parameters(
+                state_dict,
+                load_training_state=load_training_state,
+            )
             self._load_critic_init_checkpoint()
             return
 
-        if not getattr(self.config, "reset_training_state_on_distill_load", True):
+        if (
+            load_training_state
+            and not getattr(self.config, "reset_training_state_on_distill_load", True)
+        ):
             self._load_base_training_state(state_dict)
 
         missing_keys, unexpected_keys = self.actor.mu.load_state_dict(

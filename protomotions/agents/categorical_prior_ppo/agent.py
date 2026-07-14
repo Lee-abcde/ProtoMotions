@@ -374,14 +374,13 @@ class CategoricalPriorPPO(PPO):
         if self.config.normalize_rewards and "running_reward_norm" in state_dict:
             self.running_reward_norm.load_state_dict(state_dict["running_reward_norm"])
 
-    def load_parameters(self, state_dict):
+    def load_parameters(self, state_dict, load_training_state: bool = True):
         checkpoint_model_state = state_dict["model"]
         is_native_ppo_checkpoint = any(
             key.startswith("_actor.") for key in checkpoint_model_state.keys()
         )
 
         if is_native_ppo_checkpoint:
-            self._load_base_training_state(state_dict)
             missing_keys, unexpected_keys = self.model.load_state_dict(
                 checkpoint_model_state,
                 strict=False,
@@ -393,21 +392,23 @@ class CategoricalPriorPPO(PPO):
                     missing_keys,
                     unexpected_keys,
                 )
-            if "actor_optimizer" in state_dict:
-                self.actor_optimizer.load_state_dict(state_dict["actor_optimizer"])
-            if "critic_optimizer" in state_dict:
-                self.critic_optimizer.load_state_dict(state_dict["critic_optimizer"])
-            if (
-                self.config.advantage_normalization.enabled
-                and self.config.advantage_normalization.use_ema
-            ):
-                if "adv_mean_ema" in state_dict:
-                    self.adv_mean_ema.copy_(state_dict["adv_mean_ema"])
-                if "adv_std_ema" in state_dict:
-                    self.adv_std_ema.copy_(state_dict["adv_std_ema"])
+            if load_training_state:
+                self._load_base_training_state(state_dict)
+                if "actor_optimizer" in state_dict:
+                    self.actor_optimizer.load_state_dict(state_dict["actor_optimizer"])
+                if "critic_optimizer" in state_dict:
+                    self.critic_optimizer.load_state_dict(state_dict["critic_optimizer"])
+                if (
+                    self.config.advantage_normalization.enabled
+                    and self.config.advantage_normalization.use_ema
+                ):
+                    if "adv_mean_ema" in state_dict:
+                        self.adv_mean_ema.copy_(state_dict["adv_mean_ema"])
+                    if "adv_std_ema" in state_dict:
+                        self.adv_std_ema.copy_(state_dict["adv_std_ema"])
             return
 
-        if not self.config.reset_training_state_on_distill_load:
+        if load_training_state and not self.config.reset_training_state_on_distill_load:
             self._load_base_training_state(state_dict)
 
         missing_keys, unexpected_keys = self.model._actor.vq_model.load_state_dict(
