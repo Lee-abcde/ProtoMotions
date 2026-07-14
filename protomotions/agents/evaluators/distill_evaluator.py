@@ -990,9 +990,9 @@ class DistillEvaluator(MimicEvaluator):
                 self._privileged_eval_state = self._capture_active_eval_state()
                 self._restore_active_eval_state(normal_state)
 
-    def process_eval_results(self) -> Tuple[Dict, Optional[float]]:
+    def process_eval_results(self) -> Tuple[Dict, Optional[float], int]:
         """Process normal metrics and append privileged-action metrics."""
-        to_log, success_rate = super().process_eval_results()
+        to_log, success_rate, num_eval_items = super().process_eval_results()
 
         if self._privileged_eval_state is not None:
             privileged_failed_motions = (
@@ -1013,7 +1013,7 @@ class DistillEvaluator(MimicEvaluator):
             if success_rate is not None and privileged_success_rate is not None:
                 to_log["eval/privileged_prior_gap"] = privileged_success_rate - success_rate
 
-        return to_log, success_rate
+        return to_log, success_rate, num_eval_items
 
     def _get_vq_accumulator_alpha(
         self,
