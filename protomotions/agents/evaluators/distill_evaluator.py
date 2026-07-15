@@ -716,6 +716,8 @@ class DistillEvaluator(MimicEvaluator):
 
     def _get_interaction_action_key(self) -> str:
         """Action head used for the interactive inference loop."""
+        if not self._supports_prior_action() and self._supports_privileged_action():
+            return "privileged_action"
         if self.config.use_privileged_action_for_interaction:
             if not self._supports_privileged_action():
                 raise RuntimeError(
@@ -885,7 +887,8 @@ class DistillEvaluator(MimicEvaluator):
         metrics = super().initialize_eval()
         self._privileged_eval_state = None
         if (
-            getattr(self.config, "evaluate_privileged_action", True)
+            self._supports_prior_action()
+            and getattr(self.config, "evaluate_privileged_action", True)
             and self._supports_privileged_action()
         ):
             num_motions = self.motion_lib.num_motions()
@@ -964,12 +967,15 @@ class DistillEvaluator(MimicEvaluator):
 
     def run_evaluation(self) -> None:
         """Run normal and optional privileged evaluation across motion batches."""
-        if not self._supports_prior_action():
+        supports_prior = self._supports_prior_action()
+        if not supports_prior and not self._supports_privileged_action():
             raise RuntimeError(
-                "Distill evaluator requires prior_action for the primary evaluation pass, "
-                "but the model does not expose it."
+                "Distill evaluator requires either prior_action or "
+                "privileged_action, but the model exposes neither."
             )
-        primary_action_key = "prior_action"
+        primary_action_key = (
+            "prior_action" if supports_prior else "privileged_action"
+        )
         for env_ids, motion_ids in self._build_eval_batches():
             motion_lengths = self.motion_lib.get_motion_length(motion_ids)
             max_len = min(
@@ -993,6 +999,10 @@ class DistillEvaluator(MimicEvaluator):
     def process_eval_results(self) -> Tuple[Dict, Optional[float], int]:
         """Process normal metrics and append privileged-action metrics."""
         to_log, success_rate, num_eval_items = super().process_eval_results()
+
+        if not self._supports_prior_action() and success_rate is not None:
+            to_log["eval/privileged_success_rate"] = success_rate
+            to_log.pop("eval/success_rate", None)
 
         if self._privileged_eval_state is not None:
             privileged_failed_motions = (

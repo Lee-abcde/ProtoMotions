@@ -649,6 +649,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
     """PULSE distill model with a shared VQ codebook instead of Gaussian latents."""
 
     config: "VQDistillModelConfig"
+    include_prior = True
 
     def __init__(self, config: "VQDistillModelConfig"):
         super().__init__(config)
@@ -658,7 +659,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         self._encoder: ModuleContainer = EncoderClass(config=self.config.encoder)
         TrunkClass = get_class(self.config.trunk._target_)
         self._trunk: ModuleContainer = TrunkClass(config=self.config.trunk)
-        self._uses_categorical_prior = getattr(
+        self._uses_categorical_prior = self.include_prior and getattr(
             self.config, "use_categorical_prior", False
         )
         self._categorical_prior_history_steps = int(
@@ -682,7 +683,10 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             "categorical_prior_future_target_key",
             "vq_prior_future_targets",
         )
-        if self._uses_categorical_prior:
+        if not self.include_prior:
+            self._prior = None
+            self._categorical_prior = None
+        elif self._uses_categorical_prior:
             self._prior = None
             CategoricalPriorClass = get_class(self.config.categorical_prior._target_)
             self._categorical_prior: ModuleContainer = CategoricalPriorClass(
@@ -751,11 +755,14 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         trunk_in_keys_without_latents = [
             key for key in self._trunk.in_keys if key not in ["vae_latent"]
         ]
-        prior_input_keys = (
-            self._categorical_prior.in_keys
-            if self._uses_categorical_prior
-            else self._prior.in_keys
-        )
+        if not self.include_prior:
+            prior_input_keys = []
+        else:
+            prior_input_keys = (
+                self._categorical_prior.in_keys
+                if self._uses_categorical_prior
+                else self._prior.in_keys
+            )
         if self._uses_categorical_prior and self._categorical_prior_history_steps > 0:
             prior_input_keys = [
                 key
@@ -776,7 +783,10 @@ class VQDistillModel(TextResidualMixin, BaseModel):
                 + reconstruction_target_keys
             )
         )
-        self.out_keys = ["action", "prior_action", "privileged_action"]
+        if not self.include_prior:
+            self.out_keys = ["action", "privileged_action"]
+        else:
+            self.out_keys = ["action", "prior_action", "privileged_action"]
 
     def _quantize(self, latent: torch.Tensor, update_codebook: bool):
         if self.config.codebook_update_mode == "gradient":
@@ -1007,6 +1017,29 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             if self._forward_count % self.config.dead_code_revive_every == 0:
                 self.quantizer.revive_dead_codes(encoder_latent.detach())
 
+        if not self.include_prior:
+            tensordict["vae_latent"] = privileged_latent
+            tensordict = self._trunk(tensordict)
+            privileged_action = tensordict[self._trunk.out_keys[0]]
+
+            tensordict["action"] = privileged_action
+            tensordict["privileged_action"] = privileged_action
+            tensordict["distill_privileged_latent"] = privileged_latent
+            tensordict["vq_encoder_latent"] = encoder_latent
+            tensordict["vq_commitment_loss"] = commitment_loss
+            tensordict["vq_codebook_loss"] = codebook_loss
+            tensordict["posterior_vq_indices"] = indices
+            tensordict["vq_perplexity"] = perplexity.expand(
+                encoder_latent.shape[0]
+            )
+            self._record_text_residual_stats(
+                tensordict,
+                "distill_privileged",
+                privileged_text_residual,
+                raw_privileged_latent,
+            )
+            return tensordict
+
         prior_categorical_loss = torch.zeros_like(commitment_loss)
         prior_commitment_loss = torch.zeros_like(commitment_loss)
         prior_codebook_loss = torch.zeros_like(codebook_loss)
@@ -1110,6 +1143,8 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         return tensordict
 
     def forward_inference(self, tensordict: TensorDict) -> TensorDict:
+        if not self.include_prior:
+            return self.forward(tensordict)
         if self._uses_categorical_prior:
             prior_latent = self._empty_prior_latent(tensordict)
             prior_code_output = self._categorical_prior_logits(tensordict)
@@ -1151,6 +1186,14 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         trunk_in_keys_without_latents = [
             key for key in self._trunk.in_keys if key not in ["vae_latent"]
         ]
+        if not self.include_prior:
+            return list(
+                set(
+                    self._encoder.in_keys
+                    + trunk_in_keys_without_latents
+                    + self._text_input_keys()
+                )
+            )
         return list(
             set(
                 (
@@ -1232,7 +1275,7 @@ class VQDistillModel(TextResidualMixin, BaseModel):
         codebook = tensordict["vq_codebook_loss"].mean()
         prior_commitment = torch.zeros_like(commitment)
         prior_alignment = torch.zeros_like(commitment)
-        if not self._uses_categorical_prior:
+        if self.include_prior and not self._uses_categorical_prior:
             prior_commitment = (
                 tensordict["vq_prior_commitment_loss"].mean()
                 * losses.prior_commitment_weight
@@ -1394,10 +1437,12 @@ class VQDistillModel(TextResidualMixin, BaseModel):
             "distill/total_prior_loss": total_prior_loss.detach(),
             "distill/total_prior_loss_weighted": prior_categorical.detach(),
             "distill/vq_perplexity": tensordict["vq_perplexity"].mean().detach(),
-            "distill/vq_prior_match_rate": (
-                tensordict["vq_prior_indices"] == tensordict["posterior_vq_indices"]
-            ).float().mean().detach(),
         }
+        if "vq_prior_indices" in tensordict.keys():
+            log_dict["distill/vq_prior_match_rate"] = (
+                tensordict["vq_prior_indices"]
+                == tensordict["posterior_vq_indices"]
+            ).float().mean().detach()
         log_dict.update(future_prior_step_log_dict)
         for key, value in soft_log_dict.items():
             log_dict[f"distill/{key}"] = value.detach()
@@ -1429,3 +1474,9 @@ class VQDistillModel(TextResidualMixin, BaseModel):
                 ] = load.detach()
         self._add_text_residual_log_dict(tensordict, log_dict)
         return total, log_dict
+
+
+class VQPosteriorDistillModel(VQDistillModel):
+    """VQ posterior, codebook, and decoder without a deployable prior."""
+
+    include_prior = False
