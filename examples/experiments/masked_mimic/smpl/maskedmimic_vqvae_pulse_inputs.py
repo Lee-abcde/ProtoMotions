@@ -86,6 +86,33 @@ def _build_encoder(latent_dim: int):
     )
 
 
+def _build_trunk(robot_config: RobotConfig):
+    from protomotions.agents.common.config import (
+        MLPWithConcatConfig,
+        MLPLayerConfig,
+        ModuleContainerConfig,
+    )
+
+    return ModuleContainerConfig(
+        in_keys=["max_coords_obs", "previous_actions", "vae_latent"],
+        out_keys=["actor_trunk_out"],
+        models=[
+            MLPWithConcatConfig(
+                in_keys=["max_coords_obs", "previous_actions", "vae_latent"],
+                out_keys=["actor_trunk_out"],
+                normalize_obs=True,
+                norm_clamp_value=5,
+                num_out=robot_config.number_of_actions,
+                layers=[
+                    MLPLayerConfig(units=1024, activation="relu")
+                    for _ in range(6)
+                ],
+                output_activation="tanh",
+            ),
+        ],
+    )
+
+
 def agent_config(
     robot_config: RobotConfig,
     env_config: EnvConfig,
@@ -93,4 +120,5 @@ def agent_config(
 ) -> DistillAgentConfig:
     config = vqvae.build_agent_config(robot_config, env_config, args)
     config.model.encoder = _build_encoder(int(args.vq_latent_dim))
+    config.model.trunk = _build_trunk(robot_config)
     return config
