@@ -335,6 +335,43 @@ class FeedForwardModel(BaseModel):
         return tensordict
 
 
+class ContinuousPosteriorDistillModel(BaseModel):
+    """Continuous encoder-decoder baseline with no prior or quantization."""
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.config = config
+
+        EncoderClass = get_class(self.config.encoder._target_)
+        self._encoder: ModuleContainer = EncoderClass(config=self.config.encoder)
+        TrunkClass = get_class(self.config.trunk._target_)
+        self._trunk: ModuleContainer = TrunkClass(config=self.config.trunk)
+
+        trunk_inputs = [
+            key for key in self._trunk.in_keys if key != "vae_latent"
+        ]
+        self.in_keys = list(set(self._encoder.in_keys + trunk_inputs))
+        self.out_keys = ["action", "privileged_action"]
+
+    def forward(self, tensordict: TensorDict) -> TensorDict:
+        tensordict = self._encoder(tensordict)
+        latent = tensordict[self._encoder.out_keys[0]]
+        tensordict["vae_latent"] = latent
+        tensordict = self._trunk(tensordict)
+        action = tensordict[self._trunk.out_keys[0]]
+
+        tensordict["distill_privileged_latent"] = latent
+        tensordict["action"] = action
+        tensordict["privileged_action"] = action
+        return tensordict
+
+    def forward_inference(self, tensordict: TensorDict) -> TensorDict:
+        return self.forward(tensordict)
+
+    def get_inference_in_keys(self) -> list:
+        return self.in_keys
+
+
 class TextResidualMixin:
     """Optional VQ-PAE-style text residual for distill latents."""
 
