@@ -1,31 +1,45 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 The ProtoMotions Developers
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 
-"""Continuous posterior distillation with the same inputs as PULSE."""
 
 import argparse
 
-from protomotions.agents.distill.config import (
-    ContinuousPosteriorDistillModelConfig,
-    DistillAgentConfig,
-)
-from protomotions.envs.base_env.config import EnvConfig
 from protomotions.robot_configs.base import RobotConfig
 from protomotions.simulator.base_simulator.config import SimulatorConfig
+from protomotions.envs.base_env.config import EnvConfig
+from protomotions.agents.distill.config import (
+    DistillAgentConfig,
+    DistillModelConfig,
+    VaeConfig,
+    VaeNoiseType,
+)
 
 
 def additional_experiment_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--expert-model-path",
         type=str,
-        required=True,
-        help="Checkpoint of the SMPL motion-tracking expert.",
+        default=None,
+        help="Path to expert model checkpoint for distillation training",
     )
     parser.add_argument(
         "--latent-dim",
         type=int,
         default=64,
-        help="Dimension of the continuous posterior latent.",
+        help="Dimension of the continuous PULSE latent.",
     )
 
 
@@ -52,17 +66,17 @@ def motion_lib_config(args: argparse.Namespace):
 
 
 def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
-    from protomotions.envs.action import make_pd_action_config
+    from protomotions.envs.motion_manager.config import MimicMotionManagerConfig
     from protomotions.envs.component_factories import (
-        action_smoothness_factory,
         max_coords_obs_factory,
+        previous_actions_factory,
         mimic_target_poses_max_coords_factory,
         mimic_tracking_rewards_factory,
-        previous_actions_factory,
+        action_smoothness_factory,
         tracking_error_term_factory,
     )
     from protomotions.envs.control.mimic_control import MimicControlConfig
-    from protomotions.envs.motion_manager.config import MimicMotionManagerConfig
+    from protomotions.envs.action import make_pd_action_config
 
     control_components = {
         "mimic": MimicControlConfig(
@@ -124,30 +138,28 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
 
 
 def agent_config(
-    robot_config: RobotConfig,
-    env_config: EnvConfig,
-    args: argparse.Namespace,
+    robot_config: RobotConfig, env_config: EnvConfig, args: argparse.Namespace
 ) -> DistillAgentConfig:
     from protomotions.agents.base_agent.config import OptimizerConfig
-    from protomotions.agents.evaluators.config import DistillEvaluatorConfig
-    from protomotions.envs.component_factories import (
-        gr_error_factory,
-        gt_error_factory,
-        max_joint_error_factory,
-    )
     from protomotions.agents.common.config import (
         MLPWithConcatConfig,
         MLPLayerConfig,
         ModuleContainerConfig,
     )
+    from protomotions.agents.evaluators.config import DistillEvaluatorConfig
+    from protomotions.envs.component_factories import (
+        gt_error_factory,
+        gr_error_factory,
+        max_joint_error_factory,
+    )
 
-    latent_dim = int(args.latent_dim)
-    if latent_dim <= 0:
+    vae_latent_dim = int(getattr(args, "latent_dim", 64))
+    if vae_latent_dim <= 0:
         raise ValueError("Continuous latent dimension must be positive.")
 
     encoder_config = ModuleContainerConfig(
         in_keys=["max_coords_obs", "mimic_target_poses", "previous_actions"],
-        out_keys=["encoder_latent"],
+        out_keys=["encoder_mu", "encoder_logvar"],
         models=[
             MLPWithConcatConfig(
                 in_keys=["max_coords_obs", "mimic_target_poses", "previous_actions"],
@@ -155,15 +167,22 @@ def agent_config(
                 normalize_obs=True,
                 norm_clamp_value=5,
                 num_out=512,
-                layers=[
-                    MLPLayerConfig(units=1024, activation="relu") for _ in range(4)
-                ],
+                layers=[MLPLayerConfig(units=1024, activation="relu") for _ in range(4)],
                 output_activation="relu",
             ),
             MLPWithConcatConfig(
                 in_keys=["encoder_trunk_out"],
-                out_keys=["encoder_latent"],
-                num_out=latent_dim,
+                out_keys=["encoder_mu"],
+                num_out=vae_latent_dim,
+                layers=[
+                    MLPLayerConfig(units=256, activation="relu"),
+                    MLPLayerConfig(units=128, activation="relu"),
+                ],
+            ),
+            MLPWithConcatConfig(
+                in_keys=["encoder_trunk_out"],
+                out_keys=["encoder_logvar"],
+                num_out=vae_latent_dim,
                 layers=[
                     MLPLayerConfig(units=256, activation="relu"),
                     MLPLayerConfig(units=128, activation="relu"),
@@ -182,19 +201,28 @@ def agent_config(
                 normalize_obs=True,
                 norm_clamp_value=5,
                 num_out=robot_config.number_of_actions,
-                layers=[
-                    MLPLayerConfig(units=1024, activation="relu") for _ in range(6)
-                ],
+                layers=[MLPLayerConfig(units=1024, activation="relu") for _ in range(6)],
                 output_activation="tanh",
             ),
         ],
     )
 
-    model_config = ContinuousPosteriorDistillModelConfig(
+    model_config = DistillModelConfig(
+        _target_="protomotions.agents.distill.model.PosteriorOnlyKLDistillModel",
         encoder=encoder_config,
         trunk=trunk_config,
+        vae=VaeConfig(
+            vae_latent_dim=vae_latent_dim,
+            vae_noise_type=VaeNoiseType.NORMAL,
+            prior_regu_weight=0.0,
+            prior_mean_regu_coeff=0.001,
+            prior_logvar_regu_coeff=0.001,
+            kld_schedule=None,
+        ),
         optimizer=OptimizerConfig(_target_="torch.optim.Adam", lr=2e-5),
     )
+
+    expert_model_path = getattr(args, "expert_model_path", None)
     return DistillAgentConfig(
         model=model_config,
         batch_size=args.batch_size,
@@ -208,7 +236,7 @@ def agent_config(
                 "max_joint_error": max_joint_error_factory(),
             },
         ),
-        expert_model_path=args.expert_model_path,
+        expert_model_path=expert_model_path,
     )
 
 
