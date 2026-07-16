@@ -1000,9 +1000,15 @@ class DistillEvaluator(MimicEvaluator):
         """Process normal metrics and append privileged-action metrics."""
         to_log, success_rate, num_eval_items = super().process_eval_results()
 
-        if not self._supports_prior_action() and success_rate is not None:
-            to_log["eval/privileged_success_rate"] = success_rate
-            to_log.pop("eval/success_rate", None)
+        if not self._supports_prior_action():
+            to_log = {
+                (
+                    f"privileged_eval/{key[len('eval/') :]}"
+                    if key.startswith("eval/")
+                    else key
+                ): value
+                for key, value in to_log.items()
+            }
 
         if self._privileged_eval_state is not None:
             privileged_failed_motions = (
@@ -1017,7 +1023,7 @@ class DistillEvaluator(MimicEvaluator):
             privileged_log, privileged_success_rate = self._summarize_eval_state(
                 self._privileged_eval_state,
                 prefix="privileged_eval",
-                success_rate_key="eval/privileged_success_rate",
+                success_rate_key="privileged_eval/success_rate",
             )
             to_log.update(privileged_log)
             if success_rate is not None and privileged_success_rate is not None:
