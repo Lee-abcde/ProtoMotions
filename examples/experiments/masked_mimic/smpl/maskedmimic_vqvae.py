@@ -113,30 +113,23 @@ def _build_encoder(latent_dim: int):
 def _build_trunk(robot_config: RobotConfig):
     from protomotions.agents.common.config import (
         MLPWithConcatConfig, MLPLayerConfig, ModuleContainerConfig,
-        ModuleOperationForwardConfig, ObsProcessorConfig,
     )
 
     return ModuleContainerConfig(
         in_keys=["max_coords_obs", "previous_actions", "vae_latent"],
         out_keys=["actor_trunk_out"],
         models=[
-            ObsProcessorConfig(
-                in_keys=["max_coords_obs"],
-                out_keys=["decoder_max_coords_obs_norm"], normalize_obs=True,
-                norm_clamp_value=5,
-                module_operations=[ModuleOperationForwardConfig()],
-            ),
-            ObsProcessorConfig(
-                in_keys=["previous_actions"],
-                out_keys=["decoder_previous_actions_norm"], normalize_obs=True,
-                norm_clamp_value=5,
-                module_operations=[ModuleOperationForwardConfig()],
-            ),
             MLPWithConcatConfig(
-                in_keys=["decoder_max_coords_obs_norm", "decoder_previous_actions_norm", "vae_latent"],
+                in_keys=["max_coords_obs", "previous_actions", "vae_latent"],
                 out_keys=["actor_trunk_out"],
+                normalize_obs=True,
+                norm_clamp_value=5,
                 num_out=robot_config.number_of_actions,
-                layers=[MLPLayerConfig(units=1024, activation="relu") for _ in range(3)],
+                layers=[
+                    MLPLayerConfig(units=1024, activation="relu")
+                    for _ in range(6)
+                ],
+                output_activation="tanh",
             ),
         ],
     )
