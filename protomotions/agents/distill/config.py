@@ -141,21 +141,6 @@ class FeedForwardModelConfig(BaseModelConfig):
 
 
 @dataclass
-class ContinuousPosteriorDistillModelConfig(BaseModelConfig):
-    """Continuous posterior baseline without a prior or quantizer."""
-
-    _target_: str = (
-        "protomotions.agents.distill.model.ContinuousPosteriorDistillModel"
-    )
-    encoder: ModuleContainerConfig = field(default_factory=ModuleContainerConfig)
-    trunk: ModuleContainerConfig = field(default_factory=ModuleContainerConfig)
-    optimizer: OptimizerConfig = field(
-        default_factory=lambda: OptimizerConfig(lr=2e-5),
-        metadata={"help": "Optimizer settings for model training."},
-    )
-
-
-@dataclass
 class DistillLossConfig:
     """Auxiliary losses for distill models."""
 
