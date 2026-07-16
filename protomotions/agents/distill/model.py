@@ -645,6 +645,112 @@ class DetachedEncoderKLDistillModel(DistillModel):
         )
 
 
+class ResidualVectorQuantizer(nn.Module):
+    """Stack multiple VQ codebooks and quantize the residual at each level."""
+
+    def __init__(
+        self,
+        num_quantizers: int,
+        num_embeddings: int,
+        embedding_dim: int,
+        commitment_cost: float,
+        codebook_update_mode: str,
+        ema_decay: float,
+        dead_code_threshold: int,
+    ):
+        super().__init__()
+        if num_quantizers < 1:
+            raise ValueError("num_quantizers must be >= 1.")
+        if codebook_update_mode not in ["ema", "gradient"]:
+            raise ValueError(
+                "codebook_update_mode must be one of ['ema', 'gradient'], "
+                f"got {codebook_update_mode!r}"
+            )
+
+        self.num_quantizers = num_quantizers
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.codebook_update_mode = codebook_update_mode
+        quantizer_class = (
+            GradientVectorQuantizer
+            if codebook_update_mode == "gradient"
+            else VectorQuantizer
+        )
+        self.quantizers = nn.ModuleList(
+            [
+                quantizer_class(
+                    num_embeddings=num_embeddings,
+                    embedding_dim=embedding_dim,
+                    commitment_cost=commitment_cost,
+                    **(
+                        {}
+                        if codebook_update_mode == "gradient"
+                        else {"ema_decay": ema_decay}
+                    ),
+                    dead_code_threshold=dead_code_threshold,
+                )
+                for _ in range(num_quantizers)
+            ]
+        )
+
+    @property
+    def _codebook(self) -> torch.Tensor:
+        return torch.stack([quantizer._codebook for quantizer in self.quantizers])
+
+    def forward(self, z_e: torch.Tensor, track_usage: bool = True):
+        residual = z_e
+        quantized_total = torch.zeros_like(z_e)
+        commitment_loss_total = z_e.new_zeros(z_e.shape[0])
+        codebook_loss_total = z_e.new_zeros(z_e.shape[0])
+        all_indices = []
+        all_perplexities = []
+
+        for quantizer in self.quantizers:
+            if self.codebook_update_mode == "gradient":
+                (
+                    quantized,
+                    commitment_loss,
+                    codebook_loss,
+                    indices,
+                    perplexity,
+                ) = quantizer(residual, track_usage=track_usage)
+            else:
+                quantized, commitment_loss, indices, perplexity = quantizer(
+                    residual, track_usage=track_usage
+                )
+                codebook_loss = torch.zeros_like(commitment_loss)
+
+            quantized_value = quantized.detach()
+            quantized_total = quantized_total + quantized_value
+            residual = residual - quantized_value
+            commitment_loss_total = commitment_loss_total + commitment_loss
+            codebook_loss_total = codebook_loss_total + codebook_loss
+            all_indices.append(indices)
+            all_perplexities.append(perplexity)
+
+        quantized_total_st = z_e + (quantized_total - z_e).detach()
+        stacked_indices = torch.stack(all_indices, dim=-1)
+        mean_perplexity = torch.stack(all_perplexities).mean()
+        return (
+            quantized_total_st,
+            commitment_loss_total,
+            codebook_loss_total,
+            stacked_indices,
+            mean_perplexity,
+        )
+
+    def revive_dead_codes(self, z_e: torch.Tensor):
+        residual = z_e
+        for quantizer in self.quantizers:
+            quantizer.revive_dead_codes(residual)
+            was_training = quantizer.training
+            quantizer.eval()
+            with torch.no_grad():
+                quantized = quantizer(residual, track_usage=False)[0]
+            quantizer.train(was_training)
+            residual = residual - quantized.detach()
+
+
 class VQDistillModel(TextResidualMixin, BaseModel):
     """PULSE distill model with a shared VQ codebook instead of Gaussian latents."""
 
@@ -1480,3 +1586,35 @@ class VQPosteriorDistillModel(VQDistillModel):
     """VQ posterior, codebook, and decoder without a deployable prior."""
 
     include_prior = False
+
+
+class RVQPosteriorDistillModel(VQPosteriorDistillModel):
+    """Residual VQ posterior, codebooks, and decoder without a deployable prior."""
+
+    def __init__(self, config: "VQDistillModelConfig"):
+        super().__init__(config)
+        num_quantizers = int(getattr(self.config, "num_residual_quantizers", 1))
+        self.quantizer = ResidualVectorQuantizer(
+            num_quantizers=num_quantizers,
+            num_embeddings=self.config.num_embeddings,
+            embedding_dim=self.config.latent_dim,
+            commitment_cost=self.config.commitment_cost,
+            codebook_update_mode=self.config.codebook_update_mode,
+            ema_decay=self.config.ema_decay,
+            dead_code_threshold=self.config.dead_code_threshold,
+        )
+
+    def _quantize(self, latent: torch.Tensor, update_codebook: bool):
+        original_training = self.quantizer.training
+        if self.config.codebook_update_mode == "ema":
+            self.quantizer.train(update_codebook and self.training)
+        try:
+            quantized, commitment_loss, codebook_loss, indices, perplexity = (
+                self.quantizer(latent, track_usage=update_codebook)
+            )
+        finally:
+            if self.config.codebook_update_mode == "ema":
+                self.quantizer.train(original_training)
+        if not update_codebook:
+            codebook_loss = torch.zeros_like(codebook_loss)
+        return quantized, commitment_loss, codebook_loss, indices, perplexity
