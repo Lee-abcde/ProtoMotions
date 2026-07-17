@@ -329,3 +329,32 @@ class DistillAgentConfig(BaseAgentConfig):
             )
         },
     )
+    rollout_prior_action_max_prob: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Maximum fraction of rollout environments stepped with "
+                "prior_action while the remaining environments use "
+                "rollout_action_key. A value of 0 disables mixed rollout."
+            ),
+            "min": 0.0,
+            "max": 1.0,
+        },
+    )
+    rollout_prior_action_start_epoch: int = field(
+        default=0,
+        metadata={
+            "help": "Epoch when prior-action environment mixing starts.",
+            "min": 0,
+        },
+    )
+    rollout_prior_action_ramp_epochs: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Number of epochs used to linearly ramp the prior-action "
+                "environment fraction from 0 to rollout_prior_action_max_prob."
+            ),
+            "min": 0,
+        },
+    )

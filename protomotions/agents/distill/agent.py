@@ -51,6 +51,77 @@ class DistillAgent(BaseAgent):
             )
         return action_key
 
+    def _rollout_prior_action_prob(self) -> float:
+        max_prob = float(
+            getattr(self.config, "rollout_prior_action_max_prob", 0.0)
+        )
+        if max_prob <= 0.0:
+            return 0.0
+        if max_prob > 1.0:
+            raise ValueError(
+                "rollout_prior_action_max_prob must be in [0, 1], "
+                f"got {max_prob}."
+            )
+
+        start_epoch = int(
+            getattr(self.config, "rollout_prior_action_start_epoch", 0)
+        )
+        ramp_epochs = int(
+            getattr(self.config, "rollout_prior_action_ramp_epochs", 0)
+        )
+        if start_epoch < 0:
+            raise ValueError(
+                "rollout_prior_action_start_epoch must be non-negative, "
+                f"got {start_epoch}."
+            )
+        if ramp_epochs < 0:
+            raise ValueError(
+                "rollout_prior_action_ramp_epochs must be non-negative, "
+                f"got {ramp_epochs}."
+            )
+
+        current_epoch = int(getattr(self, "current_epoch", 0))
+        if current_epoch < start_epoch:
+            return 0.0
+        if ramp_epochs == 0:
+            return max_prob
+
+        progress = (current_epoch - start_epoch + 1) / ramp_epochs
+        return max_prob * min(max(progress, 0.0), 1.0)
+
+    def _get_rollout_prior_action_mask(
+        self, batch_size: int, device: torch.device
+    ) -> Optional[Tensor]:
+        prior_prob = self._rollout_prior_action_prob()
+        if prior_prob <= 0.0:
+            return None
+
+        num_prior_envs = int(round(prior_prob * batch_size))
+        num_prior_envs = max(0, min(num_prior_envs, batch_size))
+        if num_prior_envs == 0:
+            return None
+
+        current_epoch = int(getattr(self, "current_epoch", 0))
+        mask_state = (
+            current_epoch,
+            batch_size,
+            num_prior_envs,
+            device,
+        )
+        if getattr(self, "_rollout_prior_action_mask_state", None) != mask_state:
+            mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            if num_prior_envs == batch_size:
+                mask[:] = True
+            else:
+                prior_env_ids = torch.randperm(batch_size, device=device)[
+                    :num_prior_envs
+                ]
+                mask[prior_env_ids] = True
+            self._rollout_prior_action_mask = mask
+            self._rollout_prior_action_mask_state = mask_state
+
+        return self._rollout_prior_action_mask
+
     def _select_rollout_action(self, output_td: TensorDict) -> Tensor:
         action_key = self._rollout_action_key()
         if action_key not in output_td.keys():
@@ -59,7 +130,30 @@ class DistillAgent(BaseAgent):
                 f"Configured rollout_action_key={action_key!r} is not present in "
                 f"model outputs. Available keys: {available_keys}."
             )
-        return output_td[action_key]
+
+        base_action = output_td[action_key]
+        prior_mask = self._get_rollout_prior_action_mask(
+            batch_size=base_action.shape[0],
+            device=base_action.device,
+        )
+        if prior_mask is None:
+            return base_action
+        if action_key != "privileged_action":
+            raise ValueError(
+                "Mixed prior rollout requires rollout_action_key='privileged_action' "
+                "so non-prior environments stay on the posterior/encoder-decoder "
+                "action."
+            )
+        if "prior_action" not in output_td.keys():
+            available_keys = sorted(str(key) for key in output_td.keys())
+            raise KeyError(
+                "Mixed prior rollout requires model output 'prior_action'. "
+                f"Available keys: {available_keys}."
+            )
+
+        prior_action = output_td["prior_action"]
+        view_shape = (prior_mask.shape[0],) + (1,) * (prior_action.ndim - 1)
+        return torch.where(prior_mask.view(view_shape), prior_action, base_action)
 
     def _uses_vae(self) -> bool:
         return hasattr(self.config.model, "vae") and self.config.model.vae is not None
@@ -1210,6 +1304,7 @@ class DistillAgent(BaseAgent):
             self.vq_posterior_frequency_accum_valid[:] = True
 
         action = self._select_rollout_action(output_td)
+        output_td["action"] = action
 
         # Run expert model to get target action
         # Build expert obs tensordict by stripping "expert_" prefix from keys
@@ -1236,7 +1331,6 @@ class DistillAgent(BaseAgent):
         # Store expert action
         self.experience_buffer.update_data("expert_actions", step, expert_action)
 
-        output_td["action"] = action
         return output_td
 
     def perform_optimization_step(self, batch_dict, batch_idx) -> Dict:

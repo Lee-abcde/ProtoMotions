@@ -37,6 +37,27 @@ def additional_experiment_arguments(parser: argparse.ArgumentParser):
         choices=["privileged_action", "prior_action"],
         help="Model action output used to step the environment during prior training.",
     )
+    parser.add_argument(
+        "--prior-rollout-start-epoch",
+        type=int,
+        default=1000,
+        help="Epoch where prior-action environment rollout mixing starts.",
+    )
+    parser.add_argument(
+        "--prior-rollout-ramp-epochs",
+        type=int,
+        default=1000,
+        help="Epochs used to ramp prior-action environment fraction to the maximum.",
+    )
+    parser.add_argument(
+        "--prior-rollout-max-prob",
+        type=float,
+        default=0.5,
+        help=(
+            "Maximum fraction of rollout environments stepped with prior_action. "
+            "Set to 0.0 to disable mixed rollout."
+        ),
+    )
 
 
 def _load_posterior_model_config(checkpoint_path: str):
@@ -239,6 +260,18 @@ def agent_config(robot_config: RobotConfig, env_config, args: argparse.Namespace
             "Posterior checkpoint has an invalid VQ latent dimension or "
             "codebook size."
         )
+    prior_rollout_max_prob = float(args.prior_rollout_max_prob)
+    if prior_rollout_max_prob < 0.0 or prior_rollout_max_prob > 1.0:
+        raise ValueError("--prior-rollout-max-prob must be in [0, 1].")
+    if int(args.prior_rollout_start_epoch) < 0:
+        raise ValueError("--prior-rollout-start-epoch must be non-negative.")
+    if int(args.prior_rollout_ramp_epochs) < 0:
+        raise ValueError("--prior-rollout-ramp-epochs must be non-negative.")
+    if args.rollout_action_key == "prior_action" and prior_rollout_max_prob > 0.0:
+        raise ValueError(
+            "Set --prior-rollout-max-prob 0.0 when using "
+            "--rollout-action-key prior_action."
+        )
 
     model_config = VQDistillModelConfig(
         encoder=copy.deepcopy(posterior_model_config.encoder),
@@ -276,6 +309,9 @@ def agent_config(robot_config: RobotConfig, env_config, args: argparse.Namespace
         batch_size=args.batch_size,
         training_max_steps=args.training_max_steps,
         rollout_action_key=args.rollout_action_key,
+        rollout_prior_action_max_prob=prior_rollout_max_prob,
+        rollout_prior_action_start_epoch=int(args.prior_rollout_start_epoch),
+        rollout_prior_action_ramp_epochs=int(args.prior_rollout_ramp_epochs),
         gradient_clip_val=50.0,
         num_mini_epochs=6,
         evaluator=DistillEvaluatorConfig(
