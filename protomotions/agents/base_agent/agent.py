@@ -1057,6 +1057,13 @@ class BaseAgent:
             "times/last_epoch_seconds": (end_time - self.epoch_start_time),
             "rewards/task_rewards": self.experience_buffer.rewards.mean().item(),
         }
+        rollout_prior_action_prob = getattr(
+            self, "_rollout_prior_action_prob", None
+        )
+        if callable(rollout_prior_action_prob):
+            log_dict["distill/rollout_prior_action_prob"] = (
+                rollout_prior_action_prob()
+            )
         if self.config.normalize_rewards:
             log_dict["rewards/unnormalized_task_rewards"] = (
                 self.experience_buffer.unnormalized_rewards.mean().item()
