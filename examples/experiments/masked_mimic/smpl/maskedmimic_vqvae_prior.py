@@ -307,6 +307,7 @@ def agent_config(robot_config: RobotConfig, env_config, args: argparse.Namespace
         gradient_clip_val=50.0,
         num_mini_epochs=6,
         evaluator=DistillEvaluatorConfig(
+            evaluate_privileged_action=False,
             use_privileged_success_for_motion_weights=False,
             evaluation_components={
                 "gt_error": gt_error_factory(threshold=0.25),
