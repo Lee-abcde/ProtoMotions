@@ -16,20 +16,14 @@ from protomotions.agents.distill.config import (
 from protomotions.robot_configs.base import RobotConfig
 
 
-terrain_config = posterior.terrain_config
-scene_lib_config = posterior.scene_lib_config
-motion_lib_config = posterior.motion_lib_config
-env_config = posterior.env_config
-apply_inference_overrides = posterior.apply_inference_overrides
+terrain_config = masked_mimic.terrain_config
+scene_lib_config = masked_mimic.scene_lib_config
+motion_lib_config = masked_mimic.motion_lib_config
+apply_inference_overrides = masked_mimic.apply_inference_overrides
+env_config = masked_mimic.env_config
 
 
 def additional_experiment_arguments(parser: argparse.ArgumentParser):
-    parser.add_argument(
-        "--expert-model-path",
-        type=str,
-        required=True,
-        help="Checkpoint of the SMPL motion-tracking expert.",
-    )
     parser.add_argument(
         "--rollout-action-key",
         type=str,
@@ -245,8 +239,6 @@ def agent_config(robot_config: RobotConfig, env_config, args: argparse.Namespace
     )
 
     posterior._validate_smpl(robot_config)
-    if not getattr(args, "expert_model_path", None):
-        raise ValueError("Training requires --expert-model-path.")
     if not getattr(args, "checkpoint", None):
         raise ValueError(
             "Prior training requires --checkpoint from the posterior stage."
@@ -322,5 +314,5 @@ def agent_config(robot_config: RobotConfig, env_config, args: argparse.Namespace
                 "max_joint_error": max_joint_error_factory(),
             },
         ),
-        expert_model_path=args.expert_model_path,
+        expert_model_path=None,
     )

@@ -243,6 +243,28 @@ class DistillAgent(BaseAgent):
             > 0
         )
 
+    def _train_categorical_prior_only(self) -> bool:
+        return bool(
+            getattr(self.config.model, "train_categorical_prior_only", False)
+        )
+
+    def _uses_soft_code_target(self) -> bool:
+        soft_cfg = getattr(self.config.model, "soft_code_target", None)
+        return soft_cfg is not None and bool(getattr(soft_cfg, "enabled", False))
+
+    def _prior_bc_weight(self) -> float:
+        losses_cfg = getattr(self.config.model, "losses", None)
+        if losses_cfg is None:
+            return 0.0
+        return float(getattr(losses_cfg, "prior_bc_weight", 0.0))
+
+    def _requires_expert_actions(self) -> bool:
+        return (
+            not self._train_categorical_prior_only()
+            or self._prior_bc_weight() > 0.0
+            or self._uses_soft_code_target()
+        )
+
     def _needs_posterior_vq_indices(self) -> bool:
         return self._uses_vq_code_history() or self._uses_vq_prior_future_targets()
 
@@ -566,10 +588,17 @@ class DistillAgent(BaseAgent):
         model: DistillModel = DistillModelConfig(config=self.config.model)
         model.apply(weight_init)
 
-        # Optionally load a pre-trained expert model if provided.
+        requires_expert_actions = self._requires_expert_actions()
+        if requires_expert_actions and self.config.expert_model_path is None:
+            raise ValueError(
+                "This distillation configuration requires expert actions, but "
+                "expert_model_path is not set."
+            )
+
+        # Optionally load a pre-trained expert model if expert actions are used.
         # Note: Expert observation components are loaded in the experiment file
         # and prefixed with "expert_" for use during distillation training.
-        if self.config.expert_model_path is not None:
+        if requires_expert_actions and self.config.expert_model_path is not None:
             log.info(f"Loading pre-trained full-body tracker from: {self.config.expert_model_path}")
             
             checkpoint_path = Path(self.config.expert_model_path)
@@ -629,6 +658,11 @@ class DistillAgent(BaseAgent):
                 param.requires_grad = False
             self.expert_model.eval()
         else:
+            if self.config.expert_model_path is not None:
+                log.info(
+                    "Skipping expert tracker load because this configuration "
+                    "does not use expert actions."
+                )
             self.expert_model = None
 
         return model
@@ -1219,9 +1253,10 @@ class DistillAgent(BaseAgent):
 
     def register_algorithm_experience_buffer_keys(self):
         # MaskedMimic-specific keys (action, mean_action, prior_mu, etc. auto-registered from model)
-        self.experience_buffer.register_key(
-            "expert_actions", shape=(self.env.robot_config.number_of_actions,)
-        )
+        if self._requires_expert_actions():
+            self.experience_buffer.register_key(
+                "expert_actions", shape=(self.env.robot_config.number_of_actions,)
+            )
         if self._needs_posterior_vq_indices():
             self.experience_buffer.register_key("posterior_vq_indices", dtype=torch.long)
         if self._uses_vq_prior_future_targets():
@@ -1306,16 +1341,23 @@ class DistillAgent(BaseAgent):
         action = self._select_rollout_action(output_td)
         output_td["action"] = action
 
-        # Run expert model to get target action
-        # Build expert obs tensordict by stripping "expert_" prefix from keys
-        expert_obs_td = self._build_expert_obs_td(obs_td, self.expert_model.in_keys)
-        expert_output_td = self.expert_model(expert_obs_td)
-        if "mean_action" in expert_output_td:
-            expert_action = expert_output_td[
-                "mean_action"
-            ]  # Use deterministic expert action
+        if self._requires_expert_actions():
+            if self.expert_model is None:
+                raise RuntimeError(
+                    "Expert actions are required, but no expert model is loaded."
+                )
+            # Build expert obs tensordict by stripping "expert_" prefix from keys.
+            expert_obs_td = self._build_expert_obs_td(
+                obs_td, self.expert_model.in_keys
+            )
+            expert_output_td = self.expert_model(expert_obs_td)
+            if "mean_action" in expert_output_td:
+                # Use deterministic expert action.
+                expert_action = expert_output_td["mean_action"]
+            else:
+                expert_action = expert_output_td["action"]
         else:
-            expert_action = expert_output_td["action"]
+            expert_action = None
 
         # Store model outputs
         for key in self.model_output_keys:
@@ -1328,8 +1370,8 @@ class DistillAgent(BaseAgent):
                 output_td["posterior_vq_indices"].detach().long(),
             )
 
-        # Store expert action
-        self.experience_buffer.update_data("expert_actions", step, expert_action)
+        if expert_action is not None:
+            self.experience_buffer.update_data("expert_actions", step, expert_action)
 
         return output_td
 
@@ -1378,20 +1420,22 @@ class DistillAgent(BaseAgent):
 
         # Extract outputs
         actions = batch_td["privileged_action"]
-        expert_actions = batch_dict["expert_actions"]
+        expert_actions = batch_dict.get("expert_actions", None)
 
-        # Behavioral cloning loss
-        bc_loss = torch.square(actions - expert_actions).mean()
-        prior_bc_loss = torch.tensor(0.0, device=bc_loss.device)
-        prior_bc_loss_weighted = torch.tensor(0.0, device=bc_loss.device)
-        prior_bc_weight = 0.0
-        losses_cfg = getattr(self.config.model, "losses", None)
-        if "prior_action" in batch_td.keys() and losses_cfg is not None:
-            prior_bc_weight = float(getattr(losses_cfg, "prior_bc_weight", 0.0))
-            prior_bc_loss = torch.square(
-                batch_td["prior_action"] - expert_actions
-            ).mean()
+        prior_bc_weight = self._prior_bc_weight()
+        if expert_actions is not None:
+            # Behavioral cloning loss
+            bc_loss = torch.square(actions - expert_actions).mean()
+            prior_bc_loss = torch.zeros_like(bc_loss)
+            if "prior_action" in batch_td.keys():
+                prior_bc_loss = torch.square(
+                    batch_td["prior_action"] - expert_actions
+                ).mean()
             prior_bc_loss_weighted = prior_bc_loss * prior_bc_weight
+        else:
+            bc_loss = actions.new_zeros(())
+            prior_bc_loss = actions.new_zeros(())
+            prior_bc_loss_weighted = actions.new_zeros(())
 
         extra_loss, extra_log_dict = self.calculate_extra_loss(batch_dict, actions, batch_td)
 
