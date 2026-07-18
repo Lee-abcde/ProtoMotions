@@ -19,8 +19,31 @@ from protomotions.robot_configs.base import RobotConfig
 terrain_config = masked_mimic.terrain_config
 scene_lib_config = masked_mimic.scene_lib_config
 motion_lib_config = masked_mimic.motion_lib_config
-apply_inference_overrides = masked_mimic.apply_inference_overrides
 env_config = masked_mimic.env_config
+
+
+def apply_inference_overrides(
+    robot_cfg,
+    simulator_cfg,
+    env_cfg,
+    agent_cfg,
+    terrain_cfg,
+    motion_lib_cfg,
+    scene_lib_cfg,
+    args: argparse.Namespace,
+):
+    masked_mimic.apply_inference_overrides(
+        robot_cfg,
+        simulator_cfg,
+        env_cfg,
+        agent_cfg,
+        terrain_cfg,
+        motion_lib_cfg,
+        scene_lib_cfg,
+        args,
+    )
+    if agent_cfg is not None:
+        agent_cfg.model.load_categorical_prior_parameters = True
 
 
 def additional_experiment_arguments(parser: argparse.ArgumentParser):
