@@ -29,14 +29,31 @@ from protomotions.agents.categorical_prior_ppo.model import (
 )
 from protomotions.agents.common.common import weight_init
 from protomotions.agents.ppo.agent import PPO
+from protomotions.agents.utils.normalization import (
+    materialize_lazy_running_stats_from_state_dict,
+)
 from protomotions.utils.hydra_replacement import get_class, instantiate
 
 log = logging.getLogger(__name__)
 
 
+_DISTILL_INFERENCE_STATE_SECTIONS = {
+    "categorical prior": "_categorical_prior.",
+    "decoder/trunk": "_trunk.",
+    "VQ quantizer/codebook": "quantizer.",
+}
+
+
 class CategoricalPriorPPO(PPO):
     config: CategoricalPriorPPOAgentConfig
     model: CategoricalPriorPPOModel
+
+    def _materialize_lazy_modules(self, dummy_obs_td: TensorDict) -> None:
+        super()._materialize_lazy_modules(dummy_obs_td)
+        if self.model._actor.uses_logit_adapter:
+            self.model._actor.zero_initialize_logit_adapter()
+        else:
+            self.model._actor.capture_reference_prior()
 
     def _uses_vq_code_history(self) -> bool:
         actor_cfg = self.config.model.actor
@@ -330,12 +347,20 @@ class CategoricalPriorPPO(PPO):
 
         for param in model._actor.parameters():
             param.requires_grad = False
-        for param in categorical_prior.parameters():
-            param.requires_grad = True
-
-        actor_params = [
-            param for param in categorical_prior.parameters() if param.requires_grad
-        ]
+        if model._actor.uses_logit_adapter:
+            for param in model._actor.logit_adapter.parameters():
+                param.requires_grad = True
+            actor_params = list(model._actor.logit_adapter.parameters())
+            trainable_name = "residual logit adapter"
+        else:
+            for param in categorical_prior.parameters():
+                param.requires_grad = True
+            actor_params = [
+                param
+                for param in categorical_prior.parameters()
+                if param.requires_grad
+            ]
+            trainable_name = "categorical prior"
         if len(actor_params) == 0:
             raise RuntimeError("No trainable categorical prior parameters found.")
 
@@ -360,8 +385,9 @@ class CategoricalPriorPPO(PPO):
             self.critic_lr = self.config.model.critic_optimizer.lr
 
         log.info(
-            "Training categorical prior PPO actor with "
-            f"{sum(param.numel() for param in actor_params)} parameters."
+            "Training categorical prior PPO %s with %s parameters.",
+            trainable_name,
+            sum(param.numel() for param in actor_params),
         )
 
     def _load_base_training_state(self, state_dict):
@@ -374,6 +400,37 @@ class CategoricalPriorPPO(PPO):
         if self.config.normalize_rewards and "running_reward_norm" in state_dict:
             self.running_reward_norm.load_state_dict(state_dict["running_reward_norm"])
 
+    @staticmethod
+    def _validate_distill_warm_start(
+        checkpoint_model_state,
+        missing_keys: Sequence[str],
+        unexpected_keys: Sequence[str],
+    ) -> None:
+        absent_sections = [
+            name
+            for name, prefix in _DISTILL_INFERENCE_STATE_SECTIONS.items()
+            if not any(key.startswith(prefix) for key in checkpoint_model_state)
+        ]
+        required_prefixes = tuple(_DISTILL_INFERENCE_STATE_SECTIONS.values())
+        critical_missing = [
+            key for key in missing_keys if key.startswith(required_prefixes)
+        ]
+        critical_unexpected = [
+            key for key in unexpected_keys if key.startswith(required_prefixes)
+        ]
+        if absent_sections or critical_missing or critical_unexpected:
+            details = []
+            if absent_sections:
+                details.append(f"absent sections: {absent_sections}")
+            if critical_missing:
+                details.append(f"missing keys: {critical_missing}")
+            if critical_unexpected:
+                details.append(f"unexpected keys: {critical_unexpected}")
+            raise RuntimeError(
+                "Categorical prior PPO distill warm-start is incompatible with "
+                "the configured inference model; " + "; ".join(details)
+            )
+
     def load_parameters(self, state_dict, load_training_state: bool = True):
         checkpoint_model_state = state_dict["model"]
         is_native_ppo_checkpoint = any(
@@ -381,10 +438,23 @@ class CategoricalPriorPPO(PPO):
         )
 
         if is_native_ppo_checkpoint:
+            has_reference_state = any(
+                key.startswith("_actor.reference_categorical_prior.")
+                for key in checkpoint_model_state
+            )
             missing_keys, unexpected_keys = self.model.load_state_dict(
                 checkpoint_model_state,
                 strict=False,
             )
+            if not self.model._actor.uses_logit_adapter:
+                if has_reference_state:
+                    self.model._actor._freeze_reference_prior()
+                else:
+                    self.model._actor.capture_reference_prior()
+                    log.warning(
+                        "Categorical PPO checkpoint predates frozen reference "
+                        "state; captured the loaded current prior as reference."
+                    )
             if missing_keys or unexpected_keys:
                 log.warning(
                     "Loaded categorical PPO checkpoint with missing keys %s and "
@@ -411,10 +481,21 @@ class CategoricalPriorPPO(PPO):
         if load_training_state and not self.config.reset_training_state_on_distill_load:
             self._load_base_training_state(state_dict)
 
-        missing_keys, unexpected_keys = self.model._actor.vq_model.load_state_dict(
+        vq_model = self.model._actor.vq_model
+        materialize_lazy_running_stats_from_state_dict(
+            vq_model,
+            checkpoint_model_state,
+        )
+        missing_keys, unexpected_keys = vq_model.load_state_dict(
             checkpoint_model_state,
             strict=False,
         )
+        self._validate_distill_warm_start(
+            checkpoint_model_state,
+            missing_keys,
+            unexpected_keys,
+        )
+        self.model._actor.capture_reference_prior()
         log.info(
             "Warm-started categorical prior PPO actor from distill checkpoint. "
             "Missing keys: %s. Unexpected keys: %s.",
@@ -529,6 +610,24 @@ class CategoricalPriorPPO(PPO):
         entropy_loss = -self.config.entropy_coef * entropy
         actor_loss = actor_ppo_loss + entropy_loss
 
+        reference_kl_coeff = float(self.config.reference_kl_coeff)
+        if reference_kl_coeff < 0:
+            raise ValueError("reference_kl_coeff must be non-negative.")
+        compute_reference_kl = (
+            reference_kl_coeff > 0 or self.actor_module.uses_logit_adapter
+        )
+        reference_kl = torch.zeros((), device=logits.device)
+        if compute_reference_kl:
+            reference_logits = self.actor_module.reference_prior_logits(batch_td)
+            reference_dist = torch.distributions.Categorical(
+                logits=reference_logits / temperature
+            )
+            reference_kl = torch.distributions.kl_divergence(
+                dist,
+                reference_dist,
+            ).mean()
+            actor_loss = actor_loss + reference_kl_coeff * reference_kl
+
         approx_kl = (current_neglogp - batch_dict["neglogp"]).mean()
         log_dict = {
             "actor/ppo_loss": actor_ppo_loss.detach(),
@@ -536,6 +635,18 @@ class CategoricalPriorPPO(PPO):
             "actor/entropy_loss": entropy_loss.detach(),
             "actor/clip_frac": clipped.detach(),
             "actor/kl": approx_kl.detach(),
+            "actor/reference_kl": reference_kl.detach(),
+            "actor/reference_kl_coeff": reference_kl_coeff,
             "losses/actor_loss": actor_loss.detach(),
         }
+        if self.actor_module.uses_logit_adapter:
+            delta_logits = batch_td["vq_prior_delta_logits"]
+            log_dict.update(
+                {
+                    "actor/base_prior_kl": reference_kl.detach(),
+                    "actor/delta_logit_norm": (
+                        delta_logits.norm(dim=-1).mean().detach()
+                    ),
+                }
+            )
         return actor_loss, log_dict

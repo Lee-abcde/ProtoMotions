@@ -15,7 +15,7 @@
 #
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 from protomotions.agents.base_agent.config import BaseModelConfig, OptimizerConfig
 from protomotions.agents.common.config import ModuleContainerConfig
@@ -35,9 +35,21 @@ class CategoricalPriorPPOModelConfig(BaseModelConfig):
         default_factory=ModuleContainerConfig,
         metadata={"help": "Value function network."},
     )
+    logit_adapter: Optional[ModuleContainerConfig] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional task adapter that predicts residual categorical-prior "
+                "logits. When set, the VQ model is frozen and PPO trains only "
+                "this adapter."
+            )
+        },
+    )
     actor_optimizer: OptimizerConfig = field(
         default_factory=lambda: OptimizerConfig(lr=2e-5),
-        metadata={"help": "Optimizer for the categorical prior parameters."},
+        metadata={
+            "help": "Optimizer for the categorical prior or residual adapter."
+        },
     )
     critic_optimizer: OptimizerConfig = field(
         default_factory=lambda: OptimizerConfig(lr=1e-4),
@@ -70,6 +82,15 @@ class CategoricalPriorPPOAgentConfig(PPOAgentConfig):
             "help": (
                 "When loading a non-PPO distill checkpoint, use it only as a "
                 "warm start and keep PPO epoch/optimizer state freshly initialized."
+            )
+        },
+    )
+    reference_kl_coeff: float = field(
+        default=0.01,
+        metadata={
+            "help": (
+                "KL penalty coefficient between the PPO categorical policy and "
+                "the frozen pretrained prior. Set to 0 to disable."
             )
         },
     )
