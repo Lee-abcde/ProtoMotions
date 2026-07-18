@@ -289,6 +289,13 @@ class BaseEvaluator:
             self._check_eval_components(env_ids, step_idx)
             self._on_episode_step(env_ids, extras, actions)
 
+            processed = step_idx + 1
+            if processed % 50 == 0 or processed == max_steps:
+                print(
+                    f"[eval-debug] step {processed}/{max_steps}",
+                    flush=True,
+                )
+
     def _on_episode_start(self, env_ids: Tensor) -> None:
         """Hook called before episode reset. Override in subclasses for pre-reset setup.
 
