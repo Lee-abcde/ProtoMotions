@@ -174,6 +174,11 @@ class SteeringControl(ControlComponent):
         self._tar_dir_theta[env_ids] = dir_theta
         self._tar_dir[env_ids] = tar_dir
         self._tar_face_dir[env_ids] = tar_face_dir
+        if not self.env.simulator.headless and torch.any(env_ids == 0):
+            print(
+                "[Steering] env 0 target speed: "
+                f"{self._tar_speed[0].item():.2f} m/s"
+            )
         progress = self.env.progress_buf[env_ids]
         is_env_reset = self.env.reset_buf[env_ids] | self.env.terminate_buf[env_ids]
         progress = torch.where(is_env_reset, torch.zeros_like(progress), progress)
@@ -219,7 +224,6 @@ class SteeringControl(ControlComponent):
         if headless:
             return {}
 
-        # Movement direction marker (red, like ASE)
         movement_markers = [MarkerConfig(size="regular")]
         movement_markers_cfg = VisualizationMarkerConfig(
             type="arrow", color=(0.8, 0.0, 0.0), markers=movement_markers
@@ -248,6 +252,7 @@ class SteeringControl(ControlComponent):
         # Movement direction marker position and rotation
         movement_marker_pos = root_pos.clone()
         movement_marker_pos[..., 0:2] += self._tar_dir
+        movement_marker_pos[self._tar_speed <= 0] += 100.0
 
         movement_theta = torch.atan2(self._tar_dir[..., 1], self._tar_dir[..., 0])
         movement_rot = rotations.quat_from_angle_axis(
