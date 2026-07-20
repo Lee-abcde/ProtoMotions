@@ -589,11 +589,6 @@ class DistillAgent(BaseAgent):
         model.apply(weight_init)
 
         requires_expert_actions = self._requires_expert_actions()
-        if requires_expert_actions and self.config.expert_model_path is None:
-            raise ValueError(
-                "This distillation configuration requires expert actions, but "
-                "expert_model_path is not set."
-            )
 
         # Optionally load a pre-trained expert model if expert actions are used.
         # Note: Expert observation components are loaded in the experiment file
@@ -666,6 +661,15 @@ class DistillAgent(BaseAgent):
             self.expert_model = None
 
         return model
+
+    def fit(self):
+        """Validate training-only dependencies before entering the train loop."""
+        if self._requires_expert_actions() and self.config.expert_model_path is None:
+            raise ValueError(
+                "This distillation training configuration requires expert "
+                "actions, but expert_model_path is not set."
+            )
+        return super().fit()
     
     def _build_expert_obs_td(self, obs_td: TensorDict, expert_in_keys: list) -> TensorDict:
         """Build expert observation TensorDict by stripping 'expert_' prefix from keys.
