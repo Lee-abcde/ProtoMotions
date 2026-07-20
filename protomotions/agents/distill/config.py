@@ -240,6 +240,7 @@ class VQDistillModelConfig(BaseModelConfig):
     latent_dim: int = 64
     num_embeddings: int = 512
     num_residual_quantizers: int = 1
+    num_product_quantizers: int = 1
     commitment_cost: float = 0.25
     codebook_update_mode: str = "gradient"
     ema_decay: float = 0.99

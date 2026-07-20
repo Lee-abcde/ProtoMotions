@@ -751,6 +751,127 @@ class ResidualVectorQuantizer(nn.Module):
             residual = residual - quantized.detach()
 
 
+class ProductVectorQuantizer(nn.Module):
+    """Quantize disjoint latent subspaces with independent VQ codebooks.
+
+    The final latent dimension is unchanged: an input with shape ``[B, D]`` is
+    split into ``num_quantizers`` chunks of size ``D / num_quantizers``. Each
+    chunk selects one code from its own codebook and the quantized chunks are
+    concatenated back to ``[B, D]``.
+    """
+
+    def __init__(
+        self,
+        num_quantizers: int,
+        num_embeddings: int,
+        embedding_dim: int,
+        commitment_cost: float,
+        codebook_update_mode: str,
+        ema_decay: float,
+        dead_code_threshold: int,
+    ):
+        super().__init__()
+        if num_quantizers < 1:
+            raise ValueError("num_quantizers must be >= 1.")
+        if embedding_dim % num_quantizers != 0:
+            raise ValueError(
+                "Product VQ latent dimension must be divisible by the number "
+                f"of subspaces, got {embedding_dim} and {num_quantizers}."
+            )
+        if codebook_update_mode not in ["ema", "gradient"]:
+            raise ValueError(
+                "codebook_update_mode must be one of ['ema', 'gradient'], "
+                f"got {codebook_update_mode!r}"
+            )
+
+        self.num_quantizers = num_quantizers
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.subspace_dim = embedding_dim // num_quantizers
+        self.codebook_update_mode = codebook_update_mode
+        quantizer_class = (
+            GradientVectorQuantizer
+            if codebook_update_mode == "gradient"
+            else VectorQuantizer
+        )
+        self.quantizers = nn.ModuleList(
+            [
+                quantizer_class(
+                    num_embeddings=num_embeddings,
+                    embedding_dim=self.subspace_dim,
+                    commitment_cost=commitment_cost,
+                    **(
+                        {}
+                        if codebook_update_mode == "gradient"
+                        else {"ema_decay": ema_decay}
+                    ),
+                    dead_code_threshold=dead_code_threshold,
+                )
+                for _ in range(num_quantizers)
+            ]
+        )
+
+    @property
+    def _codebook(self) -> torch.Tensor:
+        """Return codebooks with shape [num_subspaces, K, subspace_dim]."""
+        return torch.stack([quantizer._codebook for quantizer in self.quantizers])
+
+    def forward(self, z_e: torch.Tensor, track_usage: bool = True):
+        if z_e.ndim != 2 or z_e.shape[-1] != self.embedding_dim:
+            raise ValueError(
+                "ProductVectorQuantizer expects [batch, embedding_dim], got "
+                f"{tuple(z_e.shape)}."
+            )
+
+        quantized_chunks = []
+        commitment_loss_total = z_e.new_zeros(z_e.shape[0])
+        codebook_loss_total = z_e.new_zeros(z_e.shape[0])
+        all_indices = []
+        all_perplexities = []
+
+        for chunk, quantizer in zip(
+            z_e.split(self.subspace_dim, dim=-1), self.quantizers
+        ):
+            if self.codebook_update_mode == "gradient":
+                (
+                    quantized,
+                    commitment_loss,
+                    codebook_loss,
+                    indices,
+                    perplexity,
+                ) = quantizer(chunk, track_usage=track_usage)
+            else:
+                quantized, commitment_loss, indices, perplexity = quantizer(
+                    chunk, track_usage=track_usage
+                )
+                codebook_loss = torch.zeros_like(commitment_loss)
+
+            quantized_chunks.append(quantized)
+            commitment_loss_total = commitment_loss_total + commitment_loss
+            codebook_loss_total = codebook_loss_total + codebook_loss
+            all_indices.append(indices)
+            all_perplexities.append(perplexity)
+
+        return (
+            torch.cat(quantized_chunks, dim=-1),
+            commitment_loss_total,
+            codebook_loss_total,
+            torch.stack(all_indices, dim=-1),
+            torch.stack(all_perplexities).mean(),
+        )
+
+    def revive_dead_codes(self, z_e: torch.Tensor):
+        if z_e.ndim != 2 or z_e.shape[-1] != self.embedding_dim:
+            raise ValueError(
+                "ProductVectorQuantizer expects [batch, embedding_dim], got "
+                f"{tuple(z_e.shape)}."
+            )
+        for chunk, quantizer in zip(
+            z_e.split(self.subspace_dim, dim=-1), self.quantizers
+        ):
+            quantizer.revive_dead_codes(chunk)
+
+
 class VQDistillModel(TextResidualMixin, BaseModel):
     """PULSE distill model with a shared VQ codebook instead of Gaussian latents."""
 
@@ -1595,6 +1716,38 @@ class RVQPosteriorDistillModel(VQPosteriorDistillModel):
         super().__init__(config)
         num_quantizers = int(getattr(self.config, "num_residual_quantizers", 1))
         self.quantizer = ResidualVectorQuantizer(
+            num_quantizers=num_quantizers,
+            num_embeddings=self.config.num_embeddings,
+            embedding_dim=self.config.latent_dim,
+            commitment_cost=self.config.commitment_cost,
+            codebook_update_mode=self.config.codebook_update_mode,
+            ema_decay=self.config.ema_decay,
+            dead_code_threshold=self.config.dead_code_threshold,
+        )
+
+    def _quantize(self, latent: torch.Tensor, update_codebook: bool):
+        original_training = self.quantizer.training
+        if self.config.codebook_update_mode == "ema":
+            self.quantizer.train(update_codebook and self.training)
+        try:
+            quantized, commitment_loss, codebook_loss, indices, perplexity = (
+                self.quantizer(latent, track_usage=update_codebook)
+            )
+        finally:
+            if self.config.codebook_update_mode == "ema":
+                self.quantizer.train(original_training)
+        if not update_codebook:
+            codebook_loss = torch.zeros_like(codebook_loss)
+        return quantized, commitment_loss, codebook_loss, indices, perplexity
+
+
+class ProductVQPosteriorDistillModel(VQPosteriorDistillModel):
+    """Product-VQ posterior with one independent code per latent subspace."""
+
+    def __init__(self, config: "VQDistillModelConfig"):
+        super().__init__(config)
+        num_quantizers = int(getattr(self.config, "num_product_quantizers", 1))
+        self.quantizer = ProductVectorQuantizer(
             num_quantizers=num_quantizers,
             num_embeddings=self.config.num_embeddings,
             embedding_dim=self.config.latent_dim,
