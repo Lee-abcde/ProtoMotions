@@ -387,6 +387,9 @@ class MaskedMimicContext:
     time_offsets: Tensor = FieldPath()
     target_poses_masks: Tensor = FieldPath()
     target_bodies_masks: Tensor = FieldPath()
+    reached_target_ref_pos: Tensor = FieldPath()
+    reached_target_ref_rot: Tensor = FieldPath()
+    reached_target_bodies_masks: Tensor = FieldPath()
 
     def __init__(
         self,
@@ -397,6 +400,9 @@ class MaskedMimicContext:
         time_offsets: Tensor,
         target_poses_masks: Tensor,
         target_bodies_masks: Tensor,
+        reached_target_ref_pos: Tensor,
+        reached_target_ref_rot: Tensor,
+        reached_target_bodies_masks: Tensor,
     ):
         """Initialize MaskedMimicContext.
 
@@ -408,6 +414,9 @@ class MaskedMimicContext:
             time_offsets: Time offsets from current time [num_envs, future_steps].
             target_poses_masks: Which timesteps are visible [num_envs, future_steps].
             target_bodies_masks: Which bodies are visible [num_envs, future_steps * num_bodies * 2].
+            reached_target_ref_pos: Positions for the condition point reached this step.
+            reached_target_ref_rot: Rotations for the condition point reached this step.
+            reached_target_bodies_masks: Translation/rotation masks for the reached point.
         """
         self.mimic = mimic
         self.ref_pos = ref_pos
@@ -416,6 +425,9 @@ class MaskedMimicContext:
         self.time_offsets = time_offsets
         self.target_poses_masks = target_poses_masks
         self.target_bodies_masks = target_bodies_masks
+        self.reached_target_ref_pos = reached_target_ref_pos
+        self.reached_target_ref_rot = reached_target_ref_rot
+        self.reached_target_bodies_masks = reached_target_bodies_masks
 
 
 class SteeringContext:

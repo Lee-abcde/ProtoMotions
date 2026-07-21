@@ -89,6 +89,52 @@ def mean_body_rot_error(
     return per_body_err.mean(-1)
 
 
+def masked_condition_position_error(
+    current_rigid_body_pos: Tensor,
+    reached_target_ref_pos: Tensor,
+    reached_target_bodies_masks: Tensor,
+    conditionable_body_ids: Tensor,
+) -> Tensor:
+    """Maximum position error for bodies constrained at a reached target point.
+
+    Environments without a reached translation condition return NaN so sparse
+    evaluation aggregation can exclude the step from both metrics and success.
+    """
+    current_pos = current_rigid_body_pos[:, conditionable_body_ids]
+    target_pos = reached_target_ref_pos[:, conditionable_body_ids]
+    per_body_error = (target_pos - current_pos).pow(2).sum(dim=-1).sqrt()
+    active = reached_target_bodies_masks[..., 0]
+    max_error = per_body_error.masked_fill(~active, float("-inf")).max(dim=-1).values
+    return torch.where(
+        active.any(dim=-1),
+        max_error,
+        torch.full_like(max_error, float("nan")),
+    )
+
+
+def masked_condition_rotation_error(
+    current_rigid_body_rot: Tensor,
+    reached_target_ref_rot: Tensor,
+    reached_target_bodies_masks: Tensor,
+    conditionable_body_ids: Tensor,
+) -> Tensor:
+    """Maximum angular error for bodies constrained at a reached target point.
+
+    Environments without a reached rotation condition return NaN so sparse
+    evaluation aggregation can exclude the step from both metrics and success.
+    """
+    current_rot = current_rigid_body_rot[:, conditionable_body_ids]
+    target_rot = reached_target_ref_rot[:, conditionable_body_ids]
+    per_body_error = quat_diff_norm(current_rot, target_rot, True)
+    active = reached_target_bodies_masks[..., 1]
+    max_error = per_body_error.masked_fill(~active, float("-inf")).max(dim=-1).values
+    return torch.where(
+        active.any(dim=-1),
+        max_error,
+        torch.full_like(max_error, float("nan")),
+    )
+
+
 def anchor_pos_error_value(
     current_anchor_pos: Tensor,
     ref_rigid_body_pos: Tensor,
@@ -407,6 +453,8 @@ __all__ = [
     "mean_body_pos_error",
     "max_body_pos_error",
     "mean_body_rot_error",
+    "masked_condition_position_error",
+    "masked_condition_rotation_error",
     "anchor_pos_error_value",
     "anchor_ori_error_value",
     "anchor_height_error_value",

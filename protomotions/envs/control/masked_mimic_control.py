@@ -163,6 +163,22 @@ class MaskedMimicControl(MimicControl):
             device=self.env.device,
         )
 
+        # Snapshot the condition point removed from the sliding window during
+        # the current step. Evaluators consume this after env.step(), when the
+        # live target window already points at the next condition.
+        self.reached_target_times = torch.zeros(
+            self.env.num_envs,
+            dtype=torch.float,
+            device=self.env.device,
+        )
+        self.reached_target_bodies_masks = torch.zeros(
+            self.env.num_envs,
+            self.num_conditionable_bodies,
+            2,
+            dtype=torch.bool,
+            device=self.env.device,
+        )
+
         if self.config.fixed_target_steps is None:
             self.fixed_target_step_offsets = None
         else:
@@ -199,6 +215,8 @@ class MaskedMimicControl(MimicControl):
         # Reset masks
         self.masked_mimic_target_poses_masks[env_ids] = False
         self.masked_mimic_target_bodies_masks[env_ids] = False
+        self.reached_target_times[env_ids] = new_times
+        self.reached_target_bodies_masks[env_ids] = False
 
         if self.fixed_target_step_offsets is not None:
             self._set_fixed_target_time_steps(env_ids)
@@ -226,6 +244,8 @@ class MaskedMimicControl(MimicControl):
         if not self._initialized:
             return
 
+        self.reached_target_bodies_masks.zero_()
+
         if self.fixed_target_step_offsets is not None:
             all_env_ids = torch.arange(self.env.num_envs, device=self.env.device)
             self._set_fixed_target_time_steps(all_env_ids)
@@ -239,6 +259,18 @@ class MaskedMimicControl(MimicControl):
         resample_env_ids = torch.nonzero(outdated_target_times).squeeze(-1)
         
         if len(resample_env_ids) > 0:
+            masks = self.masked_mimic_target_bodies_masks.view(
+                self.env.num_envs,
+                self.config.num_masked_future_steps,
+                self.num_conditionable_bodies,
+                2,
+            )
+            self.reached_target_times[resample_env_ids] = self.target_times[
+                resample_env_ids, 0
+            ]
+            self.reached_target_bodies_masks[resample_env_ids] = masks[
+                resample_env_ids, 0
+            ].clone()
             self._shift_and_sample_time_steps(resample_env_ids)
             self._shift_and_sample_body_masks(resample_env_ids)
 
@@ -518,6 +550,22 @@ class MaskedMimicControl(MimicControl):
             flat_target_times.view(num_envs, num_future_steps)
             - motion_times.unsqueeze(-1)
         )
+
+        reached_motion_lengths = self.env.motion_lib.get_motion_length(motion_ids)
+        reached_target_times = torch.minimum(
+            self.reached_target_times, reached_motion_lengths
+        )
+        reached_target_state = self.env.motion_lib.get_motion_state(
+            motion_ids, reached_target_times
+        )
+        reached_target_ref_pos = reached_target_state.rigid_body_pos.clone()
+        reached_offset = (
+            self.env.get_spawn_to_ref_pose_offset_with_terrain_height_correction(
+                reached_target_ref_pos
+            )
+        )
+        reached_target_ref_pos += reached_offset
+        reached_target_ref_rot = reached_target_state.rigid_body_rot
         
         # Populate the masked_mimic view
         ctx.masked_mimic = MaskedMimicContext(
@@ -528,6 +576,9 @@ class MaskedMimicControl(MimicControl):
             time_offsets=masked_mimic_time_offsets,
             target_poses_masks=self.masked_mimic_target_poses_masks,
             target_bodies_masks=self.masked_mimic_target_bodies_masks,
+            reached_target_ref_pos=reached_target_ref_pos,
+            reached_target_ref_rot=reached_target_ref_rot,
+            reached_target_bodies_masks=self.reached_target_bodies_masks,
         )
     
     def create_visualization_markers(self, headless: bool) -> Dict[str, VisualizationMarkerConfig]:

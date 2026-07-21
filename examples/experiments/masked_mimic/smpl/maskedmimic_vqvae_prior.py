@@ -252,12 +252,16 @@ def _build_categorical_prior(num_embeddings: int):
 
 
 def agent_config(robot_config: RobotConfig, env_config, args: argparse.Namespace):
+    import torch
+
     from protomotions.agents.base_agent.config import OptimizerConfig
     from protomotions.agents.common.config import ModuleContainerConfig
     from protomotions.agents.evaluators.config import DistillEvaluatorConfig
     from protomotions.envs.component_factories import (
         gr_error_factory,
         gt_error_factory,
+        masked_condition_position_error_factory,
+        masked_condition_rotation_error_factory,
         max_joint_error_factory,
     )
 
@@ -287,6 +291,14 @@ def agent_config(robot_config: RobotConfig, env_config, args: argparse.Namespace
             "Set --prior-rollout-max-prob 0.0 when using "
             "--rollout-action-key prior_action."
         )
+
+    conditionable_body_ids = torch.tensor(
+        [
+            robot_config.kinematic_info.body_names.index(name)
+            for name in robot_config.trackable_bodies_subset
+        ],
+        dtype=torch.long,
+    )
 
     model_config = VQDistillModelConfig(
         encoder=copy.deepcopy(posterior_model_config.encoder),
@@ -330,10 +342,27 @@ def agent_config(robot_config: RobotConfig, env_config, args: argparse.Namespace
         gradient_clip_val=50.0,
         num_mini_epochs=6,
         evaluator=DistillEvaluatorConfig(
+            _target_=(
+                "protomotions.agents.evaluators."
+                "masked_mimic_condition_evaluator."
+                "MaskedMimicConditionEvaluator"
+            ),
             evaluate_privileged_action=False,
             use_privileged_success_for_motion_weights=False,
             evaluation_components={
-                "gt_error": gt_error_factory(threshold=0.25),
+                "condition_position_error": (
+                    masked_condition_position_error_factory(
+                        conditionable_body_ids,
+                        threshold=0.25,
+                    )
+                ),
+                "condition_rotation_error": (
+                    masked_condition_rotation_error_factory(
+                        conditionable_body_ids,
+                        threshold=0.5,
+                    )
+                ),
+                "gt_error": gt_error_factory(),
                 "gr_error": gr_error_factory(),
                 "max_joint_error": max_joint_error_factory(),
             },

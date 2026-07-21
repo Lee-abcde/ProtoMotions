@@ -41,6 +41,8 @@ Example:
 
 from typing import Any, Dict, List, Optional, Union
 
+from torch import Tensor
+
 from protomotions.envs.context_views import EnvContext
 from protomotions.envs.mdp_component import MdpComponent
 
@@ -1378,6 +1380,56 @@ def gr_error_factory(threshold: float = None) -> MdpComponent:
     )
 
 
+def masked_condition_position_error_factory(
+    conditionable_body_ids: Tensor,
+    threshold: float = 0.25,
+) -> MdpComponent:
+    """Factory for sparse reached-condition body position evaluation."""
+    from protomotions.envs.terminations import masked_condition_position_error
+
+    return MdpComponent(
+        compute_func=masked_condition_position_error,
+        dynamic_vars={
+            "current_rigid_body_pos": EnvContext.current.rigid_body_pos,
+            "reached_target_ref_pos": (
+                EnvContext.masked_mimic.reached_target_ref_pos
+            ),
+            "reached_target_bodies_masks": (
+                EnvContext.masked_mimic.reached_target_bodies_masks
+            ),
+        },
+        static_params={
+            "conditionable_body_ids": conditionable_body_ids,
+            "threshold": threshold,
+        },
+    )
+
+
+def masked_condition_rotation_error_factory(
+    conditionable_body_ids: Tensor,
+    threshold: float = 0.5,
+) -> MdpComponent:
+    """Factory for sparse reached-condition body rotation evaluation."""
+    from protomotions.envs.terminations import masked_condition_rotation_error
+
+    return MdpComponent(
+        compute_func=masked_condition_rotation_error,
+        dynamic_vars={
+            "current_rigid_body_rot": EnvContext.current.rigid_body_rot,
+            "reached_target_ref_rot": (
+                EnvContext.masked_mimic.reached_target_ref_rot
+            ),
+            "reached_target_bodies_masks": (
+                EnvContext.masked_mimic.reached_target_bodies_masks
+            ),
+        },
+        static_params={
+            "conditionable_body_ids": conditionable_body_ids,
+            "threshold": threshold,
+        },
+    )
+
+
 def anchor_pos_metric_factory(threshold: float = None) -> MdpComponent:
     """Factory for anchor position error metric.
 
@@ -1613,6 +1665,8 @@ __all__ = [
     "gt_error_factory",
     "max_joint_error_factory",
     "gr_error_factory",
+    "masked_condition_position_error_factory",
+    "masked_condition_rotation_error_factory",
     "anchor_pos_metric_factory",
     "anchor_ori_metric_factory",
     "relative_body_pos_metric_factory",
