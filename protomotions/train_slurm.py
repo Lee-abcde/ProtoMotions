@@ -386,6 +386,13 @@ def generate_euler_slurm_script(args):
 
     train_cmd = build_train_agent_command(args)
     python_bin = "/opt/env_isaaclab/bin/python"
+    motion_path = Path(args.motion_file)
+    motion_dir = str(motion_path.parent) if motion_path.is_absolute() else None
+    motion_bind = (
+        f'  --bind {shlex.quote(motion_dir)}:{shlex.quote(motion_dir)}:ro \\\n'
+        if motion_dir
+        else ""
+    )
 
     inner_cmd = f"""
 set -euo pipefail
@@ -437,6 +444,7 @@ export APPTAINER_BIND="$OUTPUT_DIR/tmp:/tmp"
 srun apptainer exec --nv \\
   --bind "$PROTOMOTIONS_DIR":/workspace/ProtoMotions:rw \\
   --bind "$OUTPUT_DIR":/workspace/ProtoMotions/results:rw \\
+{motion_bind}\
   --bind /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro \\
   "$CONTAINER" \\
   bash -lc {shlex.quote(inner_cmd)}

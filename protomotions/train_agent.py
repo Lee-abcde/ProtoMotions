@@ -218,6 +218,12 @@ def create_parser():
         help="Enable SLURM autoresume functionality",
     )
     parser.add_argument(
+        "--slurm-autoresume-after",
+        type=int,
+        default=12600,
+        help="Seconds before saving and stopping for the next SLURM array task",
+    )
+    parser.add_argument(
         "--ngpu", type=int, default=1, help="Number of GPUs to use for training"
     )
     parser.add_argument(
@@ -685,11 +691,13 @@ def main():
     callbacks = []
     if args.use_slurm:
         callbacks.append(
-            {
-                "_target_": "agents.callbacks.slurm_autoresume_srun.AutoResumeCallbackSrun",
-                "autoresume_after": 12600,
-            }
-        )
+                {
+                    "_target_": "agents.callbacks.slurm_autoresume_srun.AutoResumeCallbackSrun",
+                    "autoresume_after": getattr(
+                        args, "slurm_autoresume_after", 12600
+                    ),
+                }
+            )
 
     from protomotions.utils.fabric_config import FabricConfig
     from lightning.fabric import Fabric
