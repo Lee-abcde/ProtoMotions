@@ -36,13 +36,23 @@ class AutoResumeCallbackSrun(Callback):
         if self.start_time is None:
             self.start_time = time.time()
 
-        if time.time() - self.start_time >= self.autoresume_after:
+        # Rank-local clocks can straddle the threshold even after the barrier.
+        # If only one rank enters save(), its collectives diverge from ranks that
+        # continue training. Let rank 0 decide and broadcast that decision.
+        should_autoresume = False
+        if agent.fabric.global_rank == 0:
+            should_autoresume = (
+                time.time() - self.start_time >= self.autoresume_after
+            )
+        should_autoresume = agent.fabric.broadcast(should_autoresume, src=0)
+
+        if should_autoresume:
             log.info("Should autoresume!")
 
             agent.save()
 
             agent._should_stop = True
-            log.info(f"should stop, {agent.should_stop}")
+            log.info("Autoresume checkpoint saved; stopping after this epoch.")
 
     def before_play_steps(self, agent: PPO) -> None:
         self._check_autoresume(agent)

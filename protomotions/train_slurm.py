@@ -224,6 +224,16 @@ def create_parser():
     parser.add_argument("--cpus-per-task", type=int, default=8, help="CPUs per SLURM task")
     parser.add_argument("--mem-per-cpu", type=str, default="4G", help="Memory per CPU")
     parser.add_argument(
+        "--nccl-heartbeat-timeout-sec",
+        type=int,
+        default=1800,
+        help=(
+            "Seconds without NCCL watchdog heartbeat before PyTorch aborts an Euler "
+            "multi-GPU job. Increase this when long Isaac Lab operations temporarily "
+            "block the watchdog (default: 1800)."
+        ),
+    )
+    parser.add_argument(
         "--slurm-autoresume-after",
         type=int,
         default=12600,
@@ -399,6 +409,7 @@ set -euo pipefail
 export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
 source {shlex.quote(args.container_env)}
 
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC={args.nccl_heartbeat_timeout_sec}
 export WANDB_DIR=/workspace/ProtoMotions/results/wandb
 export WANDB_CACHE_DIR=/workspace/ProtoMotions/results/wandb_cache
 export WANDB_CONFIG_DIR=/workspace/ProtoMotions/results/wandb_config
@@ -441,7 +452,7 @@ OUTPUT_DIR={shlex.quote(output_dir)}
 mkdir -p "$OUTPUT_DIR"/wandb "$OUTPUT_DIR"/wandb_cache "$OUTPUT_DIR"/wandb_config "$OUTPUT_DIR"/tmp
 export APPTAINER_BIND="$OUTPUT_DIR/tmp:/tmp"
 
-srun apptainer exec --nv \\
+srun --kill-on-bad-exit=1 --wait=60 apptainer exec --nv \\
   --bind "$PROTOMOTIONS_DIR":/workspace/ProtoMotions:rw \\
   --bind "$OUTPUT_DIR":/workspace/ProtoMotions/results:rw \\
 {motion_bind}\
