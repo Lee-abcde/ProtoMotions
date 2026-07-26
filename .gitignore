@@ -15,6 +15,7 @@ wandb/*
 newton_source/*
 data/amass/*.pkl
 data/amassx
+data/omomo_correct_v2
 .cursor/
 renders/
 .envrc

@@ -11,6 +11,11 @@ from torch import Tensor
 
 from protomotions.envs.context_views import EnvContext
 from protomotions.envs.control.base import ControlComponent, ControlComponentConfig
+from protomotions.simulator.base_simulator.config import (
+    MarkerConfig,
+    MarkerState,
+    VisualizationMarkerConfig,
+)
 from protomotions.simulator.base_simulator.simulator_state import ResetState
 
 if TYPE_CHECKING:
@@ -20,6 +25,7 @@ if TYPE_CHECKING:
 @dataclass
 class KinematicReplayControlConfig(ControlComponentConfig):
     _target_: str = "protomotions.envs.control.kinematic_replay_control.KinematicReplayControl"
+    show_reference_markers: bool = False
 
 
 class KinematicReplayControl(ControlComponent):
@@ -100,3 +106,44 @@ class KinematicReplayControl(ControlComponent):
     def populate_context(self, ctx: EnvContext) -> None:
         """Kinematic replay doesn't add any context variables."""
         pass
+
+    def create_visualization_markers(
+        self, headless: bool
+    ) -> Dict[str, VisualizationMarkerConfig]:
+        """Create one tiny sphere for every reference rigid body."""
+        if headless or not self.config.show_reference_markers:
+            return {}
+
+        body_count = len(self.env.robot_config.kinematic_info.body_names)
+        return {
+            "kinematic_reference_body_markers": VisualizationMarkerConfig(
+                type="sphere",
+                color=(0.8, 0.5, 0.3),
+                markers=[MarkerConfig(size="tiny") for _ in range(body_count)],
+            )
+        }
+
+    def get_markers_state(self) -> Dict[str, MarkerState]:
+        """Place markers at the current MotionLib reference body positions."""
+        if self.env.simulator.headless or not self.config.show_reference_markers:
+            return {}
+
+        ref_state = self.env.motion_lib.get_motion_state(
+            self.env.motion_manager.motion_ids,
+            self.env.motion_manager.motion_times,
+        )
+        target_pos = ref_state.rigid_body_pos.clone()
+        target_pos += self.env.get_spawn_to_ref_pose_offset_with_terrain_height_correction(
+            target_pos
+        )
+        return {
+            "kinematic_reference_body_markers": MarkerState(
+                translation=target_pos,
+                orientation=torch.zeros(
+                    self.env.num_envs,
+                    target_pos.shape[1],
+                    4,
+                    device=self.env.device,
+                ),
+            )
+        }

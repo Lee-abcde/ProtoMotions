@@ -128,6 +128,8 @@ class MotionLib:
     motion_num_frames: torch.Tensor
     motion_weights: torch.Tensor
     contacts: torch.Tensor
+    rigid_body_contact_labels: Optional[torch.Tensor]
+    object_contact_labels: Optional[torch.Tensor]
 
     motion_files: Tuple[str]
     motion_text_data: Optional[Tuple[Optional[dict], ...]] = None
@@ -206,6 +208,8 @@ class MotionLib:
         self.motion_num_frames = torch.empty(0, dtype=torch.long, device=self.device)
         self.motion_weights = torch.empty(0, device=self.device)
         self.contacts = torch.empty(0, 0, device=self.device)
+        self.rigid_body_contact_labels = None
+        self.object_contact_labels = None
         self.motion_files = ()
         self.motion_text_data = None
         self.text_embedding_table = None
@@ -465,6 +469,26 @@ class MotionLib:
                     + motion_state_1.rigid_body_contacts
                 ) / 2.0
 
+        # Reference labels are categorical rather than continuous. Select the
+        # nearest frame instead of averaging -1/0/+1 values into a new class.
+        nearest_frame_is_0 = blend < 0.5
+        for field_name in (
+            "rigid_body_contact_labels",
+            "object_contact_labels",
+        ):
+            labels_0 = getattr(motion_state_0, field_name)
+            labels_1 = getattr(motion_state_1, field_name)
+            if labels_0 is None:
+                continue
+            selection = nearest_frame_is_0
+            while selection.ndim < labels_0.ndim:
+                selection = selection.unsqueeze(-1)
+            setattr(
+                motion_state_0,
+                field_name,
+                torch.where(selection, labels_0, labels_1),
+            )
+
         return motion_state_0
 
     def get_motion_state_exact_frame(
@@ -505,6 +529,16 @@ class MotionLib:
         motion_state.local_rigid_body_rot = local_rigid_body_rot
         motion_state.rigid_body_contacts = (
             self.contacts[fl].clone() if self.contacts is not None else None
+        )
+        motion_state.rigid_body_contact_labels = (
+            self.rigid_body_contact_labels[fl].clone()
+            if self.rigid_body_contact_labels is not None
+            else None
+        )
+        motion_state.object_contact_labels = (
+            self.object_contact_labels[fl].clone()
+            if self.object_contact_labels is not None
+            else None
         )
 
         return motion_state
@@ -587,6 +621,39 @@ class MotionLib:
             ).to(dtype=tp, device=self.device)
         else:
             self.contacts = None
+
+        optional_contact_fields = {
+            "rigid_body_contact_labels": (-1, 0, 1),
+            "object_contact_labels": (0, 1),
+        }
+        for field_name, allowed_values in optional_contact_fields.items():
+            values = [getattr(motion, field_name) for motion in motions]
+            if all(value is None for value in values):
+                setattr(self, field_name, None)
+                continue
+            if any(value is None for value in values):
+                raise ValueError(
+                    f"Motion files must either all contain {field_name} or all omit it"
+                )
+
+            packed = torch.cat(values, dim=0)
+            rounded = packed.round()
+            allowed = torch.tensor(
+                allowed_values, dtype=rounded.dtype, device=rounded.device
+            )
+            is_integral = torch.allclose(
+                packed.float(), rounded.float(), atol=1e-5
+            )
+            contains_only_allowed_values = torch.isin(rounded, allowed).all()
+            if not is_integral or not contains_only_allowed_values:
+                raise ValueError(
+                    f"{field_name} must contain only {list(allowed_values)}"
+                )
+            setattr(
+                self,
+                field_name,
+                rounded.to(dtype=torch.int8, device=self.device),
+            )
 
         # If all contact labels are zero, discard them so downstream consumers
         # fail loudly instead of silently training on meaningless data.

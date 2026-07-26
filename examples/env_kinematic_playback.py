@@ -108,6 +108,42 @@ def create_parser():
             "Omit this flag to use the default (first num_envs scenes)."
         ),
     )
+    parser.add_argument(
+        "--start-at-frame-zero",
+        action="store_true",
+        default=False,
+        help="Always initialize and restart motion playback from frame 0.",
+    )
+    parser.add_argument(
+        "--ref-height-offset",
+        type=float,
+        default=None,
+        help=(
+            "Override env_config.ref_respawn_offset in metres. Use 0 for "
+            "dataset-coordinate playback without lifting the humanoid."
+        ),
+    )
+    parser.add_argument(
+        "--object-height-offset",
+        type=float,
+        default=None,
+        help=(
+            "Override env_config.ref_object_respawn_offset in metres. Use 0 "
+            "to preserve the stored object trajectory."
+        ),
+    )
+    parser.add_argument(
+        "--scene-spacing",
+        type=float,
+        default=None,
+        help="Override the centre-to-centre distance between scenes in metres.",
+    )
+    parser.add_argument(
+        "--show-reference-markers",
+        action="store_true",
+        default=False,
+        help="Show tiny spheres at every MotionLib reference rigid-body position.",
+    )
 
     return parser
 
@@ -131,6 +167,41 @@ import importlib.util  # noqa: E402
 import torch  # noqa: E402
 
 log = logging.getLogger(__name__)
+
+
+def _prompt_for_loaded_motion_id(
+    current_id: int, loaded_motion_ids: list[int]
+) -> int | None:
+    """Select one of the motion IDs already assigned to an environment."""
+    valid_ids = set(loaded_motion_ids)
+    valid_text = ",".join(str(motion_id) for motion_id in loaded_motion_ids)
+    while True:
+        try:
+            raw = input(
+                "\nF9 motion selector "
+                f"(current={current_id}, loaded=[{valid_text}]; "
+                "press Enter to cancel): "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nMotion selection cancelled.")
+            return None
+
+        if not raw:
+            print("Motion selection cancelled.")
+            return None
+
+        try:
+            motion_id = int(raw)
+        except ValueError:
+            print(f"Invalid motion ID {raw!r}: enter an integer.")
+            continue
+
+        if motion_id in valid_ids:
+            return motion_id
+        print(
+            f"Motion ID {motion_id} is not loaded. Choose one of: "
+            f"{loaded_motion_ids}."
+        )
 
 
 def main():
@@ -233,9 +304,23 @@ def main():
     robot_config: RobotConfig = configs["robot"]
     simulator_config: SimulatorConfig = configs["simulator"]
     terrain_config = configs["terrain"]
+    if args.scene_spacing is not None:
+        if args.scene_spacing <= 0:
+            raise ValueError("--scene-spacing must be greater than 0")
+        terrain_config.spacing_between_scenes = args.scene_spacing
     scene_lib_config = configs["scene_lib"]
     motion_lib_config = configs["motion_lib"]
     env_config: EnvConfig = configs["env"]
+
+    if args.start_at_frame_zero:
+        env_config.motion_manager.init_start_prob = 1.0
+        if hasattr(env_config.motion_manager, "resample_on_reset"):
+            env_config.motion_manager.resample_on_reset = True
+
+    if args.ref_height_offset is not None:
+        env_config.ref_respawn_offset = args.ref_height_offset
+    if args.object_height_offset is not None:
+        env_config.ref_object_respawn_offset = args.object_height_offset
 
     print(f"Robot config class: {type(robot_config).__name__}")
     print(f"Simulator config class: {type(simulator_config).__name__}")
@@ -247,6 +332,16 @@ def main():
     if args.scenes_file is not None:
         print(f"Scene library configured from: {args.scenes_file}")
 
+    print(
+        "Replay height offsets: "
+        f"humanoid={env_config.ref_respawn_offset:g} m, "
+        f"object={env_config.ref_object_respawn_offset:g} m"
+    )
+    print(
+        "Scene grid: "
+        f"spacing={terrain_config.spacing_between_scenes:g} m"
+    )
+
     # Enable kinematic playback mode using KinematicReplayControl
     from protomotions.envs.control.kinematic_replay_control import (
         KinematicReplayControlConfig,
@@ -257,8 +352,11 @@ def main():
     
     # Add kinematic replay control component (replaces any existing control components)
     env_config.control_components = {
-        "kinematic_replay": KinematicReplayControlConfig(),
+        "kinematic_replay": KinematicReplayControlConfig(
+            show_reference_markers=args.show_reference_markers
+        ),
     }
+    print(f"Reference body markers: {'on' if args.show_reference_markers else 'off'}")
     
     # Disable terminations - kinematic replay should run indefinitely
     env_config.termination_components = {}
@@ -362,6 +460,17 @@ def main():
         print(f"Motion IDs assigned: {env.motion_manager.motion_ids}")
         print(f"Motion times initialized: {env.motion_manager.motion_times}")
 
+    motion_selector_keys = None
+    if not args.headless:
+        motion_selector_keys = env.simulator.user_interface.scope(
+            "kinematic_playback"
+        )
+        motion_selector_keys.register(
+            "F9",
+            "select_motion",
+            "Focus the camera on an already loaded motion ID",
+        )
+
     # # Print per-env mapping: which motion and scene each env got
     # import os as _dbg_os
     # print("\n=== Per-Environment Motion & Scene Assignment ===")
@@ -399,6 +508,7 @@ def main():
     print("  L - start/stop recording")
     print("  ; - cancel recording")
     print("  O - toggle camera target")
+    print("  F9 - focus camera on an already loaded motion ID")
     print("  Q - close simulator")
 
     actions = torch.zeros(env.num_envs, robot_config.number_of_actions, device=device)
@@ -409,6 +519,25 @@ def main():
             obs, rewards, dones, terminated, infos = env.step(actions)
 
             step_count += 1
+
+            if (
+                motion_selector_keys is not None
+                and motion_selector_keys.select_motion.consume()
+            ):
+                loaded_motion_ids = env.motion_manager.motion_ids.tolist()
+                current_env_id = int(env.simulator._camera_target["env"])
+                current_motion_id = loaded_motion_ids[current_env_id]
+                selected = _prompt_for_loaded_motion_id(
+                    current_motion_id, loaded_motion_ids
+                )
+                if selected is not None:
+                    target_env_id = loaded_motion_ids.index(selected)
+                    env.simulator._camera_target["env"] = target_env_id
+                    env.simulator._camera_target["element"] = 0
+                    env.simulator.user_interface.active_env_id = target_env_id
+                    print(
+                        f"Camera now follows env {target_env_id}, motion {selected}."
+                    )
 
             # Print information every 100 steps
             if step_count % 100 == 0 and env.motion_manager is not None:
@@ -432,6 +561,8 @@ def main():
     except KeyboardInterrupt:
         print("\n\nSimulation stopped by user")
     finally:
+        if motion_selector_keys is not None:
+            motion_selector_keys.unregister_all()
         env.close()
 
     print("\n=== Playback Complete ===")

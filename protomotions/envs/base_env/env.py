@@ -1090,8 +1090,6 @@ class BaseEnv:
         new_object_states = self.scene_lib.get_scene_pose(
             env_ids, motion_times, respawn_offset=self.config.ref_object_respawn_offset
         )
-        new_object_states.root_vel = torch.zeros_like(new_object_states.root_pos)
-        new_object_states.root_ang_vel = torch.zeros_like(new_object_states.root_pos)
 
         self.update_respawn_root_offset_by_env_ids(
             env_ids,

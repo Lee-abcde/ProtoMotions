@@ -23,6 +23,10 @@ import os
 from enum import Enum
 from dataclasses import dataclass, field
 from protomotions.utils.motion_interpolation_utils import calc_frame_blend
+from protomotions.components.pose_lib import (
+    compute_angular_velocity,
+    compute_cartesian_velocity,
+)
 from protomotions.utils.mesh_utils import (
     as_mesh,
     compute_bounding_box,
@@ -244,6 +248,9 @@ class SceneObject:
         np.ndarray,
         torch.Tensor,
     ] = field(default=None)
+    linear_velocity: Optional[Union[np.ndarray, torch.Tensor]] = None
+    angular_velocity: Optional[Union[np.ndarray, torch.Tensor]] = None
+    contact_labels: Optional[Union[np.ndarray, torch.Tensor]] = None
     options: ObjectOptions = field(default_factory=ObjectOptions)
     fps: Optional[float] = None
 
@@ -287,6 +294,68 @@ class SceneObject:
         else:
             # Static object, set default fps
             self.fps = 1.0
+
+        num_frames = self.translation.shape[0]
+        if self.linear_velocity is None:
+            self.linear_velocity = compute_cartesian_velocity(
+                self.translation.unsqueeze(1),
+                fps=self.fps,
+                velocity_max_horizon=1,
+            ).squeeze(1)
+        else:
+            self.linear_velocity = self._convert_to_tensor(
+                self.linear_velocity, expected_dim=3
+            )
+
+        if self.angular_velocity is None:
+            self.angular_velocity = compute_angular_velocity(
+                rotations.quaternion_to_matrix(
+                    self.rotation, w_last=True
+                ).unsqueeze(1),
+                fps=self.fps,
+                velocity_max_horizon=1,
+            ).squeeze(1)
+        else:
+            self.angular_velocity = self._convert_to_tensor(
+                self.angular_velocity, expected_dim=3
+            )
+
+        for name, value in (
+            ("linear_velocity", self.linear_velocity),
+            ("angular_velocity", self.angular_velocity),
+        ):
+            if value.shape != (num_frames, 3):
+                raise ValueError(
+                    f"{name} must have shape ({num_frames}, 3), "
+                    f"got {tuple(value.shape)}"
+                )
+            if not torch.isfinite(value).all():
+                raise ValueError(f"{name} contains NaN or Inf")
+
+        if self.contact_labels is not None:
+            contact_labels = torch.as_tensor(
+                self.contact_labels, device="cpu"
+            ).view(-1, 1)
+            if contact_labels.shape != (num_frames, 1):
+                raise ValueError(
+                    f"contact_labels must have shape ({num_frames}, 1), "
+                    f"got {tuple(contact_labels.shape)}"
+                )
+            rounded_contact_labels = contact_labels.round()
+            if not torch.allclose(
+                contact_labels.float(),
+                rounded_contact_labels.float(),
+                atol=1e-5,
+            ):
+                raise ValueError("contact_labels must contain only 0 or 1")
+            if not torch.isin(
+                rounded_contact_labels,
+                torch.tensor(
+                    [0, 1], dtype=rounded_contact_labels.dtype
+                ),
+            ).all():
+                raise ValueError("contact_labels must contain only 0 or 1")
+            self.contact_labels = rounded_contact_labels.to(torch.int8)
 
     def _convert_to_tensor(self, data, expected_dim):
         """
@@ -337,10 +406,17 @@ class SceneObject:
         """
         translation = self.translation[0]
         rotation = self.rotation[0]
+        linear_velocity = self.linear_velocity[0]
+        angular_velocity = self.angular_velocity[0]
 
         return ObjectState(
             root_pos=translation,
             root_rot=rotation,
+            root_vel=linear_velocity,
+            root_ang_vel=angular_velocity,
+            contact_labels=(
+                self.contact_labels[0] if self.contact_labels is not None else None
+            ),
             state_conversion=StateConversion.COMMON,
         )
 
@@ -1217,6 +1293,9 @@ class SceneLib:
         # Placeholders for aggregated motion data
         self._object_translations = None
         self._object_rotations = None
+        self._object_linear_velocities = None
+        self._object_angular_velocities = None
+        self._object_contact_labels = None
         self._object_pointclouds = None
         self._object_pointcloud_normals = None
         self._motion_lengths = None
@@ -1313,6 +1392,9 @@ class SceneLib:
 
         self._object_translations = torch.empty(0, 3, device=self.device)
         self._object_rotations = torch.empty(0, 4, device=self.device)
+        self._object_linear_velocities = torch.empty(0, 3, device=self.device)
+        self._object_angular_velocities = torch.empty(0, 3, device=self.device)
+        self._object_contact_labels = None
         self._motion_lengths = torch.empty(0, device=self.device)
         self._motion_starts = torch.empty(0, dtype=torch.long, device=self.device)
         self._motion_dts = torch.empty(0, device=self.device)
@@ -1916,6 +1998,9 @@ class SceneLib:
         """
         all_translations = []  # List of tensors to concatenate
         all_rotations = []  # List of tensors to concatenate
+        all_linear_velocities = []
+        all_angular_velocities = []
+        all_contact_labels = []
         motion_lengths_list = []
         motion_dts_list = []
         motion_num_frames_list = []
@@ -1928,6 +2013,9 @@ class SceneLib:
             for obj in scene.objects:
                 all_objects.append(obj)
 
+        has_contact_labels = any(
+            obj.contact_labels is not None for obj in all_objects
+        )
         for idx, obj in enumerate(all_objects):
             motion_starts[idx] = current_start
 
@@ -1944,6 +2032,17 @@ class SceneLib:
             # Add all frames at once to our list of tensors
             all_translations.append(obj.translation.to(device=self.device))
             all_rotations.append(obj.rotation.to(device=self.device))
+            all_linear_velocities.append(
+                obj.linear_velocity.to(device=self.device)
+            )
+            all_angular_velocities.append(
+                obj.angular_velocity.to(device=self.device)
+            )
+            if has_contact_labels:
+                labels = obj.contact_labels
+                if labels is None:
+                    labels = torch.zeros(num_frames, 1, dtype=torch.int8)
+                all_contact_labels.append(labels.to(device=self.device))
 
             current_start += num_frames
 
@@ -1951,9 +2050,27 @@ class SceneLib:
         if all_translations:
             self._object_translations = torch.cat(all_translations, dim=0)
             self._object_rotations = torch.cat(all_rotations, dim=0)
+            self._object_linear_velocities = torch.cat(
+                all_linear_velocities, dim=0
+            )
+            self._object_angular_velocities = torch.cat(
+                all_angular_velocities, dim=0
+            )
+            self._object_contact_labels = (
+                torch.cat(all_contact_labels, dim=0)
+                if has_contact_labels
+                else None
+            )
         else:
             self._object_translations = torch.empty((0, 3), device=self.device)
             self._object_rotations = torch.empty((0, 4), device=self.device)
+            self._object_linear_velocities = torch.empty(
+                (0, 3), device=self.device
+            )
+            self._object_angular_velocities = torch.empty(
+                (0, 3), device=self.device
+            )
+            self._object_contact_labels = None
 
         self._motion_lengths = torch.tensor(
             motion_lengths_list, dtype=torch.float, device=self.device
@@ -2055,9 +2172,33 @@ class SceneLib:
         )
         rotation = rotation.squeeze(1)  # Remove the added dimension
 
+        linear_velocity0 = self._object_linear_velocities[idx0]
+        linear_velocity1 = self._object_linear_velocities[idx1]
+        linear_velocity = (
+            (1 - blend.unsqueeze(-1)) * linear_velocity0
+            + blend.unsqueeze(-1) * linear_velocity1
+        )
+
+        angular_velocity0 = self._object_angular_velocities[idx0]
+        angular_velocity1 = self._object_angular_velocities[idx1]
+        angular_velocity = (
+            (1 - blend.unsqueeze(-1)) * angular_velocity0
+            + blend.unsqueeze(-1) * angular_velocity1
+        )
+
+        contact_labels = None
+        if self._object_contact_labels is not None:
+            nearest_indices = torch.where(blend < 0.5, idx0, idx1)
+            contact_labels = self._object_contact_labels[
+                nearest_indices
+            ].clone()
+
         return ObjectState(
             root_pos=translation,
             root_rot=rotation,
+            root_vel=linear_velocity,
+            root_ang_vel=angular_velocity,
+            contact_labels=contact_labels,
             state_conversion=StateConversion.COMMON,
         )
 
@@ -2140,10 +2281,26 @@ class SceneLib:
         all_translations = all_translations + offset_matrix
 
         all_rotations = batch_poses.root_rot.reshape(num_scenes, objects_per_scene, 4)
+        all_linear_velocities = batch_poses.root_vel.reshape(
+            num_scenes, objects_per_scene, 3
+        )
+        all_angular_velocities = batch_poses.root_ang_vel.reshape(
+            num_scenes, objects_per_scene, 3
+        )
+        all_contact_labels = (
+            batch_poses.contact_labels.reshape(
+                num_scenes, objects_per_scene, 1
+            )
+            if batch_poses.contact_labels is not None
+            else None
+        )
 
         return ObjectState(
             root_pos=all_translations,
             root_rot=all_rotations,
+            root_vel=all_linear_velocities,
+            root_ang_vel=all_angular_velocities,
+            contact_labels=all_contact_labels,
             state_conversion=StateConversion.COMMON,
         )
 
@@ -2515,6 +2672,13 @@ class SceneLib:
                     "type": obj.__class__.__name__,
                     "translation": obj.translation.cpu().numpy().tolist(),
                     "rotation": obj.rotation.cpu().numpy().tolist(),
+                    "linear_velocity": obj.linear_velocity.cpu().numpy().tolist(),
+                    "angular_velocity": obj.angular_velocity.cpu().numpy().tolist(),
+                    "contact_labels": (
+                        obj.contact_labels.cpu().numpy().tolist()
+                        if obj.contact_labels is not None
+                        else None
+                    ),
                     "fps": obj.fps,
                     "object_dims": obj.object_dims,
                     "options": {
@@ -2561,6 +2725,21 @@ class SceneLib:
 
                 translation = torch.tensor(obj_data["translation"], dtype=torch.float)
                 rotation = torch.tensor(obj_data["rotation"], dtype=torch.float)
+                linear_velocity = (
+                    torch.tensor(obj_data["linear_velocity"], dtype=torch.float)
+                    if obj_data.get("linear_velocity") is not None
+                    else None
+                )
+                angular_velocity = (
+                    torch.tensor(obj_data["angular_velocity"], dtype=torch.float)
+                    if obj_data.get("angular_velocity") is not None
+                    else None
+                )
+                contact_labels = (
+                    torch.tensor(obj_data["contact_labels"], dtype=torch.int8)
+                    if obj_data.get("contact_labels") is not None
+                    else None
+                )
 
                 if obj_type == "BoxSceneObject":
                     obj = BoxSceneObject(
@@ -2569,6 +2748,9 @@ class SceneLib:
                         height=obj_data["height"],
                         translation=translation,
                         rotation=rotation,
+                        linear_velocity=linear_velocity,
+                        angular_velocity=angular_velocity,
+                        contact_labels=contact_labels,
                         fps=obj_data["fps"],
                         options=options,
                     )
@@ -2577,6 +2759,9 @@ class SceneLib:
                         radius=obj_data["radius"],
                         translation=translation,
                         rotation=rotation,
+                        linear_velocity=linear_velocity,
+                        angular_velocity=angular_velocity,
+                        contact_labels=contact_labels,
                         fps=obj_data["fps"],
                         options=options,
                     )
@@ -2586,6 +2771,9 @@ class SceneLib:
                         height=obj_data["height"],
                         translation=translation,
                         rotation=rotation,
+                        linear_velocity=linear_velocity,
+                        angular_velocity=angular_velocity,
+                        contact_labels=contact_labels,
                         fps=obj_data["fps"],
                         options=options,
                     )
@@ -2599,6 +2787,9 @@ class SceneLib:
                         scale=tuple(obj_data.get("scale", (1.0, 1.0, 1.0))),
                         translation=translation,
                         rotation=rotation,
+                        linear_velocity=linear_velocity,
+                        angular_velocity=angular_velocity,
+                        contact_labels=contact_labels,
                         fps=obj_data["fps"],
                         options=options,
                         object_dims=obj_data.get("object_dims"),

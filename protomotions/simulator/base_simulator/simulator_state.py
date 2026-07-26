@@ -289,6 +289,13 @@ class RobotState(BaseBatchedState):
 
         rigid_body_contacts (Optional[torch.Tensor]): Contacts of rigid bodies.
             Expected shape: [batch_size, num_bodies], True if in contact, False otherwise.
+        rigid_body_contact_labels (Optional[torch.Tensor]): Reference-only signed
+            contact annotations. Expected shape: [batch_size, num_bodies], with
+            +1 for contact promotion, 0 for a neutral region, and -1 for contact
+            penalty. Simulator states normally leave this field unset.
+        object_contact_labels (Optional[torch.Tensor]): Reference-only per-object
+            contact annotations. Expected shape: [batch_size, num_objects], with
+            1 for an active human-object interaction and 0 otherwise.
         rigid_body_contact_forces (Optional[torch.Tensor]): Contact forces of rigid bodies.
             (usually only obtained from simulator, not from reference motion data)
             Expected shape: [batch_size, num_bodies, 3].
@@ -306,6 +313,8 @@ class RobotState(BaseBatchedState):
     rigid_body_vel: Optional[torch.Tensor] = None
     rigid_body_ang_vel: Optional[torch.Tensor] = None
     rigid_body_contacts: Optional[torch.Tensor] = None
+    rigid_body_contact_labels: Optional[torch.Tensor] = None
+    object_contact_labels: Optional[torch.Tensor] = None
     rigid_body_contact_forces: Optional[torch.Tensor] = None
 
     # redundant fields for caching
@@ -433,6 +442,7 @@ class RobotState(BaseBatchedState):
         self._convert_helper(body_conv_map, "rigid_body_vel")
         self._convert_helper(body_conv_map, "rigid_body_ang_vel")
         self._convert_helper(body_conv_map, "rigid_body_contacts")
+        self._convert_helper(body_conv_map, "rigid_body_contact_labels")
         self._convert_helper(body_conv_map, "rigid_body_contact_forces")
 
     def convert_to_common(self, conversion: DataConversionMapping) -> "RobotState":
@@ -782,12 +792,15 @@ class ObjectState(BaseBatchedState):
             Expected shape: [batch_size, num_objects, 3].
         root_ang_vel (Optional[torch.Tensor]): Angular velocities of object roots.
             Expected shape: [batch_size, num_objects, 3].
+        contact_labels (Optional[torch.Tensor]): Reference-only object contact
+            annotations. Expected shape: [batch_size, num_objects, 1].
     """
 
     root_pos: Optional[torch.Tensor] = None
     root_rot: Optional[torch.Tensor] = None
     root_vel: Optional[torch.Tensor] = None
     root_ang_vel: Optional[torch.Tensor] = None
+    contact_labels: Optional[torch.Tensor] = None
     contact_forces: Optional[torch.Tensor] = None
 
     @property

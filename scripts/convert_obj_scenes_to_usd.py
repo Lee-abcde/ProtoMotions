@@ -40,13 +40,78 @@ import trimesh
 log = logging.getLogger(__name__)
 
 
-def obj_to_usda(obj_path: Path, usda_path: Path) -> None:
-    """Convert an OBJ mesh to USDA with physics properties using trimesh + pxr."""
-    from pxr import Usd, UsdGeom, UsdPhysics, Vt, Gf
+def _write_usda_without_pxr(mesh: trimesh.Trimesh, usda_path: Path) -> None:
+    """Write a portable ASCII USDA mesh when USD Python bindings are unavailable."""
 
+    vertices = mesh.vertices
+    faces = mesh.faces
+    bounds = mesh.bounds
+    with usda_path.open("w") as stream:
+        stream.write(
+            '#usda 1.0\n'
+            '(\n'
+            '    defaultPrim = "Root"\n'
+            '    kilogramsPerUnit = 1\n'
+            '    metersPerUnit = 1\n'
+            '    upAxis = "Z"\n'
+            ')\n\n'
+            'def Xform "Root" (\n'
+            '    prepend apiSchemas = ["PhysicsMassAPI", "PhysicsRigidBodyAPI"]\n'
+            ')\n'
+            '{\n'
+            '    def Mesh "Mesh" (\n'
+            '        prepend apiSchemas = ["PhysicsMeshCollisionAPI", "PhysicsCollisionAPI"]\n'
+            '    )\n'
+            '    {\n'
+        )
+        stream.write(
+            "        float3[] extent = "
+            f"[({bounds[0, 0]:.9g}, {bounds[0, 1]:.9g}, {bounds[0, 2]:.9g}), "
+            f"({bounds[1, 0]:.9g}, {bounds[1, 1]:.9g}, {bounds[1, 2]:.9g})]\n"
+        )
+        stream.write("        int[] faceVertexCounts = [")
+        stream.write(", ".join(str(len(face)) for face in faces))
+        stream.write("]\n        int[] faceVertexIndices = [")
+        stream.write(", ".join(str(int(index)) for index in faces.reshape(-1)))
+        stream.write("]\n        point3f[] points = [")
+        stream.write(
+            ", ".join(
+                f"({vertex[0]:.9g}, {vertex[1]:.9g}, {vertex[2]:.9g})"
+                for vertex in vertices
+            )
+        )
+        stream.write(
+            "]\n"
+            '        uniform token physics:approximation = "convexDecomposition"\n'
+            '        uniform token subdivisionScheme = "none"\n'
+            '    }\n'
+            '}\n'
+        )
+
+
+def obj_to_usda(obj_path: Path, usda_path: Path) -> None:
+    """Convert an OBJ mesh to a physics-enabled USDA file.
+
+    The pxr path is preferred. A standards-compliant ASCII writer keeps data
+    preparation usable in ordinary Python environments where Isaac Sim has not
+    initialized its plugin runtime yet.
+    """
     mesh = trimesh.load_mesh(str(obj_path), force="mesh")
     if isinstance(mesh, trimesh.Scene):
         mesh = trimesh.util.concatenate(mesh.dump())
+
+    try:
+        from pxr import Usd, UsdGeom, UsdPhysics, Vt, Gf
+    except ModuleNotFoundError:
+        _write_usda_without_pxr(mesh, usda_path)
+        log.info(
+            "Converted %s -> %s without pxr (%d verts, %d faces)",
+            obj_path.name,
+            usda_path.name,
+            len(mesh.vertices),
+            len(mesh.faces),
+        )
+        return
 
     stage = Usd.Stage.CreateNew(str(usda_path))
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
@@ -65,7 +130,8 @@ def obj_to_usda(obj_path: Path, usda_path: Path) -> None:
     UsdPhysics.RigidBodyAPI.Apply(xform.GetPrim())
     UsdPhysics.MassAPI.Apply(xform.GetPrim())
     UsdPhysics.CollisionAPI.Apply(mesh_prim)
-    UsdPhysics.MeshCollisionAPI.Apply(mesh_prim)
+    mesh_collision = UsdPhysics.MeshCollisionAPI.Apply(mesh_prim)
+    mesh_collision.GetApproximationAttr().Set("convexDecomposition")
 
     stage.SetDefaultPrim(xform.GetPrim())
     stage.Save()
@@ -214,6 +280,16 @@ def main():
 
     # Optionally bake collision into the USDA files
     if args.bake_collision and not args.dry_run:
+        try:
+            import pxr  # noqa: F401
+        except ModuleNotFoundError:
+            log.warning(
+                "pxr is unavailable; USDA files already contain the "
+                "convexDecomposition collision setting, but optimized sibling "
+                "collision files were not baked. Run this command through "
+                "Isaac Sim Python later if pre-baking is required."
+            )
+            return
         from protomotions.simulator.isaaclab.utils.collision_baking import (
             ensure_baked_collision_usd,
         )
