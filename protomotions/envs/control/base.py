@@ -142,6 +142,16 @@ class ControlComponent(ABC):
         """
         return {}
 
+    def before_render(self) -> None:
+        """Apply any state that must be visible in the upcoming render.
+
+        This hook runs after the simulator physics step and before marker
+        updates/rendering. Most controls do not need it. Kinematic replay uses
+        it to restore the exact reference pose after physics has perturbed the
+        articulation.
+        """
+        pass
+
     def close(self) -> None:
         """Release resources owned by this component."""
         pass

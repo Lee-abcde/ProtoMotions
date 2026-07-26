@@ -5,8 +5,7 @@
 Environment Kinematic Playback Script
 
 This script allows you to visualize reference motions in kinematic playback mode without training.
-It uses the KinematicReplayControl component to directly set robot state to reference motion poses,
-bypassing physics simulation entirely.
+It uses KinematicReplayControl to restore exact reference states before rendering.
 
 Usage (default — first num_envs motions/scenes from the file):
     python examples/env_kinematic_playback.py \

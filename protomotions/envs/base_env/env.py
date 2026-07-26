@@ -661,6 +661,11 @@ class BaseEnv:
 
         return markers_state
 
+    def _prepare_for_render(self):
+        """Apply pre-render control state, then compute matching marker poses."""
+        self.control_manager.before_render()
+        return self.get_markers_state()
+
     ###############################################################
     # Environment step logic
     ###############################################################
@@ -687,7 +692,7 @@ class BaseEnv:
         processed_action = action_dict["processed_action"]
         self._current_processed_action[:] = processed_action
 
-        self.simulator.step(processed_action, markers_callback=self.get_markers_state)
+        self.simulator.step(processed_action, markers_callback=self._prepare_for_render)
 
         self.post_physics_step()
 

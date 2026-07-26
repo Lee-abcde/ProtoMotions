@@ -69,6 +69,11 @@ class ControlManager:
         """
         for component in self.components.values():
             component.step()
+
+    def before_render(self) -> None:
+        """Let components restore state after physics and before rendering."""
+        for component in self.components.values():
+            component.before_render()
     
     def reset(self, env_ids: Tensor):
         """Reset all control components for specified environments.

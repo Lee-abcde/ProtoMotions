@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Kinematic replay control - plays reference motions without physics."""
+"""Kinematic replay control with exact reference-state rendering."""
 
 from dataclasses import dataclass
 from typing import Dict, TYPE_CHECKING
@@ -29,7 +29,7 @@ class KinematicReplayControlConfig(ControlComponentConfig):
 
 
 class KinematicReplayControl(ControlComponent):
-    """Plays reference motions kinematically (bypasses physics)."""
+    """Restore reference states before rendering while advancing a motion."""
     
     config: KinematicReplayControlConfig
     
@@ -62,11 +62,22 @@ class KinematicReplayControl(ControlComponent):
         if any(done_clip):
             done_env_ids = torch.where(done_clip)[0]
             self.env.motion_manager.sample_motions(done_env_ids)
-        
+
+        self._apply_reference_state(all_env_ids)
+
+    def before_render(self) -> None:
+        """Undo physics drift before markers and the character are rendered."""
+        all_env_ids = torch.arange(
+            self.env.num_envs, dtype=torch.long, device=self.env.device
+        )
+        self._apply_reference_state(all_env_ids)
+
+    def _apply_reference_state(self, env_ids: Tensor) -> None:
+        """Write the current humanoid and object reference state to the simulator."""
         # Get reference state
         ref_state = self.env.motion_lib.get_motion_state(
-            self.env.motion_manager.motion_ids,
-            self.env.motion_manager.motion_times,
+            self.env.motion_manager.motion_ids[env_ids],
+            self.env.motion_manager.motion_times[env_ids],
         )
         
         # Zero velocities for kinematic replay
@@ -74,13 +85,11 @@ class KinematicReplayControl(ControlComponent):
         ref_state.rigid_body_vel *= 0
         ref_state.rigid_body_ang_vel *= 0
         ref_reset_state = ResetState.from_robot_state(ref_state)
-        
-        env_ids = all_env_ids
 
         # Get object state
         ref_object_state = self.env.scene_lib.get_scene_pose(
             env_ids,
-            self.env.motion_manager.motion_times,
+            self.env.motion_manager.motion_times[env_ids],
             self.env.config.ref_object_respawn_offset,
         )
         ref_object_state.root_vel = torch.zeros_like(ref_object_state.root_pos)

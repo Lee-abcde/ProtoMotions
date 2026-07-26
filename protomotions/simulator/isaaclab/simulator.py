@@ -579,13 +579,16 @@ class IsaacLabSimulator(Simulator):
     def _physics_step(self) -> None:
         """
         Advance the simulation by stepping for a number of iterations equal to the decimation factor.
+
+        Rendering is intentionally deferred to ``render()``.  The base
+        simulator updates reference markers (and kinematic replay restores the
+        exact reference state) after this method returns, so rendering here
+        would display the pre-restoration physics state.
         """
-        for idx in range(self.decimation):
+        for _ in range(self.decimation):
             self._apply_control()
             self._scene.write_data_to_sim()
             self._sim.step(render=False)
-            if (idx + 1) % self.decimation == 0 and not self.headless:
-                self._sim.render()
             self._scene.update(dt=self._sim.get_physics_dt())
 
     def _apply_simulator_pd_targets(self, pd_targets: torch.Tensor) -> None:
@@ -997,6 +1000,10 @@ class IsaacLabSimulator(Simulator):
                 self._init_camera()
             else:
                 self._update_camera()
+            # Base Simulator.step() calls render only after its marker callback.
+            # At this point both the articulation and its reference markers
+            # contain the state intended for the same displayed frame.
+            self._sim.render()
         super().render()
 
     def _init_camera(self) -> None:
