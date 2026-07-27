@@ -143,6 +143,15 @@ def create_parser():
         default=False,
         help="Show tiny spheres at every MotionLib reference rigid-body position.",
     )
+    parser.add_argument(
+        "--show-contact-body-colors",
+        action="store_true",
+        default=False,
+        help=(
+            "Color the rendered IsaacLab robot rigid bodies using signed contact "
+            "labels: +1 red, 0 green, -1 blue."
+        ),
+    )
 
     return parser
 
@@ -219,6 +228,9 @@ def main():
     spec.loader.exec_module(experiment_module)
 
     args = parser.parse_args()
+
+    if args.show_contact_body_colors and args.simulator != "isaaclab":
+        raise ValueError("--show-contact-body-colors currently requires IsaacLab.")
 
     # Parse --motion-ids: 'random', single int (range), or comma-separated list.
     specific_motion_ids: list = []
@@ -352,7 +364,8 @@ def main():
     # Add kinematic replay control component (replaces any existing control components)
     env_config.control_components = {
         "kinematic_replay": KinematicReplayControlConfig(
-            show_reference_markers=args.show_reference_markers
+            show_reference_markers=args.show_reference_markers,
+            show_contact_body_colors=args.show_contact_body_colors,
         ),
     }
     print(f"Reference body markers: {'on' if args.show_reference_markers else 'off'}")

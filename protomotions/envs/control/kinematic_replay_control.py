@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 class KinematicReplayControlConfig(ControlComponentConfig):
     _target_: str = "protomotions.envs.control.kinematic_replay_control.KinematicReplayControl"
     show_reference_markers: bool = False
+    show_contact_body_colors: bool = False
 
 
 class KinematicReplayControl(ControlComponent):
@@ -79,6 +80,10 @@ class KinematicReplayControl(ControlComponent):
             self.env.motion_manager.motion_ids[env_ids],
             self.env.motion_manager.motion_times[env_ids],
         )
+        if self.config.show_contact_body_colors:
+            self.env.simulator.set_rigid_body_color_labels(
+                ref_state.rigid_body_contact_labels
+            )
         
         # Zero velocities for kinematic replay
         ref_state.dof_vel *= 0

@@ -6,6 +6,8 @@ import logging
 import torch
 
 import isaaclab.sim as sim_utils
+from isaaclab.sim.utils import bind_visual_material
+from pxr import Gf, Usd, UsdGeom
 
 log = logging.getLogger(__name__)
 from isaaclab.scene import InteractiveScene
@@ -52,6 +54,11 @@ from protomotions.simulator.base_simulator.simulator_state import (
 
 class IsaacLabSimulator(Simulator):
     config: IsaacLabSimulatorConfig
+    _RIGID_BODY_LABEL_COLORS = {
+        1: (1.0, 0.0, 0.0),
+        0: (0.0, 1.0, 0.0),
+        -1: (0.0, 0.0, 1.0),
+    }
 
     # =====================================================
     # Group 1: Initialization & Configuration
@@ -986,6 +993,88 @@ class IsaacLabSimulator(Simulator):
     # =====================================================
     # Group 6: Rendering & Visualization
     # =====================================================
+    def _initialize_rigid_body_color_materials(self, labels: torch.Tensor) -> None:
+        """Bind one persistent color material to every rendered body."""
+        stage = self._scene.stage
+        material_root = "/World/Looks/ProtoMotionsContactBodies"
+        stage.DefinePrim("/World/Looks", "Scope")
+        stage.DefinePrim(material_root, "Scope")
+
+        body_names = self.robot_config.kinematic_info.body_names
+        self._rigid_body_color_attributes = []
+        for env_id, env_prim_path in enumerate(self._scene.env_prim_paths):
+            robot_prim_path = f"{env_prim_path}/Robot"
+            env_material_root = f"{material_root}/env_{env_id}"
+            stage.DefinePrim(env_material_root, "Scope")
+
+            root_binding = stage.GetPrimAtPath(robot_prim_path).GetRelationship(
+                "material:binding"
+            )
+            if root_binding.IsValid():
+                targets = root_binding.GetTargets()
+                if targets:
+                    bind_visual_material(
+                        robot_prim_path,
+                        targets[0],
+                        stage=stage,
+                        stronger_than_descendants=False,
+                    )
+
+            color_attributes = []
+            for body_id, body_name in enumerate(body_names):
+                visuals_path = f"{robot_prim_path}/bodies/{body_name}/visuals"
+                geom_paths = [
+                    prim.GetPath().pathString
+                    for prim in Usd.PrimRange(stage.GetPrimAtPath(visuals_path))
+                    if prim.IsA(UsdGeom.Gprim)
+                ]
+                if not geom_paths:
+                    raise RuntimeError(f"No geometry found below {visuals_path}")
+
+                color = self._RIGID_BODY_LABEL_COLORS[
+                    int(labels[env_id, body_id])
+                ]
+                material_path = f"{env_material_root}/body_{body_id}"
+                material = sim_utils.PreviewSurfaceCfg(
+                    diffuse_color=color,
+                    metallic=0.0,
+                    roughness=0.5,
+                )
+                material.func(material_path, material)
+                for geom_path in geom_paths:
+                    bind_visual_material(
+                        geom_path,
+                        material_path,
+                        stage=stage,
+                        stronger_than_descendants=True,
+                    )
+                color_attributes.append(
+                    stage.GetPrimAtPath(f"{material_path}/Shader").GetAttribute(
+                        "inputs:diffuseColor"
+                    )
+                )
+            self._rigid_body_color_attributes.append(color_attributes)
+
+        self._last_rigid_body_color_labels = labels.clone()
+
+    def set_rigid_body_color_labels(self, labels: torch.Tensor) -> None:
+        """Map contact labels +1/0/-1 to red/green/blue body materials."""
+        labels = labels.detach().to(device="cpu", dtype=torch.int8)
+
+        if not hasattr(self, "_rigid_body_color_attributes"):
+            self._initialize_rigid_body_color_materials(labels)
+            return
+
+        for env_id, body_id in (
+            labels != self._last_rigid_body_color_labels
+        ).nonzero().tolist():
+            color = self._RIGID_BODY_LABEL_COLORS[int(labels[env_id, body_id])]
+            self._rigid_body_color_attributes[env_id][body_id].Set(
+                Gf.Vec3f(*color)
+            )
+
+        self._last_rigid_body_color_labels.copy_(labels)
+
     def render(self) -> None:
         """
         Render the simulation view. Initializes or updates the camera if the simulator is not in headless mode.
