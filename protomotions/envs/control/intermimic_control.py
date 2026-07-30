@@ -35,7 +35,7 @@ class InterMimicControlConfig(MimicControlConfig):
     physical_buffer_margin_steps: int = 10
     physical_buffer_min_episode_steps: int = 30
     physical_buffer_reward_discount: float = 0.99
-    physical_buffer_min_return: float = 0.5
+    physical_buffer_min_return: float = 0.03
     physical_buffer_update_probability: float = 0.005
     physical_buffer_decay: float = 1e-5
 
