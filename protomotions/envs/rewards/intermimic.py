@@ -9,6 +9,7 @@ import torch
 from torch import Tensor
 
 from protomotions.envs.utils.intermimic import (
+    nearest_object_surface_distances,
     nearest_object_surface_vectors,
     pairwise_body_object_vectors,
 )
@@ -34,21 +35,38 @@ def compute_intermimic_human_reward(
     position_weight: float,
     rotation_weight: float,
     energy_weight: float,
+    distance_weight_scale: float = 5.0,
 ) -> Tensor:
-    """Human pose tracking over independently selected position/rotation bodies."""
+    """Distance-weighted human pose tracking matching InterMimic."""
+    reference_distances = nearest_object_surface_distances(
+        ref_body_pos,
+        ref_object_pos,
+        ref_object_rot,
+        neutral_pointclouds,
+        object_valid_mask,
+    )
+    proximity_weights = torch.exp(-distance_weight_scale * reference_distances)
+
     position_error = (
         (ref_body_pos[:, key_body_ids] - body_pos[:, key_body_ids])
         .pow(2)
         .sum(dim=-1)
     )
-    position_cost = position_error.mean(dim=-1)
+    position_proximity_weights = proximity_weights.clone()
+    position_proximity_weights[:, ankle_toe_body_ids] = 1.0
+    position_cost = (
+        position_error * position_proximity_weights[:, key_body_ids]
+    ).mean(dim=-1)
 
     rotation_error = rotations.quat_diff_norm(
         ref_body_rot[:, rotation_body_ids],
         body_rot[:, rotation_body_ids],
         True,
     )
-    rotation_cost = rotation_error.mean(dim=-1)
+    rotation_distance_weights = 1.0 - proximity_weights[:, rotation_body_ids]
+    rotation_cost = (
+        rotation_error * rotation_distance_weights
+    ).mean(dim=-1)
 
     previous_dof_vel = historical_dof_vel[:, 0]
     dof_acceleration = (dof_vel - previous_dof_vel) / dt

@@ -188,6 +188,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 position_weight=30.0,
                 rotation_weight=2.5,
                 energy_weight=2e-5,
+                distance_weight_scale=5.0,
             ),
             "intermimic_object": intermimic_object_reward_factory(
                 position_weight=5.0,

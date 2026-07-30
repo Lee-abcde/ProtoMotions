@@ -1686,6 +1686,7 @@ def intermimic_human_reward_factory(
     position_weight: float = 30.0,
     rotation_weight: float = 1.5,
     energy_weight: float = 2e-5,
+    distance_weight_scale: float = 5.0,
 ) -> MdpComponent:
     from protomotions.envs.rewards import compute_intermimic_human_reward
 
@@ -1712,6 +1713,7 @@ def intermimic_human_reward_factory(
             "position_weight": position_weight,
             "rotation_weight": rotation_weight,
             "energy_weight": energy_weight,
+            "distance_weight_scale": distance_weight_scale,
             "multiplicative": True,
         },
     )

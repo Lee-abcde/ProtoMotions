@@ -68,6 +68,35 @@ def nearest_object_surface_vectors(
     ).squeeze(2)
 
 
+def nearest_object_surface_distances(
+    body_pos: Tensor,
+    object_pos: Tensor,
+    object_rot: Tensor,
+    neutral_pointclouds: Tensor,
+    object_valid_mask: Tensor,
+    point_chunk_size: int = 128,
+) -> Tensor:
+    """Return nearest valid object-surface distances without a full vector grid."""
+    points, valid = flatten_object_pointclouds(
+        object_pos, object_rot, neutral_pointclouds, object_valid_mask
+    )
+    min_squared = torch.full(
+        body_pos.shape[:-1],
+        float("inf"),
+        dtype=body_pos.dtype,
+        device=body_pos.device,
+    )
+    for start in range(0, points.shape[1], point_chunk_size):
+        end = min(start + point_chunk_size, points.shape[1])
+        vectors = body_pos.unsqueeze(2) - points[:, None, start:end]
+        squared = vectors.pow(2).sum(dim=-1).masked_fill(
+            ~valid[:, None, start:end],
+            float("inf"),
+        )
+        min_squared = torch.minimum(min_squared, squared.amin(dim=-1))
+    return min_squared.sqrt()
+
+
 def interaction_geometry_embedding(vectors: Tensor) -> Tensor:
     """Distance-decayed unit-vector encoding used by InterMimic."""
     distance = vectors.norm(dim=-1, keepdim=True)
