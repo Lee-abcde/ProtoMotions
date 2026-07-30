@@ -1911,6 +1911,25 @@ def intermimic_object_error_term_factory(
     )
 
 
+def intermimic_object_rotation_error_term_factory(
+    error_threshold: float = 0.5,
+) -> MdpComponent:
+    from protomotions.envs.terminations import (
+        intermimic_object_rotation_error_term,
+    )
+
+    return MdpComponent(
+        compute_func=intermimic_object_rotation_error_term,
+        dynamic_vars={
+            "object_rot": EnvContext.scene.object_rot,
+            "ref_object_rot": EnvContext.intermimic.ref_object_rot,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+            "progress_buf": EnvContext.progress_buf,
+        },
+        static_params={"error_threshold": error_threshold},
+    )
+
+
 def intermimic_interaction_error_term_factory(
     key_body_ids: Tensor,
     error_threshold: float = 2.0,
@@ -2092,6 +2111,7 @@ __all__ = [
     "intermimic_human_error_term_factory",
     "intermimic_root_height_term_factory",
     "intermimic_object_error_term_factory",
+    "intermimic_object_rotation_error_term_factory",
     "intermimic_interaction_error_term_factory",
     "intermimic_contact_loss_term_factory",
     # Evaluation metric factories

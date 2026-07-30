@@ -12,6 +12,7 @@ from protomotions.envs.utils.intermimic import (
     flatten_object_pointclouds,
     pairwise_body_object_vectors,
 )
+from protomotions.utils import rotations
 
 
 def intermimic_human_error(
@@ -85,6 +86,23 @@ def intermimic_object_point_error_term(
         object_valid_mask,
     )
     return (error > error_threshold) & (progress_buf > 1)
+
+
+def intermimic_object_rotation_error_term(
+    object_rot: Tensor,
+    ref_object_rot: Tensor,
+    object_valid_mask: Tensor,
+    progress_buf: Tensor,
+    error_threshold: float,
+) -> Tensor:
+    """Terminate when any valid object's angular error exceeds the threshold."""
+    error = rotations.quat_diff_norm(
+        ref_object_rot,
+        object_rot,
+        True,
+    )
+    exceeded = (error > error_threshold) & object_valid_mask.bool()
+    return exceeded.any(dim=-1) & (progress_buf > 1)
 
 
 def intermimic_interaction_error(

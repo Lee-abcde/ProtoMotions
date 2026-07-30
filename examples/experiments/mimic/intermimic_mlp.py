@@ -122,6 +122,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         intermimic_interaction_error_term_factory,
         intermimic_interaction_reward_factory,
         intermimic_object_error_term_factory,
+        intermimic_object_rotation_error_term_factory,
         intermimic_object_obs_factory,
         intermimic_object_reward_factory,
         intermimic_root_height_term_factory,
@@ -218,6 +219,11 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             ),
             "object_error": intermimic_object_error_term_factory(
                 error_threshold=0.5
+            ),
+            "object_rotation_error": (
+                intermimic_object_rotation_error_term_factory(
+                    error_threshold=1.0
+                )
             ),
             "interaction_error": intermimic_interaction_error_term_factory(
                 key_body_ids=key_body_ids, error_threshold=2.0
