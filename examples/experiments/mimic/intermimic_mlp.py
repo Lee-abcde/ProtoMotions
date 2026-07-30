@@ -158,8 +158,9 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 # InterMimic PSI: one raw-reference slot plus two learned
                 # physically valid simulated-state slots.
                 physical_buffer_size=3,
-                # Paper supplementary E.2: sparsely update PSI per rollout.
-                physical_buffer_update_probability=0.005,
+                # Match the dense update behavior used by always_keypos:
+                # every eligible rollout may contribute PSI candidates.
+                physical_buffer_update_probability=1.0,
             )
         },
         observation_components={
