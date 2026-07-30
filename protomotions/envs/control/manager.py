@@ -86,6 +86,55 @@ class ControlManager:
         """
         for component in self.components.values():
             component.reset(env_ids)
+
+    def before_reset(self, env_ids: Tensor) -> None:
+        """Let components process outgoing episodes before reset."""
+        for component in self.components.values():
+            component.before_reset(env_ids)
+
+    def post_reward(self, rewards: Tensor) -> None:
+        """Let components observe rewards computed for the current step."""
+        for component in self.components.values():
+            component.post_reward(rewards)
+
+    def modify_ref_reset_state(
+        self,
+        env_ids: Tensor,
+        motion_ids: Tensor,
+        motion_times: Tensor,
+        robot_state,
+        object_state,
+    ):
+        """Apply component-specific reference-state initialization in order."""
+        for component in self.components.values():
+            robot_state, object_state = component.modify_ref_reset_state(
+                env_ids,
+                motion_ids,
+                motion_times,
+                robot_state,
+                object_state,
+            )
+        return robot_state, object_state
+
+    def get_state_dict(self) -> Dict[str, Dict]:
+        """Collect persistent state from stateful control components."""
+        return {
+            name: component_state
+            for name, component in self.components.items()
+            if (component_state := component.get_state_dict())
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Dict]) -> None:
+        """Restore persistent state for matching control components."""
+        for name, component_state in state_dict.items():
+            component = self.components.get(name)
+            if component is not None:
+                component.load_state_dict(component_state)
+
+    def set_evaluation_mode(self, enabled: bool) -> None:
+        """Notify stateful controls when evaluation starts or finishes."""
+        for component in self.components.values():
+            component.set_evaluation_mode(enabled)
     
     def check_resets_and_terminations(self) -> Tuple[Tensor, Tensor]:
         """Check control component-specific reset and termination conditions.

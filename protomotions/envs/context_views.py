@@ -61,6 +61,12 @@ class RobotStateView:
     rigid_body_ang_vel: Tensor = FieldPath()
     rigid_body_contacts: Tensor = FieldPath()
     rigid_body_contact_forces: Tensor = FieldPath()
+    rigid_body_contact_labels: Tensor = FieldPath()
+    object_contact_labels: Tensor = FieldPath()
+    root_pos: Tensor = FieldPath()
+    root_rot: Tensor = FieldPath()
+    root_vel: Tensor = FieldPath()
+    root_ang_vel: Tensor = FieldPath()
     dof_pos: Tensor = FieldPath()
     dof_vel: Tensor = FieldPath()
     dof_forces: Tensor = FieldPath()
@@ -91,6 +97,7 @@ class CurrentStateView:
     rigid_body_vel: Tensor = FieldPath()
     rigid_body_ang_vel: Tensor = FieldPath()
     rigid_body_contacts: Tensor = FieldPath()
+    rigid_body_contact_forces: Tensor = FieldPath()
     dof_pos: Tensor = FieldPath()
     dof_vel: Tensor = FieldPath()
     dof_forces: Tensor = FieldPath()
@@ -126,6 +133,9 @@ class CurrentStateView:
         self.rigid_body_vel = state.rigid_body_vel
         self.rigid_body_ang_vel = state.rigid_body_ang_vel
         self.rigid_body_contacts = getattr(state, "rigid_body_contacts", None)
+        self.rigid_body_contact_forces = getattr(
+            state, "rigid_body_contact_forces", None
+        )
         self.dof_pos = state.dof_pos
         self.dof_vel = state.dof_vel
         self.dof_forces = getattr(state, "dof_forces", None)
@@ -367,6 +377,59 @@ class MimicContext:
         self.text_embedding_valid_mask = text_embedding_valid_mask
 
 
+class InterMimicContext:
+    """Reference object and contact state used by InterMimic components."""
+
+    ref_object_pos: Tensor = FieldPath()
+    ref_object_rot: Tensor = FieldPath()
+    ref_object_vel: Tensor = FieldPath()
+    ref_object_ang_vel: Tensor = FieldPath()
+    ref_object_contact_labels: Tensor = FieldPath()
+
+    future_object_pos: Tensor = FieldPath()
+    future_object_rot: Tensor = FieldPath()
+    future_object_vel: Tensor = FieldPath()
+    future_object_ang_vel: Tensor = FieldPath()
+    future_object_contact_labels: Tensor = FieldPath()
+    future_body_contact_labels: Tensor = FieldPath()
+
+    previous_object_vel: Tensor = FieldPath()
+    previous_object_ang_vel: Tensor = FieldPath()
+    contact_loss_exceeded: Tensor = FieldPath()
+
+    def __init__(
+        self,
+        ref_object_pos: Tensor,
+        ref_object_rot: Tensor,
+        ref_object_vel: Tensor,
+        ref_object_ang_vel: Tensor,
+        ref_object_contact_labels: Tensor,
+        future_object_pos: Tensor,
+        future_object_rot: Tensor,
+        future_object_vel: Tensor,
+        future_object_ang_vel: Tensor,
+        future_object_contact_labels: Tensor,
+        future_body_contact_labels: Tensor,
+        previous_object_vel: Tensor,
+        previous_object_ang_vel: Tensor,
+        contact_loss_exceeded: Tensor,
+    ):
+        self.ref_object_pos = ref_object_pos
+        self.ref_object_rot = ref_object_rot
+        self.ref_object_vel = ref_object_vel
+        self.ref_object_ang_vel = ref_object_ang_vel
+        self.ref_object_contact_labels = ref_object_contact_labels
+        self.future_object_pos = future_object_pos
+        self.future_object_rot = future_object_rot
+        self.future_object_vel = future_object_vel
+        self.future_object_ang_vel = future_object_ang_vel
+        self.future_object_contact_labels = future_object_contact_labels
+        self.future_body_contact_labels = future_body_contact_labels
+        self.previous_object_vel = previous_object_vel
+        self.previous_object_ang_vel = previous_object_ang_vel
+        self.contact_loss_exceeded = contact_loss_exceeded
+
+
 class MaskedMimicContext:
     """View for masked mimic control context.
 
@@ -544,6 +607,10 @@ class SceneSurfaceContext:
 
     object_pos: Tensor = FieldPath()
     object_rot: Tensor = FieldPath()
+    object_vel: Tensor = FieldPath()
+    object_ang_vel: Tensor = FieldPath()
+    object_contacts: Tensor = FieldPath()
+    object_contact_forces: Tensor = FieldPath()
     neutral_pointclouds: Tensor = FieldPath()
     object_valid_mask: Tensor = FieldPath()
 
@@ -553,9 +620,35 @@ class SceneSurfaceContext:
         object_rot: Tensor,
         neutral_pointclouds: Tensor,
         object_valid_mask: Tensor,
+        object_vel: Optional[Tensor] = None,
+        object_ang_vel: Optional[Tensor] = None,
+        object_contacts: Optional[Tensor] = None,
+        object_contact_forces: Optional[Tensor] = None,
     ):
         self.object_pos = object_pos
         self.object_rot = object_rot
+        self.object_vel = (
+            object_vel
+            if object_vel is not None
+            else object_pos.new_zeros(object_pos.shape)
+        )
+        self.object_ang_vel = (
+            object_ang_vel
+            if object_ang_vel is not None
+            else object_pos.new_zeros(object_pos.shape)
+        )
+        self.object_contacts = (
+            object_contacts
+            if object_contacts is not None
+            else object_valid_mask.new_zeros(object_valid_mask.shape)
+        )
+        self.object_contact_forces = (
+            object_contact_forces
+            if object_contact_forces is not None
+            else object_pos.new_zeros(
+                object_pos.shape[0], object_pos.shape[1], 0, 3
+            )
+        )
         self.neutral_pointclouds = neutral_pointclouds
         self.object_valid_mask = object_valid_mask
 
@@ -629,6 +722,7 @@ class EnvContext:
 
     # Control-specific contexts (populated by controllers via populate_context)
     mimic: Optional[MimicContext] = NestedField(MimicContext)
+    intermimic: Optional[InterMimicContext] = NestedField(InterMimicContext)
     masked_mimic: Optional[MaskedMimicContext] = NestedField(MaskedMimicContext)
     steering: Optional[SteeringContext] = NestedField(SteeringContext)
     path: Optional[PathContext] = NestedField(PathContext)
@@ -657,6 +751,7 @@ class EnvContext:
         odom_scale: Optional[Tensor] = None,
         odom_yaw_cos_sin: Optional[Tensor] = None,
         mimic: Optional[MimicContext] = None,
+        intermimic: Optional[InterMimicContext] = None,
         masked_mimic: Optional[MaskedMimicContext] = None,
         steering: Optional[SteeringContext] = None,
         path: Optional[PathContext] = None,
@@ -725,6 +820,7 @@ class EnvContext:
 
         # Control-specific views
         self.mimic = mimic
+        self.intermimic = intermimic
         self.masked_mimic = masked_mimic
         self.steering = steering
         self.path = path
@@ -739,6 +835,7 @@ __all__ = [
     "CurrentStateView",
     "HistoricalView",
     "MimicContext",
+    "InterMimicContext",
     "MaskedMimicContext",
     "SteeringContext",
     "PathContext",

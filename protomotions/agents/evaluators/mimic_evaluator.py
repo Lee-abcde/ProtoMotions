@@ -156,6 +156,7 @@ class MimicEvaluator(BaseEvaluator):
         self._env_snapshot = self.env.save_state()
         self._cached_motion_ids = self.motion_manager.motion_ids.clone()
         self._cached_motion_times = self.motion_manager.motion_times.clone()
+        self.env.control_manager.set_evaluation_mode(True)
 
         return self._create_metrics(
             num_motions, motion_num_frames, self.config.max_eval_steps
@@ -403,6 +404,21 @@ class MimicEvaluator(BaseEvaluator):
             return [(first_env_indices, fixed_motion_ids)]
 
         num_motions = self.motion_lib.num_motions()
+        compatible_batch_builder = getattr(
+            self.motion_manager, "build_compatible_eval_batches", None
+        )
+        compatible_batches = (
+            compatible_batch_builder()
+            if compatible_batch_builder is not None
+            else None
+        )
+        if compatible_batches is not None:
+            print(
+                "Evaluating motions in "
+                f"{len(compatible_batches)} object-compatible batches"
+            )
+            return compatible_batches
+
         batches = []
         for start in range(0, num_motions, self.num_envs):
             end = min(start + self.num_envs, num_motions)
@@ -485,6 +501,7 @@ class MimicEvaluator(BaseEvaluator):
         self.motion_manager.motion_ids = self._cached_motion_ids
         self.motion_manager.motion_times = self._cached_motion_times
         self.env.restore_state(self._env_snapshot)
+        self.env.control_manager.set_evaluation_mode(False)
 
         del self._env_snapshot
         del self._cached_motion_ids

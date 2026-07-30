@@ -19,10 +19,14 @@ from typing import Dict, Tuple, TYPE_CHECKING
 import torch
 from torch import Tensor
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 if TYPE_CHECKING:
     from protomotions.simulator.base_simulator.config import VisualizationMarkerConfig, MarkerState
+    from protomotions.simulator.base_simulator.simulator_state import (
+        ObjectState,
+        ResetState,
+    )
     from protomotions.envs.base_env.env import BaseEnv
     from protomotions.envs.context_views import EnvContext
 
@@ -70,6 +74,37 @@ class ControlComponent(ABC):
         Args:
             env_ids: Indices of environments to reset [num_reset_envs].
         """
+        pass
+
+    def before_reset(self, env_ids: Tensor) -> None:
+        """Handle the outgoing episode before the simulator state is replaced."""
+        pass
+
+    def post_reward(self, rewards: Tensor) -> None:
+        """Observe rewards after they are computed for the current step."""
+        pass
+
+    def modify_ref_reset_state(
+        self,
+        env_ids: Tensor,
+        motion_ids: Tensor,
+        motion_times: Tensor,
+        robot_state: "ResetState",
+        object_state: "ObjectState",
+    ) -> Tuple["ResetState", "ObjectState"]:
+        """Optionally replace reference reset states before simulator reset."""
+        return robot_state, object_state
+
+    def get_state_dict(self) -> Dict:
+        """Return persistent component state for environment checkpoints."""
+        return {}
+
+    def load_state_dict(self, state_dict: Dict) -> None:
+        """Restore persistent component state from an environment checkpoint."""
+        pass
+
+    def set_evaluation_mode(self, enabled: bool) -> None:
+        """Enter or leave evaluation without corrupting training-time state."""
         pass
     
     @abstractmethod

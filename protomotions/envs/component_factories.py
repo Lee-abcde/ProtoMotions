@@ -1611,6 +1611,428 @@ def steering_velocity_error_factory(
     )
 
 
+# =============================================================================
+# InterMimic Factories
+# =============================================================================
+
+
+def intermimic_object_obs_factory() -> MdpComponent:
+    from protomotions.envs.obs import compute_intermimic_object_observation
+
+    return MdpComponent(
+        compute_func=compute_intermimic_object_observation,
+        dynamic_vars={
+            "body_pos": EnvContext.current.rigid_body_pos,
+            "root_pos": EnvContext.current.root_pos,
+            "root_rot": EnvContext.current.root_rot,
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "object_vel": EnvContext.scene.object_vel,
+            "object_ang_vel": EnvContext.scene.object_ang_vel,
+            "object_contacts": EnvContext.scene.object_contacts,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+        },
+    )
+
+
+def intermimic_target_obs_factory(
+    key_body_ids: Tensor,
+    non_finger_body_ids: Tensor,
+) -> MdpComponent:
+    from protomotions.envs.obs import compute_intermimic_target_observation
+
+    return MdpComponent(
+        compute_func=compute_intermimic_target_observation,
+        dynamic_vars={
+            "body_pos": EnvContext.current.rigid_body_pos,
+            "body_rot": EnvContext.current.rigid_body_rot,
+            "body_vel": EnvContext.current.rigid_body_vel,
+            "body_ang_vel": EnvContext.current.rigid_body_ang_vel,
+            "body_contacts": EnvContext.current.rigid_body_contacts,
+            "future_body_pos": EnvContext.mimic.future_pos,
+            "future_body_rot": EnvContext.mimic.future_rot,
+            "future_body_vel": EnvContext.mimic.future_vel,
+            "future_body_ang_vel": EnvContext.mimic.future_ang_vel,
+            "future_body_contact_labels": (
+                EnvContext.intermimic.future_body_contact_labels
+            ),
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "object_vel": EnvContext.scene.object_vel,
+            "object_ang_vel": EnvContext.scene.object_ang_vel,
+            "object_contacts": EnvContext.scene.object_contacts,
+            "future_object_pos": EnvContext.intermimic.future_object_pos,
+            "future_object_rot": EnvContext.intermimic.future_object_rot,
+            "future_object_vel": EnvContext.intermimic.future_object_vel,
+            "future_object_ang_vel": EnvContext.intermimic.future_object_ang_vel,
+            "future_object_contact_labels": (
+                EnvContext.intermimic.future_object_contact_labels
+            ),
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+        },
+        static_params={
+            "key_body_ids": key_body_ids,
+            "non_finger_body_ids": non_finger_body_ids,
+        },
+    )
+
+
+def intermimic_human_reward_factory(
+    key_body_ids: Tensor,
+    rotation_body_ids: Tensor,
+    ankle_toe_body_ids: Tensor,
+    position_weight: float = 30.0,
+    rotation_weight: float = 1.5,
+    energy_weight: float = 2e-5,
+) -> MdpComponent:
+    from protomotions.envs.rewards import compute_intermimic_human_reward
+
+    return MdpComponent(
+        compute_func=compute_intermimic_human_reward,
+        dynamic_vars={
+            "body_pos": EnvContext.current.rigid_body_pos,
+            "body_rot": EnvContext.current.rigid_body_rot,
+            "dof_vel": EnvContext.current.dof_vel,
+            "historical_dof_vel": EnvContext.historical.dof_vel,
+            "ref_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
+            "ref_body_rot": EnvContext.mimic.ref_state.rigid_body_rot,
+            "ref_object_pos": EnvContext.intermimic.ref_object_pos,
+            "ref_object_rot": EnvContext.intermimic.ref_object_rot,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+            "progress_buf": EnvContext.progress_buf,
+            "dt": EnvContext.dt,
+        },
+        static_params={
+            "key_body_ids": key_body_ids,
+            "rotation_body_ids": rotation_body_ids,
+            "ankle_toe_body_ids": ankle_toe_body_ids,
+            "position_weight": position_weight,
+            "rotation_weight": rotation_weight,
+            "energy_weight": energy_weight,
+            "multiplicative": True,
+        },
+    )
+
+
+def intermimic_object_reward_factory(
+    position_weight: float = 5.0,
+    rotation_weight: float = 0.1,
+    velocity_weight: float = 0.1,
+    angular_velocity_weight: float = 0.0,
+    energy_weight: float = 2e-5,
+) -> MdpComponent:
+    from protomotions.envs.rewards import compute_intermimic_object_reward
+
+    return MdpComponent(
+        compute_func=compute_intermimic_object_reward,
+        dynamic_vars={
+            "root_pos": EnvContext.current.root_pos,
+            "root_rot": EnvContext.current.root_rot,
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "object_vel": EnvContext.scene.object_vel,
+            "object_ang_vel": EnvContext.scene.object_ang_vel,
+            "previous_object_vel": EnvContext.intermimic.previous_object_vel,
+            "previous_object_ang_vel": (
+                EnvContext.intermimic.previous_object_ang_vel
+            ),
+            "ref_root_pos": EnvContext.mimic.ref_state.root_pos,
+            "ref_root_rot": EnvContext.mimic.ref_state.root_rot,
+            "ref_object_pos": EnvContext.intermimic.ref_object_pos,
+            "ref_object_rot": EnvContext.intermimic.ref_object_rot,
+            "ref_object_vel": EnvContext.intermimic.ref_object_vel,
+            "ref_object_ang_vel": EnvContext.intermimic.ref_object_ang_vel,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+            "progress_buf": EnvContext.progress_buf,
+            "dt": EnvContext.dt,
+        },
+        static_params={
+            "position_weight": position_weight,
+            "rotation_weight": rotation_weight,
+            "velocity_weight": velocity_weight,
+            "angular_velocity_weight": angular_velocity_weight,
+            "energy_weight": energy_weight,
+            "multiplicative": True,
+        },
+    )
+
+
+def intermimic_interaction_reward_factory(
+    key_body_ids: Tensor,
+    interaction_weight: float = 5.0,
+) -> MdpComponent:
+    from protomotions.envs.rewards import compute_intermimic_interaction_reward
+
+    return MdpComponent(
+        compute_func=compute_intermimic_interaction_reward,
+        dynamic_vars={
+            "body_pos": EnvContext.current.rigid_body_pos,
+            "ref_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "ref_object_pos": EnvContext.intermimic.ref_object_pos,
+            "ref_object_rot": EnvContext.intermimic.ref_object_rot,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+        },
+        static_params={
+            "key_body_ids": key_body_ids,
+            "interaction_weight": interaction_weight,
+            "multiplicative": True,
+        },
+    )
+
+
+def intermimic_contact_reward_factory(
+    left_hand_body_ids: Tensor,
+    right_hand_body_ids: Tensor,
+    other_body_ids: Tensor,
+    hand_weight: float = 5.0,
+    other_weight: float = 5.0,
+    negative_weight: float = 3.0,
+    contact_energy_weight: float = 1e-9,
+) -> MdpComponent:
+    from protomotions.envs.rewards import compute_intermimic_contact_reward
+
+    return MdpComponent(
+        compute_func=compute_intermimic_contact_reward,
+        dynamic_vars={
+            "body_contacts": EnvContext.current.rigid_body_contacts,
+            "body_contact_forces": EnvContext.current.rigid_body_contact_forces,
+            "ref_body_contact_labels": (
+                EnvContext.mimic.ref_state.rigid_body_contact_labels
+            ),
+        },
+        static_params={
+            "left_hand_body_ids": left_hand_body_ids,
+            "right_hand_body_ids": right_hand_body_ids,
+            "other_body_ids": other_body_ids,
+            "hand_weight": hand_weight,
+            "other_weight": other_weight,
+            "negative_weight": negative_weight,
+            "contact_energy_weight": contact_energy_weight,
+            "multiplicative": True,
+        },
+    )
+
+
+def intermimic_fingertip_bearing_reward_factory(
+    left_fingertip_body_ids: Tensor,
+    right_fingertip_body_ids: Tensor,
+    left_hand_body_ids: Tensor,
+    right_hand_body_ids: Tensor,
+    max_hand_weight: float = 5.0,
+    distance_scale: float = 5.0,
+) -> MdpComponent:
+    from protomotions.envs.rewards import (
+        compute_intermimic_fingertip_bearing_reward,
+    )
+
+    return MdpComponent(
+        compute_func=compute_intermimic_fingertip_bearing_reward,
+        dynamic_vars={
+            "body_pos": EnvContext.current.rigid_body_pos,
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+            "ref_body_contact_labels": (
+                EnvContext.mimic.ref_state.rigid_body_contact_labels
+            ),
+            "future_body_contact_labels": (
+                EnvContext.intermimic.future_body_contact_labels
+            ),
+        },
+        static_params={
+            "left_fingertip_body_ids": left_fingertip_body_ids,
+            "right_fingertip_body_ids": right_fingertip_body_ids,
+            "left_hand_body_ids": left_hand_body_ids,
+            "right_hand_body_ids": right_hand_body_ids,
+            "max_hand_weight": max_hand_weight,
+            "distance_scale": distance_scale,
+            "multiplicative": True,
+        },
+    )
+
+
+def intermimic_human_error_term_factory(
+    key_body_ids: Tensor, error_threshold: float = 0.5
+) -> MdpComponent:
+    from protomotions.envs.terminations import intermimic_human_error_term
+
+    return MdpComponent(
+        compute_func=intermimic_human_error_term,
+        dynamic_vars={
+            "body_pos": EnvContext.current.rigid_body_pos,
+            "ref_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
+        },
+        static_params={
+            "key_body_ids": key_body_ids,
+            "error_threshold": error_threshold,
+        },
+    )
+
+
+def intermimic_root_height_term_factory(
+    minimum_height: float = 0.15,
+) -> MdpComponent:
+    from protomotions.envs.terminations import intermimic_root_height_term
+
+    return MdpComponent(
+        compute_func=intermimic_root_height_term,
+        dynamic_vars={
+            "root_pos": EnvContext.current.root_pos,
+            "progress_buf": EnvContext.progress_buf,
+        },
+        static_params={"minimum_height": minimum_height},
+    )
+
+
+def intermimic_object_error_term_factory(
+    error_threshold: float = 0.5,
+) -> MdpComponent:
+    from protomotions.envs.terminations import intermimic_object_point_error_term
+
+    return MdpComponent(
+        compute_func=intermimic_object_point_error_term,
+        dynamic_vars={
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "ref_object_pos": EnvContext.intermimic.ref_object_pos,
+            "ref_object_rot": EnvContext.intermimic.ref_object_rot,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+            "progress_buf": EnvContext.progress_buf,
+        },
+        static_params={"error_threshold": error_threshold},
+    )
+
+
+def intermimic_interaction_error_term_factory(
+    key_body_ids: Tensor,
+    error_threshold: float = 2.0,
+) -> MdpComponent:
+    from protomotions.envs.terminations import intermimic_interaction_error_term
+
+    return MdpComponent(
+        compute_func=intermimic_interaction_error_term,
+        dynamic_vars={
+            "body_pos": EnvContext.current.rigid_body_pos,
+            "ref_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "ref_object_pos": EnvContext.intermimic.ref_object_pos,
+            "ref_object_rot": EnvContext.intermimic.ref_object_rot,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+            "progress_buf": EnvContext.progress_buf,
+        },
+        static_params={
+            "key_body_ids": key_body_ids,
+            "error_threshold": error_threshold,
+        },
+    )
+
+
+def intermimic_contact_loss_term_factory() -> MdpComponent:
+    from protomotions.envs.terminations import intermimic_contact_loss_term
+
+    return MdpComponent(
+        compute_func=intermimic_contact_loss_term,
+        dynamic_vars={
+            "contact_loss_exceeded": (
+                EnvContext.intermimic.contact_loss_exceeded
+            )
+        },
+    )
+
+
+def intermimic_human_error_factory(
+    key_body_ids: Tensor, threshold: float = None
+) -> MdpComponent:
+    from protomotions.envs.terminations import intermimic_human_error
+
+    params = {"key_body_ids": key_body_ids}
+    if threshold is not None:
+        params["threshold"] = threshold
+    return MdpComponent(
+        compute_func=intermimic_human_error,
+        dynamic_vars={
+            "body_pos": EnvContext.current.rigid_body_pos,
+            "ref_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
+        },
+        static_params=params,
+    )
+
+
+def intermimic_object_error_factory(threshold: float = None) -> MdpComponent:
+    from protomotions.envs.terminations import intermimic_object_point_error
+
+    params = {}
+    if threshold is not None:
+        params["threshold"] = threshold
+    return MdpComponent(
+        compute_func=intermimic_object_point_error,
+        dynamic_vars={
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "ref_object_pos": EnvContext.intermimic.ref_object_pos,
+            "ref_object_rot": EnvContext.intermimic.ref_object_rot,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+        },
+        static_params=params,
+    )
+
+
+def intermimic_interaction_error_factory(
+    key_body_ids: Tensor, threshold: float = None
+) -> MdpComponent:
+    from protomotions.envs.terminations import intermimic_interaction_error
+
+    params = {"key_body_ids": key_body_ids}
+    if threshold is not None:
+        params["threshold"] = threshold
+    return MdpComponent(
+        compute_func=intermimic_interaction_error,
+        dynamic_vars={
+            "body_pos": EnvContext.current.rigid_body_pos,
+            "ref_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "ref_object_pos": EnvContext.intermimic.ref_object_pos,
+            "ref_object_rot": EnvContext.intermimic.ref_object_rot,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+        },
+        static_params=params,
+    )
+
+
+def intermimic_object_contact_error_factory(
+    threshold: float = None,
+) -> MdpComponent:
+    from protomotions.envs.terminations import intermimic_object_contact_error
+
+    params = {}
+    if threshold is not None:
+        params["threshold"] = threshold
+    return MdpComponent(
+        compute_func=intermimic_object_contact_error,
+        dynamic_vars={
+            "object_contacts": EnvContext.scene.object_contacts,
+            "ref_object_contact_labels": (
+                EnvContext.intermimic.ref_object_contact_labels
+            ),
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+        },
+        static_params=params,
+    )
+
+
 __all__ = [
     # Observation factories
     "max_coords_obs_factory",
@@ -1628,6 +2050,8 @@ __all__ = [
     "target_obs_factory",
     "steering_obs_factory",
     "path_obs_factory",
+    "intermimic_object_obs_factory",
+    "intermimic_target_obs_factory",
     # Reward factories
     "action_smoothness_factory",
     "gt_rew_factory",
@@ -1653,6 +2077,11 @@ __all__ = [
     "relative_body_ori_rew_factory",
     "global_body_lin_vel_rew_factory",
     "global_body_ang_vel_rew_factory",
+    "intermimic_human_reward_factory",
+    "intermimic_object_reward_factory",
+    "intermimic_interaction_reward_factory",
+    "intermimic_contact_reward_factory",
+    "intermimic_fingertip_bearing_reward_factory",
     # Termination factories
     "tracking_error_term_factory",
     "anchor_pos_error_term_factory",
@@ -1660,6 +2089,11 @@ __all__ = [
     "relative_body_pos_error_term_factory",
     "anchor_height_error_term_factory",
     "fall_termination_factory",
+    "intermimic_human_error_term_factory",
+    "intermimic_root_height_term_factory",
+    "intermimic_object_error_term_factory",
+    "intermimic_interaction_error_term_factory",
+    "intermimic_contact_loss_term_factory",
     # Evaluation metric factories
     "anchor_height_error_metric_factory",
     "gt_error_factory",
@@ -1672,4 +2106,8 @@ __all__ = [
     "relative_body_pos_metric_factory",
     "path_distance_error_factory",
     "steering_velocity_error_factory",
+    "intermimic_human_error_factory",
+    "intermimic_object_error_factory",
+    "intermimic_interaction_error_factory",
+    "intermimic_object_contact_error_factory",
 ]

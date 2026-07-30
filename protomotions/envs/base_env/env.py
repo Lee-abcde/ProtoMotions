@@ -789,6 +789,7 @@ class BaseEnv:
 
         self.compute_observations(context=self._current_context)
         self.compute_reward(context=self._current_context)
+        self.control_manager.post_reward(self.rew_buf)
         self.reset_buf[:], self.terminate_buf[:] = self.check_resets_and_terminations(
             context=self._current_context
         )
@@ -984,6 +985,14 @@ class BaseEnv:
         if self.scene_lib.num_objects_per_scene <= 0 or not has_object_pointclouds:
             object_pos = torch.zeros(self.num_envs, 0, 3, device=self.device)
             object_rot = torch.zeros(self.num_envs, 0, 4, device=self.device)
+            object_vel = torch.zeros(self.num_envs, 0, 3, device=self.device)
+            object_ang_vel = torch.zeros(self.num_envs, 0, 3, device=self.device)
+            object_contacts = torch.zeros(
+                self.num_envs, 0, dtype=torch.bool, device=self.device
+            )
+            object_contact_forces = torch.zeros(
+                self.num_envs, 0, 0, 3, device=self.device
+            )
             neutral_pointclouds = torch.zeros(
                 self.num_envs, 0, 0, 3, device=self.device
             )
@@ -993,15 +1002,28 @@ class BaseEnv:
             return SceneSurfaceContext(
                 object_pos=object_pos,
                 object_rot=object_rot,
+                object_vel=object_vel,
+                object_ang_vel=object_ang_vel,
+                object_contacts=object_contacts,
+                object_contact_forces=object_contact_forces,
                 neutral_pointclouds=neutral_pointclouds,
                 object_valid_mask=object_valid_mask,
             )
 
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         object_state = self.simulator.get_object_root_state()
+        object_contact_forces = self.simulator.get_object_contact_buf()
+        object_contacts = torch.any(
+            torch.abs(object_contact_forces) > 0.1,
+            dim=tuple(range(2, object_contact_forces.dim())),
+        )
         return SceneSurfaceContext(
             object_pos=object_state.root_pos,
             object_rot=object_state.root_rot,
+            object_vel=object_state.root_vel,
+            object_ang_vel=object_state.root_ang_vel,
+            object_contacts=object_contacts,
+            object_contact_forces=object_contact_forces,
             neutral_pointclouds=self.scene_lib.get_scene_neutral_pointcloud(env_ids),
             object_valid_mask=self.scene_lib.get_per_object_valid_mask(env_ids),
         )
@@ -1092,8 +1114,18 @@ class BaseEnv:
         ref_state = self.motion_lib.get_motion_state(motion_ids, motion_times)
         new_states = ResetState.from_robot_state(ref_state)
 
+        scene_pose_kwargs = {}
+        if getattr(
+            self.config.motion_manager,
+            "sample_motions_by_object_type",
+            False,
+        ):
+            scene_pose_kwargs["motion_ids"] = motion_ids
         new_object_states = self.scene_lib.get_scene_pose(
-            env_ids, motion_times, respawn_offset=self.config.ref_object_respawn_offset
+            env_ids,
+            motion_times,
+            respawn_offset=self.config.ref_object_respawn_offset,
+            **scene_pose_kwargs,
         )
 
         self.update_respawn_root_offset_by_env_ids(
@@ -1145,6 +1177,10 @@ class BaseEnv:
             env_ids = torch.tensor(env_ids, device=self.device, dtype=torch.long)
         env_ids = env_ids.to(self.device)
 
+        # Stateful controls such as InterMimic PSI need the outgoing simulator
+        # trajectory before motion IDs and physical states are replaced.
+        self.control_manager.before_reset(env_ids)
+
         # Start with default reset for all envs
         new_states, new_object_states = self.compute_default_reset_state(
             env_ids, sample_flat
@@ -1160,6 +1196,15 @@ class BaseEnv:
         if len(ref_env_ids) > 0:
             ref_states, ref_object_states = self.compute_ref_reset_state(
                 ref_env_ids, motion_ids, motion_times, sample_flat
+            )
+            ref_states, ref_object_states = (
+                self.control_manager.modify_ref_reset_state(
+                    ref_env_ids,
+                    motion_ids,
+                    motion_times,
+                    ref_states,
+                    ref_object_states,
+                )
             )
 
             ref_indices = torch.isin(env_ids, ref_env_ids).nonzero(as_tuple=True)[0]
@@ -1405,14 +1450,31 @@ class BaseEnv:
         MotionManagerClass = get_class(self.config.motion_manager._target_)
 
         fixed_motion_ids = None
+        motion_sampling_mask = None
         if self.scene_lib.num_scenes() > 0:
-            humanoid_motion_ids = self.scene_lib.get_humanoid_motion_ids()
-            if humanoid_motion_ids is not None:
-                fixed_motion_ids = torch.tensor(
-                    humanoid_motion_ids, dtype=torch.long, device=self.device
+            sample_by_object_type = bool(
+                getattr(
+                    self.config.motion_manager,
+                    "sample_motions_by_object_type",
+                    False,
                 )
+            )
+            if sample_by_object_type:
+                motion_sampling_mask = (
+                    self.scene_lib.build_env_motion_compatibility(
+                        self.motion_lib.num_motions()
+                    )
+                )
+            else:
+                humanoid_motion_ids = self.scene_lib.get_humanoid_motion_ids()
+                if humanoid_motion_ids is not None:
+                    fixed_motion_ids = torch.tensor(
+                        humanoid_motion_ids,
+                        dtype=torch.long,
+                        device=self.device,
+                    )
 
-        self.motion_manager = MotionManagerClass(
+        manager_kwargs = dict(
             config=self.config.motion_manager,
             num_envs=self.num_envs,
             env_dt=self.dt,
@@ -1420,6 +1482,19 @@ class BaseEnv:
             motion_lib=self.motion_lib,
             fixed_motion_ids_per_env=fixed_motion_ids,
         )
+        if motion_sampling_mask is not None:
+            manager_kwargs["motion_sampling_mask_per_env"] = (
+                motion_sampling_mask
+            )
+        self.motion_manager = MotionManagerClass(**manager_kwargs)
+        if motion_sampling_mask is not None:
+            # BaseEnv materializes its first observation before the first
+            # episode reset.  Seed every environment with a compatible motion
+            # now so object-reference lookup is valid during that observation.
+            all_env_ids = torch.arange(
+                self.num_envs, dtype=torch.long, device=self.device
+            )
+            self.motion_manager.sample_motions(all_env_ids)
 
     def create_visualization_markers(self, headless: bool):
         """Create visualization markers based on headless flag.
@@ -1457,9 +1532,13 @@ class BaseEnv:
         Returns:
             Dictionary containing motion manager state
         """
+        state_dict = {}
         if self.motion_manager is not None:
-            return {"motion_manager": self.motion_manager.get_state_dict()}
-        return {}
+            state_dict["motion_manager"] = self.motion_manager.get_state_dict()
+        control_state = self.control_manager.get_state_dict()
+        if control_state:
+            state_dict["control_manager"] = control_state
+        return state_dict
 
     def load_state_dict(self, state_dict):
         """Load environment state from checkpoint.
@@ -1469,6 +1548,8 @@ class BaseEnv:
         """
         if self.motion_manager is not None:
             self.motion_manager.load_state_dict(state_dict["motion_manager"])
+        if "control_manager" in state_dict:
+            self.control_manager.load_state_dict(state_dict["control_manager"])
 
     def get_task_id(self):
         """Get task identifier for logging and checkpointing.

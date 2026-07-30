@@ -92,10 +92,23 @@ class KinematicReplayControl(ControlComponent):
         ref_reset_state = ResetState.from_robot_state(ref_state)
 
         # Get object state
+        scene_pose_kwargs = {}
+        motion_manager_config = getattr(
+            self.env.config, "motion_manager", None
+        )
+        if getattr(
+            motion_manager_config,
+            "sample_motions_by_object_type",
+            False,
+        ):
+            scene_pose_kwargs["motion_ids"] = (
+                self.env.motion_manager.motion_ids[env_ids]
+            )
         ref_object_state = self.env.scene_lib.get_scene_pose(
             env_ids,
             self.env.motion_manager.motion_times[env_ids],
             self.env.config.ref_object_respawn_offset,
+            **scene_pose_kwargs,
         )
         ref_object_state.root_vel = torch.zeros_like(ref_object_state.root_pos)
         ref_object_state.root_ang_vel = torch.zeros_like(ref_object_state.root_pos)

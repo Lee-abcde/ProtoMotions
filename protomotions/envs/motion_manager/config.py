@@ -73,3 +73,13 @@ class MimicMotionManagerConfig(MotionManagerConfig):
         default=1.0,
         metadata={"help": "Playback speed multiplier for reference motion time."}
     )
+
+    sample_motions_by_object_type: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Keep each environment's object asset fixed and resample only "
+                "motions associated with the same object type."
+            )
+        },
+    )

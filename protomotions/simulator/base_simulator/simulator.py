@@ -1100,27 +1100,47 @@ class Simulator(RecordingMixin, ABC):
         return simulator_bodies_contact_forces
 
     def get_binary_body_contacts(
-        self, env_ids: Optional[torch.Tensor] = None, threshold: float = 0.01
+        self,
+        env_ids: Optional[torch.Tensor] = None,
+        threshold: Optional[float] = None,
+        mode: Optional[str] = None,
     ) -> RobotState:
         """
         Get binary contact flags for specified bodies.
 
-        Converts contact forces to binary contact indicators based on force magnitude.
+        Converts contact forces to binary contact indicators using the configured
+        threshold and reduction mode.
         This is the canonical method for computing contact states from simulator forces.
 
         Args:
             body_ids: Indices of bodies to get contacts for [num_bodies]
-            threshold: Force magnitude threshold in Newtons (default: 0.01)
+            threshold: Optional force threshold override in Newtons.
+            mode: Optional reduction override ("magnitude" or "componentwise").
             env_ids: Optional environment indices to query
 
         Returns:
             Binary contact flags [num_envs, num_bodies] as float (0.0 or 1.0)
         """
         contact_state = self.get_bodies_contact_buf(env_ids)
-        force_magnitudes = torch.norm(
-            contact_state.rigid_body_contact_forces, dim=-1
-        )  # [num_envs, num_bodies]
-        binary_contacts = (force_magnitudes > threshold).float()
+        if threshold is None:
+            threshold = self.config.binary_contact_threshold
+        if mode is None:
+            mode = self.config.binary_contact_mode
+
+        contact_forces = contact_state.rigid_body_contact_forces
+        if mode == "componentwise":
+            binary_contacts = torch.any(
+                torch.abs(contact_forces) > threshold, dim=-1
+            ).float()
+        elif mode == "magnitude":
+            binary_contacts = (
+                torch.norm(contact_forces, dim=-1) > threshold
+            ).float()
+        else:
+            raise ValueError(
+                "Binary contact mode must be 'magnitude' or 'componentwise', "
+                f"got {mode!r}"
+            )
         contact_state.rigid_body_contacts = binary_contacts
 
         contact_state = contact_state.convert_to_common(self.data_conversion)

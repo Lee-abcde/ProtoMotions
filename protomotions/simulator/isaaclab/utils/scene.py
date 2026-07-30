@@ -68,11 +68,18 @@ class SceneCfg(InteractiveSceneCfg):
         if scene_cfgs is not None:
             num_objects_per_scene = len(scene_cfgs)
             for obj_idx, obj_configs in enumerate(scene_cfgs):
-                spawn_cfg = sim_utils.MultiAssetSpawnerCfg(
-                    activate_contact_sensors=activate_contact_sensors,
-                    assets_cfg=obj_configs,
-                    random_choice=False,
-                )
+                if len(obj_configs) == 1:
+                    spawn_cfg = obj_configs[0]
+                    if hasattr(spawn_cfg, "activate_contact_sensors"):
+                        spawn_cfg.activate_contact_sensors = (
+                            activate_contact_sensors
+                        )
+                else:
+                    spawn_cfg = sim_utils.MultiAssetSpawnerCfg(
+                        activate_contact_sensors=activate_contact_sensors,
+                        assets_cfg=obj_configs,
+                        random_choice=False,
+                    )
                 # Rigid Object
                 object = RigidObjectCfg(
                     prim_path=f"/World/envs/env_.*/Object_{obj_idx}",

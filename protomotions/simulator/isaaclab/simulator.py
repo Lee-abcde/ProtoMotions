@@ -177,8 +177,10 @@ class IsaacLabSimulator(Simulator):
             scene_cfgs=scene_cfgs,
             terrain=self.terrain,
             projectile_config=self._proj_config,
-            replicate_physics=scene_cfgs
-            is None,  # When there are objects, disable physics replication
+            replicate_physics=(
+                scene_cfgs is None
+                or all(len(object_cfgs) == 1 for object_cfgs in scene_cfgs)
+            ),
         )
         return scene_cfg
 
@@ -207,7 +209,24 @@ class IsaacLabSimulator(Simulator):
         for _ in range(self.scene_lib.num_objects_per_scene):
             objects_cfgs.append([])
 
-        for env_id, scene in enumerate(self.scene_lib.scenes):
+        object_dr = (
+            self._domain_randomization.get("object_assets")
+            if self._domain_randomization is not None
+            else None
+        )
+        asset_scenes = (
+            self.scene_lib.scenes
+            if object_dr is not None
+            else self.scene_lib.get_object_asset_template_scenes()
+        )
+        if len(asset_scenes) != len(self.scene_lib.scenes):
+            log.info(
+                "Building %d object-type templates for %d environments",
+                len(asset_scenes),
+                self.num_envs,
+            )
+
+        for env_id, scene in enumerate(asset_scenes):
             for obj_idx, obj in enumerate(scene.objects):
                 object_options = self._get_object_options_for_randomized_asset(
                     obj, env_id=env_id
@@ -217,8 +236,12 @@ class IsaacLabSimulator(Simulator):
                     kinematic_enabled=object_options.fix_base_link,
                 )
                 collision_props = sim_utils.CollisionPropertiesCfg(
-                    contact_offset=0.002,
-                    rest_offset=0.0,
+                    contact_offset=(
+                        self.scene_lib.config.object_collision_contact_offset
+                    ),
+                    rest_offset=(
+                        self.scene_lib.config.object_collision_rest_offset
+                    ),
                 )
 
                 # Resolve color: use object option if set, else per-type default
@@ -805,7 +828,7 @@ class IsaacLabSimulator(Simulator):
     def _get_simulator_object_contact_buf(
         self,
         env_ids: Optional[torch.Tensor] = None,
-    ) -> ObjectState:
+    ) -> torch.Tensor:
         """
         Retrieve the contact buffer for simulation objects.
 
@@ -818,9 +841,10 @@ class IsaacLabSimulator(Simulator):
         if self.scene_lib.num_scenes() > 0:
             object_forces = []
             for obj_idx in range(self.scene_lib.num_objects_per_scene):
-                if self._object_contact_sensor[obj_idx] is not None:
+                contact_sensor = self._object_contact_sensor[obj_idx]
+                if contact_sensor is not None:
                     object_forces.append(
-                        self._object_contact_sensor[obj_idx].data.force_matrix_w.clone()
+                        contact_sensor.data.net_forces_w.clone().unsqueeze(2)
                     )
                 else:
                     object_forces.append(
@@ -833,9 +857,10 @@ class IsaacLabSimulator(Simulator):
                             dtype=torch.float,
                         )
                     )
+            object_forces = torch.cat(object_forces, dim=1)
             if env_ids is not None:
                 object_forces = object_forces[env_ids]
-            return torch.cat(object_forces, dim=1)
+            return object_forces
         else:
             return_tensor = torch.zeros(
                 self.num_envs, 1, 1, 3, device=self.device, dtype=torch.float

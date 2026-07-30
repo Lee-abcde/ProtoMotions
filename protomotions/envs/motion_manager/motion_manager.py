@@ -48,7 +48,7 @@ import numpy as np
 from omegaconf.listconfig import ListConfig
 from protomotions.components.motion_lib import MotionLib
 from protomotions.envs.motion_manager.config import MotionManagerConfig
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 
 class MotionManager:
@@ -74,6 +74,7 @@ class MotionManager:
         device: torch.device,
         motion_lib: MotionLib,
         fixed_motion_ids_per_env: Optional[torch.Tensor] = None,
+        motion_sampling_mask_per_env: Optional[torch.Tensor] = None,
     ):
         self.config = config
         self.num_envs = num_envs
@@ -85,6 +86,9 @@ class MotionManager:
             self.num_envs, dtype=torch.long, device=self.device
         )
         self.motion_times = torch.zeros(num_envs, device=device)
+        self._start_time_sampler: Optional[
+            Callable[[torch.Tensor], torch.Tensor]
+        ] = None
 
         # Sampling vectors
         self.init_start_probs = (
@@ -103,6 +107,7 @@ class MotionManager:
 
         # Handle fixed motion IDs for scene-motion correspondence
         self._setup_fixed_motion_ids(fixed_motion_ids_per_env)
+        self._setup_motion_sampling_mask(motion_sampling_mask_per_env)
 
     def _setup_motion_subset(self):
         """
@@ -221,6 +226,53 @@ class MotionManager:
             if num_fixed > 0:
                 print(f"Motion Manager: {num_fixed} environments have fixed motion IDs")
 
+    def _setup_motion_sampling_mask(
+        self, motion_sampling_mask_per_env: Optional[torch.Tensor]
+    ) -> None:
+        """Validate an optional per-environment motion compatibility mask."""
+        if (
+            motion_sampling_mask_per_env is not None
+            and self._fixed_motion_ids_per_env is not None
+        ):
+            raise ValueError(
+                "fixed_motion_ids_per_env and motion_sampling_mask_per_env "
+                "cannot be used together"
+            )
+
+        self.motion_sampling_mask_per_env = None
+        if motion_sampling_mask_per_env is None:
+            return
+
+        expected_shape = (self.num_envs, self.motion_lib.num_motions())
+        if motion_sampling_mask_per_env.shape != expected_shape:
+            raise ValueError(
+                "motion_sampling_mask_per_env must have shape "
+                f"{expected_shape}, got {tuple(motion_sampling_mask_per_env.shape)}"
+            )
+
+        mask = motion_sampling_mask_per_env.to(
+            device=self.device, dtype=torch.bool
+        )
+        missing_envs = torch.where(~mask.any(dim=1))[0]
+        if missing_envs.numel() > 0:
+            raise ValueError(
+                "Every environment needs at least one compatible motion; "
+                f"missing env IDs: {missing_envs[:16].tolist()}"
+            )
+
+        if self.available_motion_ids is not None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+            compatible = mask[env_ids, self.available_motion_ids]
+            if not compatible.all():
+                bad_envs = env_ids[~compatible][:16].tolist()
+                raise ValueError(
+                    "The configured deterministic motion subset is incompatible "
+                    f"with object types in env IDs {bad_envs}"
+                )
+
+        self.motion_sampling_mask_per_env = mask
+        print("Motion Manager: enabled per-environment object-compatible sampling")
+
     def get_unique_fixed_motions(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get unique fixed motion IDs and the first environment index for each.
 
@@ -333,6 +385,71 @@ class MotionManager:
         self._apply_motion_exclusions()
         return torch.multinomial(self.motion_weights, num_samples=n, replacement=True)
 
+    def _sample_compatible_motion_ids(
+        self, env_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Sample one weighted, object-compatible motion for every environment."""
+        if env_ids.numel() == 0:
+            return torch.empty(0, dtype=torch.long, device=self.device)
+        if self.motion_sampling_mask_per_env is None:
+            return self.sample_n_motion_ids(len(env_ids))
+
+        self._apply_motion_exclusions()
+        weights = (
+            self.motion_sampling_mask_per_env[env_ids]
+            * self.motion_weights.unsqueeze(0)
+        )
+        invalid_rows = torch.where(weights.sum(dim=1) <= 0)[0]
+        if invalid_rows.numel() > 0:
+            invalid_env_ids = env_ids[invalid_rows[:16]].tolist()
+            raise ValueError(
+                "No positive-weight compatible motions remain for env IDs "
+                f"{invalid_env_ids}"
+            )
+        return torch.multinomial(weights, num_samples=1).squeeze(1)
+
+    def build_compatible_eval_batches(self):
+        """Assign every motion exactly once to a compatible environment."""
+        if self.motion_sampling_mask_per_env is None:
+            return None
+
+        num_motions = self.motion_lib.num_motions()
+        remaining = torch.ones(
+            num_motions, dtype=torch.bool, device=self.device
+        )
+        batches = []
+        while remaining.any():
+            batch_env_ids = []
+            batch_motion_ids = []
+            for env_id in range(self.num_envs):
+                candidates = torch.where(
+                    self.motion_sampling_mask_per_env[env_id] & remaining
+                )[0]
+                if candidates.numel() == 0:
+                    continue
+                motion_id = int(candidates[0].item())
+                batch_env_ids.append(env_id)
+                batch_motion_ids.append(motion_id)
+                remaining[motion_id] = False
+
+            if not batch_motion_ids:
+                missing = torch.where(remaining)[0][:16].tolist()
+                raise ValueError(
+                    "Unable to assign compatible evaluation environments for "
+                    f"motion IDs {missing}"
+                )
+            batches.append(
+                (
+                    torch.tensor(
+                        batch_env_ids, dtype=torch.long, device=self.device
+                    ),
+                    torch.tensor(
+                        batch_motion_ids, dtype=torch.long, device=self.device
+                    ),
+                )
+            )
+        return batches
+
     def sample_time(
         self, motion_ids: torch.Tensor, truncate_time: Optional[float] = None
     ) -> torch.Tensor:
@@ -357,6 +474,13 @@ class MotionManager:
         motion_time = phase * max_time
 
         return motion_time
+
+    def set_start_time_sampler(
+        self,
+        sampler: Optional[Callable[[torch.Tensor], torch.Tensor]],
+    ) -> None:
+        """Set an optional task-specific motion start-time sampler."""
+        self._start_time_sampler = sampler
 
     def sample_motions(
         self, env_ids: torch.Tensor, new_motion_ids: Optional[torch.Tensor] = None
@@ -398,16 +522,38 @@ class MotionManager:
                 num_random = need_random.sum()
 
                 if num_random > 0:
-                    random_motion_ids = self.sample_n_motion_ids(num_random)
+                    random_motion_ids = self._sample_compatible_motion_ids(
+                        env_ids[need_random]
+                    )
                     new_motion_ids = new_motion_ids.clone().to(self.device)
                     new_motion_ids[need_random] = random_motion_ids
                 else:
                     new_motion_ids = new_motion_ids.to(self.device)
             else:
                 # Pure random sampling
-                new_motion_ids = self.sample_n_motion_ids(len(env_ids))
+                new_motion_ids = self._sample_compatible_motion_ids(env_ids)
 
-        new_times = self.sample_time(new_motion_ids, truncate_time=self.env_dt)
+        if self.motion_sampling_mask_per_env is not None:
+            compatible = self.motion_sampling_mask_per_env[
+                env_ids, new_motion_ids
+            ]
+            if not compatible.all():
+                bad_env_ids = env_ids[~compatible][:16].tolist()
+                raise ValueError(
+                    "Requested motion IDs are incompatible with object types "
+                    f"in env IDs {bad_env_ids}"
+                )
+
+        if self._start_time_sampler is None:
+            new_times = self.sample_time(
+                new_motion_ids, truncate_time=self.env_dt
+            )
+        else:
+            new_times = self._start_time_sampler(new_motion_ids)
+            if new_times.shape != new_motion_ids.shape:
+                raise ValueError(
+                    "Custom start-time sampler must preserve motion_ids shape"
+                )
 
         if self.config.init_start_prob > 0:
             init_start = torch.bernoulli(self.init_start_probs[: len(env_ids)])

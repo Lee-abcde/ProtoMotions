@@ -1046,6 +1046,7 @@ class ReplicationMethod(Enum):
     WEIGHTED = "weighted"
     RANDOM = "random"
     SEQUENTIAL = "sequential"
+    OBJECT_BALANCED = "object_balanced"
 
     @classmethod
     def from_str(cls, value: str) -> "ReplicationMethod":
@@ -1115,7 +1116,10 @@ class SceneLibConfig:
     replicate_method: ReplicationMethod = field(
         default=ReplicationMethod.WEIGHTED,
         metadata={
-            "help": "Method for replicating scenes: 'first', 'weighted', 'random', 'sequential'."
+            "help": (
+                "Method for replicating scenes: 'first', 'weighted', 'random', "
+                "'sequential', or 'object_balanced'."
+            )
         },
     )
     pointcloud_samples_per_object: Optional[int] = field(
@@ -1127,6 +1131,18 @@ class SceneLibConfig:
     num_objects_per_env: int = field(
         default=None,
         metadata={"help": "Number of objects per environment. Must match scene data."},
+    )
+    object_collision_contact_offset: float = field(
+        default=0.002,
+        metadata={
+            "help": "IsaacLab contact offset applied to spawned scene objects."
+        },
+    )
+    object_collision_rest_offset: float = field(
+        default=0.0,
+        metadata={
+            "help": "IsaacLab rest offset applied to spawned scene objects."
+        },
     )
     mesh_collision_approximation: Optional[str] = field(
         default=None,
@@ -1409,6 +1425,13 @@ class SceneLib:
             0, 0, dtype=torch.bool, device=self.device
         )
         self._object_class_ids = torch.empty(0, 0, dtype=torch.long, device=self.device)
+        self._object_type_signatures = []
+        self._original_scene_object_type_ids = torch.empty(
+            0, dtype=torch.long, device=self.device
+        )
+        self._env_object_type_ids = torch.empty(
+            0, dtype=torch.long, device=self.device
+        )
 
     @classmethod
     def empty(cls, num_envs: int, device: str, terrain=None):
@@ -1503,6 +1526,158 @@ class SceneLib:
                 mapping[mid] = scene_idx
         return mapping
 
+    @staticmethod
+    def _freeze_asset_value(value):
+        """Convert nested asset configuration values into a hashable signature."""
+        if isinstance(value, dict):
+            return tuple(
+                (key, SceneLib._freeze_asset_value(item))
+                for key, item in sorted(value.items())
+            )
+        if isinstance(value, (list, tuple)):
+            return tuple(SceneLib._freeze_asset_value(item) for item in value)
+        return value
+
+    @classmethod
+    def _object_asset_signature(cls, obj: SceneObject) -> Tuple:
+        """Return the spawn-time identity of one scene object."""
+        geometry = ()
+        if isinstance(obj, MeshSceneObject):
+            geometry = ("mesh", obj.object_path, tuple(obj.scale))
+        elif isinstance(obj, BoxSceneObject):
+            geometry = ("box", obj.width, obj.depth, obj.height)
+        elif isinstance(obj, SphereSceneObject):
+            geometry = ("sphere", obj.radius)
+        elif isinstance(obj, CylinderSceneObject):
+            geometry = ("cylinder", obj.radius, obj.height)
+        else:
+            geometry = (type(obj).__name__, obj.object_identifier)
+
+        return (
+            geometry,
+            cls._freeze_asset_value(obj.options.to_dict()),
+        )
+
+    @classmethod
+    def _scene_object_type_signature(cls, scene: Scene) -> Tuple:
+        """Return an ordered signature for all physical assets in a scene."""
+        return tuple(cls._object_asset_signature(obj) for obj in scene.objects)
+
+    def _build_object_type_metadata(self) -> None:
+        """Cache object-type IDs for original scenes and assigned environments."""
+        if not self._original_scenes:
+            self._object_type_signatures = []
+            self._original_scene_object_type_ids = torch.empty(
+                0, dtype=torch.long, device=self.device
+            )
+            self._env_object_type_ids = torch.empty(
+                0, dtype=torch.long, device=self.device
+            )
+            return
+
+        original_signatures = [
+            self._scene_object_type_signature(scene)
+            for scene in self._original_scenes
+        ]
+        self._object_type_signatures = sorted(
+            set(original_signatures), key=repr
+        )
+        signature_to_id = {
+            signature: type_id
+            for type_id, signature in enumerate(self._object_type_signatures)
+        }
+        self._original_scene_object_type_ids = torch.tensor(
+            [signature_to_id[signature] for signature in original_signatures],
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._env_object_type_ids = self._original_scene_object_type_ids[
+            self._scene_to_original_scene_id
+        ]
+
+    def build_env_motion_compatibility(self, num_motions: int) -> torch.Tensor:
+        """Return ``[num_envs, num_motions]`` object-asset compatibility."""
+        if self.num_scenes() == 0:
+            raise ValueError(
+                "Object-compatible motion sampling requires a non-empty SceneLib."
+            )
+
+        motion_to_scene = self.build_motion_to_original_scene_map(num_motions)
+        missing = torch.where(motion_to_scene < 0)[0]
+        if missing.numel() > 0:
+            preview = missing[:16].tolist()
+            suffix = "..." if missing.numel() > 16 else ""
+            raise ValueError(
+                "Every motion must have an associated object scene for "
+                f"object-compatible sampling; missing motion IDs: {preview}{suffix}"
+            )
+
+        motion_type_ids = self._original_scene_object_type_ids[motion_to_scene]
+        compatibility = (
+            self._env_object_type_ids.unsqueeze(1)
+            == motion_type_ids.unsqueeze(0)
+        )
+        if not torch.all(compatibility.any(dim=1)):
+            raise ValueError("At least one environment has no compatible motion.")
+        unavailable_motions = torch.where(~compatibility.any(dim=0))[0]
+        if unavailable_motions.numel() > 0:
+            preview = unavailable_motions[:16].tolist()
+            suffix = "..." if unavailable_motions.numel() > 16 else ""
+            raise ValueError(
+                "No environment was assigned the object type required by "
+                f"motion IDs {preview}{suffix}. Increase --num-envs to at "
+                "least the number of object types."
+            )
+        return compatibility
+
+    def get_object_asset_template_scenes(self) -> List[Scene]:
+        """Return one cyclic spawn template per object type when possible.
+
+        IsaacLab's ``MultiAssetSpawnerCfg`` selects asset ``env_id % N``.  The
+        OBJECT_BALANCED assignment below deliberately follows that same cycle.
+        Other replication modes keep the conservative one-template-per-env path.
+        """
+        if (
+            self.config.replicate_method != ReplicationMethod.OBJECT_BALANCED
+            or not self.scenes
+        ):
+            return self.scenes
+
+        num_types = len(self._object_type_signatures)
+        expected = torch.arange(
+            self.num_envs, device=self.device, dtype=torch.long
+        ) % num_types
+        if not torch.equal(self._env_object_type_ids, expected):
+            return self.scenes
+        return self.scenes[:num_types]
+
+    def _assign_object_balanced_scenes(
+        self, scenes: List[Scene]
+    ) -> Tuple[List[Scene], List[int]]:
+        """Assign a fixed object type to each env and balance clips per type."""
+        groups: Dict[Tuple, List[int]] = {}
+        for scene_idx, scene in enumerate(scenes):
+            signature = self._scene_object_type_signature(scene)
+            groups.setdefault(signature, []).append(scene_idx)
+
+        group_keys = sorted(groups, key=repr)
+        assigned_scenes: List[Scene] = []
+        original_ids: List[int] = []
+        for env_id in range(self.num_envs):
+            type_id = env_id % len(group_keys)
+            candidates = groups[group_keys[type_id]]
+            within_type_idx = (env_id // len(group_keys)) % len(candidates)
+            original_id = candidates[within_type_idx]
+            assigned_scenes.append(copy.deepcopy(scenes[original_id]))
+            original_ids.append(original_id)
+
+        logger.info(
+            "Assigned %d environments across %d object types",
+            self.num_envs,
+            len(group_keys),
+        )
+        return assigned_scenes, original_ids
+
     def _create_scenes(
         self, scenes: List[Scene], scene_weights: Optional[List[float]] = None
     ):
@@ -1521,25 +1696,32 @@ class SceneLib:
         self.pointcloud_samples_per_object = self.config.pointcloud_samples_per_object
         self._scene_offsets = []
 
-        assigned_scenes = scenes
-        scene_to_original_ids = list(range(len(scenes)))  # Initially 1:1 mapping
-
-        if len(assigned_scenes) > self.num_envs:
-            assigned_scenes, scene_weights, scene_to_original_ids = self._subset_scenes(
-                assigned_scenes,
-                scene_weights,
-                self.config.subset_method,
-                scene_to_original_ids,
+        if self.config.replicate_method == ReplicationMethod.OBJECT_BALANCED:
+            assigned_scenes, scene_to_original_ids = (
+                self._assign_object_balanced_scenes(scenes)
             )
+        else:
+            assigned_scenes = scenes
+            scene_to_original_ids = list(range(len(scenes)))  # Initially 1:1 mapping
 
-        # Replicate scenes if needed and track original scene IDs
-        if len(assigned_scenes) < self.num_envs:
-            assigned_scenes, scene_to_original_ids = self._replicate_scenes(
-                assigned_scenes,
-                scene_weights,
-                self.config.replicate_method,
-                scene_to_original_ids,
-            )
+            if len(assigned_scenes) > self.num_envs:
+                assigned_scenes, scene_weights, scene_to_original_ids = (
+                    self._subset_scenes(
+                        assigned_scenes,
+                        scene_weights,
+                        self.config.subset_method,
+                        scene_to_original_ids,
+                    )
+                )
+
+            # Replicate scenes if needed and track original scene IDs
+            if len(assigned_scenes) < self.num_envs:
+                assigned_scenes, scene_to_original_ids = self._replicate_scenes(
+                    assigned_scenes,
+                    scene_weights,
+                    self.config.replicate_method,
+                    scene_to_original_ids,
+                )
 
         # Assign scene offsets (with or without terrain validation)
         self._assign_scene_offsets(assigned_scenes, self.terrain)
@@ -1553,6 +1735,7 @@ class SceneLib:
         self._build_static_object_mask()
 
         self.scenes = assigned_scenes
+        self._build_object_type_metadata()
 
         # Combine from original scenes only (like MotionLib)
         if self.pointcloud_samples_per_object is not None:
@@ -1806,6 +1989,30 @@ class SceneLib:
                 scene = copy.deepcopy(replicated_scenes[idx])
                 replicated_scenes.append(scene)
                 replicated_ids.append(replicated_ids[idx])  # Track original ID
+        elif replicate_method == ReplicationMethod.OBJECT_BALANCED:
+            groups: Dict[Tuple[str, ...], List[int]] = {}
+            for idx, scene in enumerate(scenes):
+                object_key = tuple(
+                    sorted(obj.object_identifier for obj in scene.objects)
+                )
+                groups.setdefault(object_key, []).append(idx)
+
+            group_keys = sorted(groups)
+            group_counts = {
+                key: len(groups[key])
+                for key in group_keys
+            }
+            for _ in range(self.num_envs - num_scenes):
+                min_count = min(group_counts.values())
+                candidate_keys = [
+                    key for key in group_keys if group_counts[key] == min_count
+                ]
+                key = random.choice(candidate_keys)
+                idx = random.choice(groups[key])
+                scene = copy.deepcopy(scenes[idx])
+                replicated_scenes.append(scene)
+                replicated_ids.append(scene_to_original_ids[idx])
+                group_counts[key] += 1
         elif replicate_method in [ReplicationMethod.RANDOM, ReplicationMethod.WEIGHTED]:
             if replicate_method == ReplicationMethod.RANDOM:
                 scene_weights = None
@@ -1819,7 +2026,8 @@ class SceneLib:
             raise ValueError(
                 "Replicate method must be one of ReplicationMethod.FIRST, "
                 "ReplicationMethod.SEQUENTIAL, ReplicationMethod.RANDOM, or "
-                "ReplicationMethod.WEIGHTED."
+                "ReplicationMethod.WEIGHTED, or "
+                "ReplicationMethod.OBJECT_BALANCED."
             )
 
         return replicated_scenes, replicated_ids
@@ -2207,6 +2415,7 @@ class SceneLib:
         scene_indices: torch.Tensor,
         time: torch.Tensor,
         respawn_offset: float = 0.0,
+        motion_ids: Optional[torch.Tensor] = None,
     ) -> ObjectState:
         """
         Get the interpolated poses for all objects in the specified scenes at given times.
@@ -2215,6 +2424,8 @@ class SceneLib:
             scene_indices (torch.Tensor): 1D tensor of scene indices (can be replicated scenes).
             time (torch.Tensor): 1D tensor of times at which to interpolate poses, should match length of scene_indices.
             respawn_offset (float): Z-offset to apply to non-static objects.
+            motion_ids: Optional motion IDs selecting the object trajectory.  The
+                selected motion must use the same object type as its environment.
 
         Returns:
             ObjectState: An ObjectState with tensors of shape:
@@ -2242,8 +2453,42 @@ class SceneLib:
         num_scenes = scene_indices.shape[0]
         objects_per_scene = self.num_objects_per_scene
 
-        # Map scene indices to original scene indices
-        original_scene_indices = self._scene_to_original_scene_id[scene_indices]
+        # Normally scene_indices select both the physical asset and trajectory.
+        # InterMimic keeps the asset fixed per env while resampling compatible
+        # clips, so motion_ids select the trajectory in that mode.
+        if motion_ids is None:
+            original_scene_indices = self._scene_to_original_scene_id[scene_indices]
+        else:
+            if motion_ids.shape != scene_indices.shape:
+                raise ValueError(
+                    "motion_ids must have the same shape as scene_indices, got "
+                    f"{tuple(motion_ids.shape)} and {tuple(scene_indices.shape)}"
+                )
+            if torch.any(motion_ids < 0):
+                raise ValueError("motion_ids must be non-negative")
+            max_motion_id = int(motion_ids.max().item()) if motion_ids.numel() else -1
+            motion_to_scene = self.build_motion_to_original_scene_map(
+                max_motion_id + 1
+            )
+            original_scene_indices = motion_to_scene[motion_ids]
+            if torch.any(original_scene_indices < 0):
+                missing_ids = torch.unique(
+                    motion_ids[original_scene_indices < 0]
+                ).tolist()
+                raise ValueError(
+                    f"No object trajectory is associated with motion IDs {missing_ids}"
+                )
+
+            env_type_ids = self._env_object_type_ids[scene_indices]
+            motion_type_ids = self._original_scene_object_type_ids[
+                original_scene_indices
+            ]
+            if not torch.equal(env_type_ids, motion_type_ids):
+                bad = torch.where(env_type_ids != motion_type_ids)[0][:16]
+                raise ValueError(
+                    "Motion/object type mismatch for batch entries "
+                    f"{bad.tolist()}"
+                )
 
         # Calculate object indices in the original (combined) data
         # Shape: [num_scenes, objects_per_scene]

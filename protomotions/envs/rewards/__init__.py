@@ -73,6 +73,13 @@ from protomotions.envs.rewards.regularization import (
     contact_mismatch_sum,
     impact_force_penalty,
 )
+from protomotions.envs.rewards.intermimic import (
+    compute_intermimic_human_reward,
+    compute_intermimic_object_reward,
+    compute_intermimic_interaction_reward,
+    compute_intermimic_contact_reward,
+    compute_intermimic_fingertip_bearing_reward,
+)
 
 __all__ = [
     # Typed context
@@ -122,4 +129,9 @@ __all__ = [
     "joint_limit_violation",
     "contact_mismatch_sum",
     "impact_force_penalty",
+    "compute_intermimic_human_reward",
+    "compute_intermimic_object_reward",
+    "compute_intermimic_interaction_reward",
+    "compute_intermimic_contact_reward",
+    "compute_intermimic_fingertip_bearing_reward",
 ]

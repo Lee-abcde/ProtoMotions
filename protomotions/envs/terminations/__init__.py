@@ -53,6 +53,17 @@ from protomotions.envs.terminations.task import (
     check_path_height_term,
     check_steering_velocity_error,
 )
+from protomotions.envs.terminations.intermimic import (
+    intermimic_human_error,
+    intermimic_human_error_term,
+    intermimic_root_height_term,
+    intermimic_object_point_error,
+    intermimic_object_point_error_term,
+    intermimic_interaction_error,
+    intermimic_interaction_error_term,
+    intermimic_contact_loss_term,
+    intermimic_object_contact_error,
+)
 
 __all__ = [
     # Typed context
@@ -87,4 +98,13 @@ __all__ = [
     "check_path_distance_term",
     "check_path_height_term",
     "check_steering_velocity_error",
+    "intermimic_human_error",
+    "intermimic_human_error_term",
+    "intermimic_root_height_term",
+    "intermimic_object_point_error",
+    "intermimic_object_point_error_term",
+    "intermimic_interaction_error",
+    "intermimic_interaction_error_term",
+    "intermimic_contact_loss_term",
+    "intermimic_object_contact_error",
 ]

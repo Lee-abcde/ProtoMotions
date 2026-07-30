@@ -562,6 +562,22 @@ class SimulatorConfig:
     experiment_name: str = field(
         default=None, metadata={"help": "Name for this experiment (used for logging)."}
     )
+    binary_contact_threshold: float = field(
+        default=0.01,
+        metadata={
+            "help": "Force threshold used to convert rigid-body contact forces to binary contacts.",
+            "min": 0.0,
+        },
+    )
+    binary_contact_mode: Literal["magnitude", "componentwise"] = field(
+        default="magnitude",
+        metadata={
+            "help": (
+                "Binary-contact reduction: compare the force-vector magnitude, "
+                "or require any absolute force component to exceed the threshold."
+            )
+        },
+    )
     camera: Optional[Any] = field(
         default=None, metadata={"help": "Camera configuration for rendering."}
     )

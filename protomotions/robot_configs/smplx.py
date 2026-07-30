@@ -176,7 +176,7 @@ class SMPLXRobotConfig(RobotConfig):
                     stiffness=300, damping=30, effort_limit=300, velocity_limit=100
                 ),
                 ".*_(Index|Middle|Pinky|Ring|Thumb)[123]_[xyz]": ControlInfo(
-                    stiffness=10, damping=1, effort_limit=10, velocity_limit=5
+                    stiffness=100, damping=10, effort_limit=10, velocity_limit=5
                 ),
             },
         )
