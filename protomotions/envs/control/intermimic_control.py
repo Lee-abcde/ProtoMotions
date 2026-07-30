@@ -34,8 +34,7 @@ class InterMimicControlConfig(MimicControlConfig):
     physical_buffer_size: int = 1
     physical_buffer_margin_steps: int = 10
     physical_buffer_min_episode_steps: int = 30
-    physical_buffer_reward_discount: float = 0.99
-    physical_buffer_min_return: float = 0.03
+    physical_buffer_min_success_fraction: float = 0.5
     physical_buffer_update_probability: float = 0.005
     physical_buffer_decay: float = 1e-5
 
@@ -44,9 +43,9 @@ class InterMimicControlConfig(MimicControlConfig):
             self.future_steps = [1, 16]
         if self.physical_buffer_size < 1:
             raise ValueError("physical_buffer_size must be at least 1")
-        if not 0.0 < self.physical_buffer_reward_discount <= 1.0:
+        if not 0.0 <= self.physical_buffer_min_success_fraction <= 1.0:
             raise ValueError(
-                "physical_buffer_reward_discount must be in (0, 1]"
+                "physical_buffer_min_success_fraction must be in [0, 1]"
             )
         if not 0.0 <= self.physical_buffer_update_probability <= 1.0:
             raise ValueError(
@@ -175,53 +174,26 @@ class _PhysicalStateBuffer:
         self.states.copy_(states.to(self.states.device))
 
 
-def _discounted_reward_scores(
-    rewards: Tensor,
+def _survival_fraction_scores(
     recorded_steps: Tensor,
-    target_steps: int | Tensor,
-    discount: float,
+    target_steps: Tensor,
+    num_steps: int,
 ) -> Tensor:
-    """Return normalized discounted reward-to-go for each rollout horizon."""
-    num_steps = rewards.shape[1]
-    if isinstance(target_steps, Tensor):
-        if target_steps.shape != recorded_steps.shape:
-            raise ValueError(
-                "target_steps must have the same shape as recorded_steps"
-            )
-        if torch.any((target_steps < 1) | (target_steps > num_steps)):
-            raise ValueError(
-                "target_steps must be in [1, rewards.shape[1]]"
-            )
-    elif not 0 < target_steps <= num_steps:
-        raise ValueError("target_steps must be in [1, rewards.shape[1]]")
+    """Return the remaining rollout fraction survived from each state."""
+    if recorded_steps.shape != target_steps.shape:
+        raise ValueError(
+            "recorded_steps and target_steps must have the same shape"
+        )
     step_ids = torch.arange(
-        num_steps, dtype=torch.long, device=rewards.device
+        num_steps,
+        dtype=torch.long,
+        device=recorded_steps.device,
     ).unsqueeze(0)
-    recorded = step_ids < recorded_steps.unsqueeze(1)
-    if isinstance(target_steps, Tensor):
-        target = step_ids < target_steps.unsqueeze(1)
-    else:
-        target = step_ids < target_steps
-    valid_steps = recorded & target
-    discount_powers = torch.pow(
-        rewards.new_tensor(discount),
-        step_ids,
-    )
-    weighted_rewards = rewards * discount_powers * valid_steps
-    weighted_counts = discount_powers * target
-    discounted_returns = torch.flip(
-        torch.cumsum(torch.flip(weighted_rewards, dims=(1,)), dim=1),
-        dims=(1,),
-    )
-    discounted_counts = torch.flip(
-        torch.cumsum(torch.flip(weighted_counts, dims=(1,)), dim=1),
-        dims=(1,),
-    )
-    return torch.where(
-        valid_steps,
-        discounted_returns / discounted_counts.clamp_min(1e-8),
-        torch.zeros_like(discounted_returns),
-    )
+    remaining_recorded = (recorded_steps.unsqueeze(1) - step_ids).clamp_min(0)
+    remaining_target = (target_steps.unsqueeze(1) - step_ids).clamp_min(1)
+    scores = remaining_recorded.float() / remaining_target.float()
+    valid = step_ids < target_steps.unsqueeze(1)
+    return torch.where(valid, scores.clamp_max(1.0), torch.zeros_like(scores))
 
 
 class InterMimicControl(MimicControl):
@@ -253,7 +225,6 @@ class InterMimicControl(MimicControl):
         self._physical_state_buffer: Optional[_PhysicalStateBuffer] = None
         self._episode_physical_states: Optional[Tensor] = None
         self._episode_motion_frames: Optional[Tensor] = None
-        self._episode_rewards: Optional[Tensor] = None
         self._episode_recorded_steps: Optional[Tensor] = None
         self._episode_target_steps: Optional[Tensor] = None
         self._episode_psi_eligible: Optional[Tensor] = None
@@ -285,11 +256,6 @@ class InterMimicControl(MimicControl):
                 history_shape[:2],
                 -1,
                 dtype=torch.long,
-                device=env.device,
-            )
-            self._episode_rewards = torch.zeros(
-                history_shape[:2],
-                dtype=torch.float,
                 device=env.device,
             )
             self._episode_recorded_steps = torch.zeros(
@@ -397,25 +363,8 @@ class InterMimicControl(MimicControl):
 
         self._record_physical_states(robot_state, object_state)
 
-    def post_reward(self, rewards: Tensor) -> None:
-        """Store each transition reward with its preceding saved state."""
-        if (
-            self._physical_state_buffer is None
-            or getattr(self, "_evaluation_runtime_state", None) is not None
-        ):
-            return
-        # step() has just stored s_{t+1}. The reward returned for the
-        # transition s_t -> s_{t+1} belongs to s_t's future return, so write
-        # it one state earlier. The first reward has no preceding saved state.
-        active = self._episode_recorded_steps > 1
-        if not torch.any(active):
-            return
-        env_ids = torch.where(active)[0]
-        reward_steps = self._episode_recorded_steps[env_ids] - 2
-        self._episode_rewards[env_ids, reward_steps] = rewards[env_ids]
-
     def before_reset(self, env_ids: Tensor) -> None:
-        """Promote high-return outgoing states into the PSI buffer."""
+        """Promote sufficiently long-lived outgoing states into the PSI buffer."""
         if getattr(self, "_evaluation_runtime_state", None) is not None:
             return
         self._last_physical_reset_mask[env_ids] = False
@@ -433,7 +382,6 @@ class InterMimicControl(MimicControl):
         if env_ids.numel() == 0:
             return
 
-        margin = self.config.physical_buffer_margin_steps
         min_steps = self.config.physical_buffer_min_episode_steps
         recorded = self._episode_recorded_steps[env_ids]
         step_ids = torch.arange(
@@ -441,20 +389,22 @@ class InterMimicControl(MimicControl):
             dtype=torch.long,
             device=self.env.device,
         ).unsqueeze(0)
-        scores = _discounted_reward_scores(
-            self._episode_rewards[env_ids],
+        scores = _survival_fraction_scores(
             recorded,
-            # N post-action states contain N - 1 future transitions when
-            # rewards are aligned with their preceding saved states.
-            self._episode_target_steps[env_ids] - 1,
-            self.config.physical_buffer_reward_discount,
+            self._episode_target_steps[env_ids],
+            self.env.max_episode_length,
         )
         frames = self._episode_motion_frames[env_ids]
         valid = (
-            (recorded > max(min_steps, 2 * margin)).unsqueeze(1)
-            & (step_ids >= margin)
-            & (step_ids < (recorded - margin).unsqueeze(1))
-            & (scores > self.config.physical_buffer_min_return)
+            (recorded > min_steps).unsqueeze(1)
+            # The first post-action state has no preceding simulated state
+            # from which to assess future survival.
+            & (step_ids > 0)
+            & (step_ids < recorded.unsqueeze(1))
+            & (
+                scores
+                > self.config.physical_buffer_min_success_fraction
+            )
             & (frames >= 0)
         )
         if torch.any(valid):
@@ -525,7 +475,6 @@ class InterMimicControl(MimicControl):
             return
         self._episode_recorded_steps[env_ids] = 0
         self._episode_motion_frames[env_ids] = -1
-        self._episode_rewards[env_ids] = 0.0
         speed_scale = float(
             getattr(
                 self.env.motion_manager,
