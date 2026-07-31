@@ -351,6 +351,13 @@ def configure_robot_and_simulator(
     args: argparse.Namespace,
 ):
     """Apply the InterMimic contact and PhysX profile."""
+    if simulator_cfg._target_ != (
+        "protomotions.simulator.isaaclab.simulator.IsaacLabSimulator"
+    ):
+        raise ValueError(
+            "InterMimic requires --simulator isaaclab because its contact "
+            "reward and IET use object-filtered force_matrix_w contacts"
+        )
     robot_cfg.update_fields(contact_bodies="all")
     simulator_cfg.binary_contact_threshold = 0.1
     simulator_cfg.binary_contact_mode = "componentwise"

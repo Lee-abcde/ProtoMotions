@@ -808,6 +808,14 @@ class IsaacLabSimulator(Simulator):
         rigid_body_contact_forces = torch.zeros(
             self.num_envs, num_bodies, 3, device=self.device
         )
+        num_objects = self.scene_lib.num_objects_per_scene
+        rigid_body_object_contact_forces = torch.zeros(
+            self.num_envs,
+            num_bodies,
+            num_objects,
+            3,
+            device=self.device,
+        )
 
         # Fill in contact forces for bodies that have sensors
         for body_idx, body_name in enumerate(sim_body_names):
@@ -817,11 +825,39 @@ class IsaacLabSimulator(Simulator):
                 rigid_body_contact_forces[:, body_idx, :] = (
                     contact_sensor.data.net_forces_w.clone()[:, 0, :]
                 )
+                # The body sensor filters ground first, followed by every
+                # scene object. Keep only the object columns so self-contact
+                # and ground contact cannot satisfy object-contact tracking.
+                if num_objects > 0:
+                    force_matrix_w = contact_sensor.data.force_matrix_w
+                    if force_matrix_w is None:
+                        raise RuntimeError(
+                            f"Contact sensor for {body_name!r} has no "
+                            "force_matrix_w; object filters are required"
+                        )
+                    object_forces = force_matrix_w[
+                        :, 0, 1 : 1 + num_objects, :
+                    ]
+                    if object_forces.shape[1] != num_objects:
+                        raise RuntimeError(
+                            f"Contact sensor for {body_name!r} reported "
+                            f"{object_forces.shape[1]} object filters, "
+                            f"expected {num_objects}"
+                        )
+                    rigid_body_object_contact_forces[:, body_idx] = (
+                        object_forces.clone()
+                    )
 
         if env_ids is not None:
             rigid_body_contact_forces = rigid_body_contact_forces[env_ids]
+            rigid_body_object_contact_forces = (
+                rigid_body_object_contact_forces[env_ids]
+            )
         return RobotState(
             rigid_body_contact_forces=rigid_body_contact_forces,
+            rigid_body_object_contact_forces=(
+                rigid_body_object_contact_forces
+            ),
             state_conversion=StateConversion.SIMULATOR,
         )
 

@@ -299,6 +299,12 @@ class RobotState(BaseBatchedState):
         rigid_body_contact_forces (Optional[torch.Tensor]): Contact forces of rigid bodies.
             (usually only obtained from simulator, not from reference motion data)
             Expected shape: [batch_size, num_bodies, 3].
+        rigid_body_object_contacts (Optional[torch.Tensor]): Per-body binary
+            contacts filtered to scene objects only. Ground and self-contact are
+            excluded. Expected shape: [batch_size, num_bodies].
+        rigid_body_object_contact_forces (Optional[torch.Tensor]): Per-body
+            contact forces against each scene object. Expected shape:
+            [batch_size, num_bodies, num_objects, 3].
 
         # redundant fields for caching
         local_rigid_body_rot (Optional[torch.Tensor]): Local rotations of rigid bodies.
@@ -316,6 +322,8 @@ class RobotState(BaseBatchedState):
     rigid_body_contact_labels: Optional[torch.Tensor] = None
     object_contact_labels: Optional[torch.Tensor] = None
     rigid_body_contact_forces: Optional[torch.Tensor] = None
+    rigid_body_object_contacts: Optional[torch.Tensor] = None
+    rigid_body_object_contact_forces: Optional[torch.Tensor] = None
 
     # redundant fields for caching
     local_rigid_body_rot: Optional[torch.Tensor] = None
@@ -444,6 +452,10 @@ class RobotState(BaseBatchedState):
         self._convert_helper(body_conv_map, "rigid_body_contacts")
         self._convert_helper(body_conv_map, "rigid_body_contact_labels")
         self._convert_helper(body_conv_map, "rigid_body_contact_forces")
+        self._convert_helper(body_conv_map, "rigid_body_object_contacts")
+        self._convert_helper(
+            body_conv_map, "rigid_body_object_contact_forces"
+        )
 
     def convert_to_common(self, conversion: DataConversionMapping) -> "RobotState":
         """

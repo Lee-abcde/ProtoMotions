@@ -61,6 +61,8 @@ class RobotStateView:
     rigid_body_ang_vel: Tensor = FieldPath()
     rigid_body_contacts: Tensor = FieldPath()
     rigid_body_contact_forces: Tensor = FieldPath()
+    rigid_body_object_contacts: Tensor = FieldPath()
+    rigid_body_object_contact_forces: Tensor = FieldPath()
     rigid_body_contact_labels: Tensor = FieldPath()
     object_contact_labels: Tensor = FieldPath()
     root_pos: Tensor = FieldPath()
@@ -98,6 +100,8 @@ class CurrentStateView:
     rigid_body_ang_vel: Tensor = FieldPath()
     rigid_body_contacts: Tensor = FieldPath()
     rigid_body_contact_forces: Tensor = FieldPath()
+    rigid_body_object_contacts: Tensor = FieldPath()
+    rigid_body_object_contact_forces: Tensor = FieldPath()
     dof_pos: Tensor = FieldPath()
     dof_vel: Tensor = FieldPath()
     dof_forces: Tensor = FieldPath()
@@ -135,6 +139,12 @@ class CurrentStateView:
         self.rigid_body_contacts = getattr(state, "rigid_body_contacts", None)
         self.rigid_body_contact_forces = getattr(
             state, "rigid_body_contact_forces", None
+        )
+        self.rigid_body_object_contacts = getattr(
+            state, "rigid_body_object_contacts", None
+        )
+        self.rigid_body_object_contact_forces = getattr(
+            state, "rigid_body_object_contact_forces", None
         )
         self.dof_pos = state.dof_pos
         self.dof_vel = state.dof_vel

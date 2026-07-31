@@ -1143,6 +1143,22 @@ class Simulator(RecordingMixin, ABC):
             )
         contact_state.rigid_body_contacts = binary_contacts
 
+        object_contact_forces = getattr(
+            contact_state, "rigid_body_object_contact_forces", None
+        )
+        if object_contact_forces is not None:
+            if mode == "componentwise":
+                object_contacts = torch.any(
+                    torch.abs(object_contact_forces) > threshold,
+                    dim=(-1, -2),
+                )
+            else:
+                object_contacts = torch.any(
+                    torch.norm(object_contact_forces, dim=-1) > threshold,
+                    dim=-1,
+                )
+            contact_state.rigid_body_object_contacts = object_contacts.float()
+
         contact_state = contact_state.convert_to_common(self.data_conversion)
         return contact_state
 

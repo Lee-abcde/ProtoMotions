@@ -217,7 +217,7 @@ def compute_intermimic_interaction_reward(
 
 
 def compute_intermimic_contact_reward(
-    body_contacts: Tensor,
+    body_object_contacts: Tensor,
     body_contact_forces: Tensor,
     ref_body_contact_labels: Tensor,
     left_hand_body_ids: Tensor,
@@ -228,30 +228,30 @@ def compute_intermimic_contact_reward(
     negative_weight: float,
     contact_energy_weight: float,
 ) -> Tensor:
-    """Three-state contact reward with hand-level promotion."""
-    contacts = body_contacts.float()
+    """Three-state body-object contact reward with hand-level promotion."""
+    object_contacts = body_object_contacts.float()
     labels = ref_body_contact_labels.float()
 
     left_reward = _hand_contact_reward(
-        contacts[:, left_hand_body_ids],
+        object_contacts[:, left_hand_body_ids],
         labels[:, left_hand_body_ids],
         hand_weight,
     )
     right_reward = _hand_contact_reward(
-        contacts[:, right_hand_body_ids],
+        object_contacts[:, right_hand_body_ids],
         labels[:, right_hand_body_ids],
         hand_weight,
     )
 
     other_labels = labels[:, other_body_ids]
-    other_contacts = contacts[:, other_body_ids]
+    other_contacts = object_contacts[:, other_body_ids]
     positive_cost = (
         torch.abs(other_contacts - other_labels) * (other_labels > 0).float()
     ).mean(dim=-1)
     positive_reward = torch.exp(-other_weight * positive_cost)
 
     negative_cost = (
-        contacts * (labels < 0).float()
+        object_contacts * (labels < 0).float()
     ).mean(dim=-1)
     negative_reward = torch.exp(-negative_weight * negative_cost)
 

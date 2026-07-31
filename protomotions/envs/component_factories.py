@@ -1649,7 +1649,9 @@ def intermimic_target_obs_factory(
             "body_rot": EnvContext.current.rigid_body_rot,
             "body_vel": EnvContext.current.rigid_body_vel,
             "body_ang_vel": EnvContext.current.rigid_body_ang_vel,
-            "body_contacts": EnvContext.current.rigid_body_contacts,
+            "body_object_contacts": (
+                EnvContext.current.rigid_body_object_contacts
+            ),
             "future_body_pos": EnvContext.mimic.future_pos,
             "future_body_rot": EnvContext.mimic.future_rot,
             "future_body_vel": EnvContext.mimic.future_vel,
@@ -1802,7 +1804,9 @@ def intermimic_contact_reward_factory(
     return MdpComponent(
         compute_func=compute_intermimic_contact_reward,
         dynamic_vars={
-            "body_contacts": EnvContext.current.rigid_body_contacts,
+            "body_object_contacts": (
+                EnvContext.current.rigid_body_object_contacts
+            ),
             "body_contact_forces": EnvContext.current.rigid_body_contact_forces,
             "ref_body_contact_labels": (
                 EnvContext.mimic.ref_state.rigid_body_contact_labels

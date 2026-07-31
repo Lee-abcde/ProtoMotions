@@ -349,7 +349,13 @@ class InterMimicControl(MimicControl):
             self.contact_loss_counter.zero_()
         else:
             robot_state = self.env.simulator.get_robot_state()
-            contacts = robot_state.rigid_body_contacts.bool()
+            contacts = robot_state.rigid_body_object_contacts
+            if contacts is None:
+                raise RuntimeError(
+                    "InterMimic required-hand-contact termination needs "
+                    "object-filtered contacts from force_matrix_w"
+                )
+            contacts = contacts.bool()
             hand_groups = (self.left_hand_body_ids, self.right_hand_body_ids)
             for hand_idx, body_ids in enumerate(hand_groups):
                 required = torch.any(labels[:, body_ids] > 0, dim=-1)

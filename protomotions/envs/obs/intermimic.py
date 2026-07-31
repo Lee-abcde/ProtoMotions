@@ -86,7 +86,7 @@ def compute_intermimic_target_observation(
     body_rot: Tensor,
     body_vel: Tensor,
     body_ang_vel: Tensor,
-    body_contacts: Tensor,
+    body_object_contacts: Tensor,
     future_body_pos: Tensor,
     future_body_rot: Tensor,
     future_body_vel: Tensor,
@@ -221,7 +221,7 @@ def compute_intermimic_target_observation(
 
     signed_contact_residual = future_body_contact_labels * (
         (future_body_contact_labels + 1.0) * 0.5
-        - body_contacts.float().unsqueeze(1)
+        - body_object_contacts.float().unsqueeze(1)
     )
     object_contact_residual = (
         future_object_contact_labels.squeeze(-1)
