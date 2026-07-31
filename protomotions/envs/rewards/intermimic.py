@@ -270,6 +270,7 @@ def compute_intermimic_contact_reward(
 
 def compute_intermimic_fingertip_bearing_reward(
     body_pos: Tensor,
+    body_rot: Tensor,
     object_pos: Tensor,
     object_rot: Tensor,
     neutral_pointclouds: Tensor,
@@ -278,6 +279,8 @@ def compute_intermimic_fingertip_bearing_reward(
     future_body_contact_labels: Tensor,
     left_fingertip_body_ids: Tensor,
     right_fingertip_body_ids: Tensor,
+    left_fingertip_local_offsets: Tensor,
+    right_fingertip_local_offsets: Tensor,
     left_hand_body_ids: Tensor,
     right_hand_body_ids: Tensor,
     max_hand_weight: float,
@@ -292,8 +295,19 @@ def compute_intermimic_fingertip_bearing_reward(
     all_fingertip_ids = torch.cat(
         (left_fingertip_body_ids, right_fingertip_body_ids)
     )
+    all_fingertip_local_offsets = torch.cat(
+        (left_fingertip_local_offsets, right_fingertip_local_offsets)
+    )
+    fingertip_rot = body_rot[:, all_fingertip_ids]
+    fingertip_pos = body_pos[:, all_fingertip_ids] + rotations.quat_rotate(
+        fingertip_rot,
+        all_fingertip_local_offsets.unsqueeze(0).expand_as(
+            fingertip_rot[..., :3]
+        ),
+        True,
+    )
     surface_to_fingertips = nearest_object_surface_vectors(
-        body_pos[:, all_fingertip_ids],
+        fingertip_pos,
         object_pos,
         object_rot,
         neutral_pointclouds,

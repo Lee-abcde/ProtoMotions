@@ -1828,6 +1828,8 @@ def intermimic_contact_reward_factory(
 def intermimic_fingertip_bearing_reward_factory(
     left_fingertip_body_ids: Tensor,
     right_fingertip_body_ids: Tensor,
+    left_fingertip_local_offsets: Tensor,
+    right_fingertip_local_offsets: Tensor,
     left_hand_body_ids: Tensor,
     right_hand_body_ids: Tensor,
     max_hand_weight: float = 5.0,
@@ -1841,6 +1843,7 @@ def intermimic_fingertip_bearing_reward_factory(
         compute_func=compute_intermimic_fingertip_bearing_reward,
         dynamic_vars={
             "body_pos": EnvContext.current.rigid_body_pos,
+            "body_rot": EnvContext.current.rigid_body_rot,
             "object_pos": EnvContext.scene.object_pos,
             "object_rot": EnvContext.scene.object_rot,
             "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
@@ -1855,6 +1858,8 @@ def intermimic_fingertip_bearing_reward_factory(
         static_params={
             "left_fingertip_body_ids": left_fingertip_body_ids,
             "right_fingertip_body_ids": right_fingertip_body_ids,
+            "left_fingertip_local_offsets": left_fingertip_local_offsets,
+            "right_fingertip_local_offsets": right_fingertip_local_offsets,
             "left_hand_body_ids": left_hand_body_ids,
             "right_hand_body_ids": right_hand_body_ids,
             "max_hand_weight": max_hand_weight,
