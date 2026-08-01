@@ -208,11 +208,13 @@ def compute_intermimic_interaction_reward(
     ref_weights = ref_inv_sq / ref_inv_sq.sum(
         dim=(1, 2), keepdim=True
     ).clamp_min(1e-8)
+    interaction_weights = torch.maximum(current_weights, ref_weights)
+    interaction_weights = interaction_weights / interaction_weights.sum(
+        dim=(1, 2), keepdim=True
+    ).clamp_min(1e-8)
 
     squared_error = (current_vectors - ref_vectors).pow(2).sum(dim=-1)
-    interaction_cost = (
-        squared_error * (current_weights + ref_weights) * 0.5
-    ).sum(dim=(1, 2))
+    interaction_cost = (squared_error * interaction_weights).sum(dim=(1, 2))
     return torch.exp(-interaction_weight * interaction_cost)
 
 
