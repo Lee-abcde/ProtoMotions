@@ -45,42 +45,6 @@ KEY_BODY_NAMES = [
     "R_Wrist",
 ]
 
-LEFT_FINGERTIP_NAMES = [
-    "L_Thumb3",
-    "L_Index3",
-    "L_Middle3",
-    "L_Ring3",
-    "L_Pinky3",
-]
-
-RIGHT_FINGERTIP_NAMES = [
-    "R_Thumb3",
-    "R_Index3",
-    "R_Middle3",
-    "R_Ring3",
-    "R_Pinky3",
-]
-
-# Distal collision-surface endpoints in each Finger3 link frame. Each value is
-# capsule_to + radius * normalize(capsule_to - capsule_from), as defined by
-# smplx_humanoid.xml. The order matches the fingertip name lists above.
-LEFT_FINGERTIP_LOCAL_OFFSETS = [
-    [0.01930862, 0.02482537, -0.00346061],
-    [0.00212067, 0.02597820, -0.00038678],
-    [-0.00221644, 0.02647810, 0.0],
-    [-0.00526082, 0.02547942, 0.00051234],
-    [-0.00975261, 0.01841114, 0.00038402],
-]
-
-RIGHT_FINGERTIP_LOCAL_OFFSETS = [
-    [0.02013753, -0.02128824, -0.00361060],
-    [0.00225048, -0.02306747, -0.00040841],
-    [-0.00234171, -0.02356775, 0.0],
-    [-0.00554386, -0.02252201, 0.00053973],
-    [-0.01035654, -0.01507642, 0.00040559],
-]
-
-
 def terrain_config(args: argparse.Namespace) -> TerrainConfig:
     return TerrainConfig(
         sim_config=TerrainSimConfig(
@@ -126,14 +90,6 @@ def _intermimic_body_groups(robot_cfg: RobotConfig):
     interaction_body_ids = key_body_ids.clone()
     left_hand_body_ids = _body_ids(robot_cfg, left_hand_names)
     right_hand_body_ids = _body_ids(robot_cfg, right_hand_names)
-    left_fingertip_body_ids = _body_ids(robot_cfg, LEFT_FINGERTIP_NAMES)
-    right_fingertip_body_ids = _body_ids(robot_cfg, RIGHT_FINGERTIP_NAMES)
-    left_fingertip_local_offsets = torch.tensor(
-        LEFT_FINGERTIP_LOCAL_OFFSETS, dtype=torch.float32
-    )
-    right_fingertip_local_offsets = torch.tensor(
-        RIGHT_FINGERTIP_LOCAL_OFFSETS, dtype=torch.float32
-    )
     other_body_ids = _body_ids(
         robot_cfg, [name for name in body_names if name not in hand_names]
     )
@@ -149,10 +105,6 @@ def _intermimic_body_groups(robot_cfg: RobotConfig):
         interaction_body_ids,
         left_hand_body_ids,
         right_hand_body_ids,
-        left_fingertip_body_ids,
-        right_fingertip_body_ids,
-        left_fingertip_local_offsets,
-        right_fingertip_local_offsets,
         other_body_ids,
         non_finger_body_ids,
         rotation_body_ids,
@@ -165,7 +117,6 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     from protomotions.envs.component_factories import (
         intermimic_contact_loss_term_factory,
         intermimic_contact_reward_factory,
-        intermimic_fingertip_bearing_reward_factory,
         intermimic_human_error_term_factory,
         intermimic_human_reward_factory,
         intermimic_interaction_error_term_factory,
@@ -189,10 +140,6 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         interaction_body_ids,
         left_hand_body_ids,
         right_hand_body_ids,
-        left_fingertip_body_ids,
-        right_fingertip_body_ids,
-        left_fingertip_local_offsets,
-        right_fingertip_local_offsets,
         other_body_ids,
         non_finger_body_ids,
         rotation_body_ids,
@@ -262,19 +209,6 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 other_weight=5.0,
                 negative_weight=3.0,
                 contact_energy_weight=1e-9,
-            ),
-            "intermimic_fingertip_bearing": (
-                intermimic_fingertip_bearing_reward_factory(
-                    left_fingertip_body_ids=left_fingertip_body_ids,
-                    right_fingertip_body_ids=right_fingertip_body_ids,
-                    left_fingertip_local_offsets=left_fingertip_local_offsets,
-                    right_fingertip_local_offsets=right_fingertip_local_offsets,
-                    left_hand_body_ids=left_hand_body_ids,
-                    right_hand_body_ids=right_hand_body_ids,
-                    # Start gently because reward components are multiplied.
-                    max_hand_weight=1.0,
-                    distance_scale=5.0,
-                )
             ),
         },
         termination_components={
