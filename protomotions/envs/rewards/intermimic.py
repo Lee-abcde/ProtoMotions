@@ -95,6 +95,7 @@ def compute_intermimic_object_reward(
     ref_object_rot: Tensor,
     ref_object_vel: Tensor,
     ref_object_ang_vel: Tensor,
+    neutral_pointclouds: Tensor,
     object_valid_mask: Tensor,
     progress_buf: Tensor,
     dt: float,
@@ -103,6 +104,7 @@ def compute_intermimic_object_reward(
     velocity_weight: float,
     angular_velocity_weight: float,
     energy_weight: float,
+    surface_weight: float,
 ) -> Tensor:
     """Object tracking and smoothness reward."""
     current_heading_inv = rotations.calc_heading_quat_inv(root_rot, True)
@@ -157,6 +159,14 @@ def compute_intermimic_object_reward(
     energy_per_object += angular_acceleration.pow(2).mean(dim=-1)
     energy_cost = (energy_per_object * valid).sum(dim=-1) / denom
     energy_cost = energy_cost * (progress_buf > 2).float()
+    surface_cost = _object_surface_point_rms_cost(
+        current_local_pos,
+        current_local_rot,
+        ref_local_pos,
+        ref_local_rot,
+        neutral_pointclouds,
+        object_valid_mask,
+    )
 
     return torch.exp(
         -position_weight * position_cost
@@ -164,6 +174,51 @@ def compute_intermimic_object_reward(
         - velocity_weight * velocity_cost
         - angular_velocity_weight * angular_velocity_cost
         - energy_weight * energy_cost
+        - surface_weight * surface_cost
+    )
+
+
+def _object_surface_point_rms_cost(
+    object_pos: Tensor,
+    object_rot: Tensor,
+    ref_object_pos: Tensor,
+    ref_object_rot: Tensor,
+    neutral_pointclouds: Tensor,
+    object_valid_mask: Tensor,
+) -> Tensor:
+    """Root-heading-local RMS error over corresponding surface points."""
+    batch_size, num_objects, num_points = neutral_pointclouds.shape[:3]
+    squared_error_sum = torch.zeros(
+        batch_size,
+        dtype=neutral_pointclouds.dtype,
+        device=neutral_pointclouds.device,
+    )
+    invalid = ~object_valid_mask.unsqueeze(-1).bool()
+
+    for start in range(0, num_points, 128):
+        end = min(start + 128, num_points)
+        local_points = neutral_pointclouds[:, :, start:end]
+        chunk_size = end - start
+        current_rot = object_rot.unsqueeze(2).expand(
+            batch_size, num_objects, chunk_size, 4
+        )
+        reference_rot = ref_object_rot.unsqueeze(2).expand_as(current_rot)
+        current_points = rotations.quat_rotate(
+            current_rot, local_points, True
+        ) + object_pos.unsqueeze(2)
+        reference_points = rotations.quat_rotate(
+            reference_rot, local_points, True
+        ) + ref_object_pos.unsqueeze(2)
+        squared_error = (current_points - reference_points).pow(2).sum(dim=-1)
+        squared_error = squared_error.masked_fill(invalid, 0.0)
+        squared_error_sum = squared_error_sum + squared_error.sum(dim=(1, 2))
+
+    valid_point_count = (
+        object_valid_mask.float().sum(dim=-1) * num_points
+    ).clamp_min(1.0)
+    mean_squared_error = squared_error_sum / valid_point_count
+    return mean_squared_error / torch.sqrt(
+        mean_squared_error.clamp_min(1e-8)
     )
 
 

@@ -1727,6 +1727,7 @@ def intermimic_object_reward_factory(
     velocity_weight: float = 0.1,
     angular_velocity_weight: float = 0.0,
     energy_weight: float = 2e-5,
+    surface_weight: float = 5.0,
 ) -> MdpComponent:
     from protomotions.envs.rewards import compute_intermimic_object_reward
 
@@ -1749,6 +1750,7 @@ def intermimic_object_reward_factory(
             "ref_object_rot": EnvContext.intermimic.ref_object_rot,
             "ref_object_vel": EnvContext.intermimic.ref_object_vel,
             "ref_object_ang_vel": EnvContext.intermimic.ref_object_ang_vel,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
             "object_valid_mask": EnvContext.scene.object_valid_mask,
             "progress_buf": EnvContext.progress_buf,
             "dt": EnvContext.dt,
@@ -1759,6 +1761,7 @@ def intermimic_object_reward_factory(
             "velocity_weight": velocity_weight,
             "angular_velocity_weight": angular_velocity_weight,
             "energy_weight": energy_weight,
+            "surface_weight": surface_weight,
             "multiplicative": True,
         },
     )

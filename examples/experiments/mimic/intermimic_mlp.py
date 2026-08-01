@@ -196,6 +196,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 velocity_weight=0.1,
                 angular_velocity_weight=0.0,
                 energy_weight=2e-5,
+                surface_weight=5.0,
             ),
             "intermimic_interaction": intermimic_interaction_reward_factory(
                 key_body_ids=interaction_body_ids,
