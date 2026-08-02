@@ -12,6 +12,7 @@ from protomotions.envs.utils.intermimic import (
     nearest_object_surface_distances,
     nearest_object_surface_vectors,
     object_contact_target_masks,
+    parent_relative_body_rotations,
     pairwise_body_object_vectors,
 )
 from protomotions.utils import rotations
@@ -37,6 +38,11 @@ def compute_intermimic_human_reward(
     rotation_weight: float,
     energy_weight: float,
     distance_weight_scale: float = 5.0,
+    left_finger_body_ids: Tensor | None = None,
+    left_finger_parent_body_ids: Tensor | None = None,
+    right_finger_body_ids: Tensor | None = None,
+    right_finger_parent_body_ids: Tensor | None = None,
+    finger_rotation_weight: float = 0.0,
 ) -> Tensor:
     """Distance-weighted human pose tracking matching InterMimic."""
     reference_distances = nearest_object_surface_distances(
@@ -69,6 +75,45 @@ def compute_intermimic_human_reward(
         rotation_error * rotation_distance_weights
     ).mean(dim=-1)
 
+    finger_rotation_cost = torch.zeros_like(rotation_cost)
+    if (
+        left_finger_body_ids is not None
+        and left_finger_parent_body_ids is not None
+        and right_finger_body_ids is not None
+        and right_finger_parent_body_ids is not None
+    ):
+        left_finger_rot = parent_relative_body_rotations(
+            body_rot,
+            left_finger_body_ids,
+            left_finger_parent_body_ids,
+        )
+        ref_left_finger_rot = parent_relative_body_rotations(
+            ref_body_rot,
+            left_finger_body_ids,
+            left_finger_parent_body_ids,
+        )
+        right_finger_rot = parent_relative_body_rotations(
+            body_rot,
+            right_finger_body_ids,
+            right_finger_parent_body_ids,
+        )
+        ref_right_finger_rot = parent_relative_body_rotations(
+            ref_body_rot,
+            right_finger_body_ids,
+            right_finger_parent_body_ids,
+        )
+        left_finger_cost = rotations.quat_diff_norm(
+            ref_left_finger_rot,
+            left_finger_rot,
+            True,
+        ).mean(dim=-1)
+        right_finger_cost = rotations.quat_diff_norm(
+            ref_right_finger_rot,
+            right_finger_rot,
+            True,
+        ).mean(dim=-1)
+        finger_rotation_cost = left_finger_cost + right_finger_cost
+
     previous_dof_vel = historical_dof_vel[:, 0]
     dof_acceleration = (dof_vel - previous_dof_vel) / dt
     energy_cost = dof_acceleration.pow(2).mean(dim=-1)
@@ -77,6 +122,7 @@ def compute_intermimic_human_reward(
     return torch.exp(
         -position_weight * position_cost
         - rotation_weight * rotation_cost
+        - finger_rotation_weight * finger_rotation_cost
         - energy_weight * energy_cost
     )
 

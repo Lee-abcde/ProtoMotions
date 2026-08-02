@@ -11,6 +11,21 @@ from torch import Tensor
 from protomotions.utils import rotations
 
 
+def parent_relative_body_rotations(
+    body_rot: Tensor,
+    body_ids: Tensor,
+    parent_body_ids: Tensor,
+) -> Tensor:
+    """Return selected body rotations relative to their parent bodies."""
+    selected_rot = body_rot.index_select(-2, body_ids)
+    parent_rot = body_rot.index_select(-2, parent_body_ids)
+    return rotations.quat_mul(
+        rotations.quat_conjugate(parent_rot, True),
+        selected_rot,
+        True,
+    )
+
+
 def object_contact_target_masks(
     contact_labels: Tensor,
 ) -> tuple[Tensor, Tensor]:

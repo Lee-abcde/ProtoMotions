@@ -13,6 +13,7 @@ from protomotions.envs.utils.intermimic import (
     interaction_geometry_embedding,
     nearest_object_surface_vectors,
     object_contact_residual as compute_object_contact_residual,
+    parent_relative_body_rotations,
 )
 from protomotions.utils import rotations
 
@@ -107,6 +108,8 @@ def compute_intermimic_target_observation(
     object_valid_mask: Tensor,
     key_body_ids: Tensor,
     non_finger_body_ids: Tensor,
+    finger_body_ids: Tensor | None = None,
+    finger_parent_body_ids: Tensor | None = None,
 ) -> Tensor:
     """Build full-reference goals for all configured future horizons."""
     batch_size, num_future = future_body_pos.shape[:2]
@@ -253,6 +256,29 @@ def compute_intermimic_target_observation(
         future_object_contact_labels,
         object_contact_residual,
     )
+    if finger_body_ids is not None and finger_parent_body_ids is not None:
+        current_finger_local_rot = parent_relative_body_rotations(
+            body_rot,
+            finger_body_ids,
+            finger_parent_body_ids,
+        )
+        future_finger_local_rot = parent_relative_body_rotations(
+            future_body_rot,
+            finger_body_ids,
+            finger_parent_body_ids,
+        )
+        current_finger_local_rot = current_finger_local_rot.unsqueeze(
+            1
+        ).expand_as(future_finger_local_rot)
+        finger_rot_diff = rotations.quat_mul(
+            rotations.quat_conjugate(future_finger_local_rot, True),
+            current_finger_local_rot,
+            True,
+        )
+        features = (
+            *features,
+            rotations.quat_to_tan_norm(finger_rot_diff, True),
+        )
     return torch.cat(
         [feature.reshape(batch_size, num_future, -1) for feature in features],
         dim=-1,

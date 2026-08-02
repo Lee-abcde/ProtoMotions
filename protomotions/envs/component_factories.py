@@ -1639,6 +1639,8 @@ def intermimic_object_obs_factory() -> MdpComponent:
 def intermimic_target_obs_factory(
     key_body_ids: Tensor,
     non_finger_body_ids: Tensor,
+    finger_body_ids: Optional[Tensor] = None,
+    finger_parent_body_ids: Optional[Tensor] = None,
 ) -> MdpComponent:
     from protomotions.envs.obs import compute_intermimic_target_observation
 
@@ -1677,6 +1679,8 @@ def intermimic_target_obs_factory(
         static_params={
             "key_body_ids": key_body_ids,
             "non_finger_body_ids": non_finger_body_ids,
+            "finger_body_ids": finger_body_ids,
+            "finger_parent_body_ids": finger_parent_body_ids,
         },
     )
 
@@ -1689,6 +1693,11 @@ def intermimic_human_reward_factory(
     rotation_weight: float = 1.5,
     energy_weight: float = 2e-5,
     distance_weight_scale: float = 5.0,
+    left_finger_body_ids: Optional[Tensor] = None,
+    left_finger_parent_body_ids: Optional[Tensor] = None,
+    right_finger_body_ids: Optional[Tensor] = None,
+    right_finger_parent_body_ids: Optional[Tensor] = None,
+    finger_rotation_weight: float = 0.0,
 ) -> MdpComponent:
     from protomotions.envs.rewards import compute_intermimic_human_reward
 
@@ -1712,10 +1721,15 @@ def intermimic_human_reward_factory(
             "key_body_ids": key_body_ids,
             "rotation_body_ids": rotation_body_ids,
             "ankle_toe_body_ids": ankle_toe_body_ids,
+            "left_finger_body_ids": left_finger_body_ids,
+            "left_finger_parent_body_ids": left_finger_parent_body_ids,
+            "right_finger_body_ids": right_finger_body_ids,
+            "right_finger_parent_body_ids": right_finger_parent_body_ids,
             "position_weight": position_weight,
             "rotation_weight": rotation_weight,
             "energy_weight": energy_weight,
             "distance_weight_scale": distance_weight_scale,
+            "finger_rotation_weight": finger_rotation_weight,
             "multiplicative": True,
         },
     )

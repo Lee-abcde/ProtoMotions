@@ -82,14 +82,28 @@ def _intermimic_body_groups(robot_cfg: RobotConfig):
     left_hand_names = aliases["all_left_hand_bodies"]
     right_hand_names = aliases["all_right_hand_bodies"]
     hand_names = set(left_hand_names + right_hand_names)
-    finger_names = hand_names.difference(KEY_BODY_NAMES)
+    left_finger_names = [
+        name for name in left_hand_names if name not in KEY_BODY_NAMES
+    ]
+    right_finger_names = [
+        name for name in right_hand_names if name not in KEY_BODY_NAMES
+    ]
+    finger_names = set(left_finger_names + right_finger_names)
 
     key_body_ids = _body_ids(robot_cfg, KEY_BODY_NAMES)
-    # Match the private implementation: interaction geometry tracks the
-    # reliable key bodies while finger grasping is learned from contact/energy.
+    # Interaction geometry tracks reliable key bodies; finger pose guidance
+    # is provided separately through parent-relative rotation features.
     interaction_body_ids = key_body_ids.clone()
     left_hand_body_ids = _body_ids(robot_cfg, left_hand_names)
     right_hand_body_ids = _body_ids(robot_cfg, right_hand_names)
+    left_finger_body_ids = _body_ids(robot_cfg, left_finger_names)
+    right_finger_body_ids = _body_ids(robot_cfg, right_finger_names)
+    parent_body_ids = torch.tensor(
+        robot_cfg.kinematic_info.parent_indices,
+        dtype=torch.long,
+    )
+    left_finger_parent_body_ids = parent_body_ids[left_finger_body_ids]
+    right_finger_parent_body_ids = parent_body_ids[right_finger_body_ids]
     other_body_ids = _body_ids(
         robot_cfg, [name for name in body_names if name not in hand_names]
     )
@@ -105,6 +119,10 @@ def _intermimic_body_groups(robot_cfg: RobotConfig):
         interaction_body_ids,
         left_hand_body_ids,
         right_hand_body_ids,
+        left_finger_body_ids,
+        left_finger_parent_body_ids,
+        right_finger_body_ids,
+        right_finger_parent_body_ids,
         other_body_ids,
         non_finger_body_ids,
         rotation_body_ids,
@@ -140,6 +158,10 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         interaction_body_ids,
         left_hand_body_ids,
         right_hand_body_ids,
+        left_finger_body_ids,
+        left_finger_parent_body_ids,
+        right_finger_body_ids,
+        right_finger_parent_body_ids,
         other_body_ids,
         non_finger_body_ids,
         rotation_body_ids,
@@ -177,6 +199,15 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             "intermimic_target_obs": intermimic_target_obs_factory(
                 key_body_ids=key_body_ids,
                 non_finger_body_ids=non_finger_body_ids,
+                finger_body_ids=torch.cat(
+                    (left_finger_body_ids, right_finger_body_ids)
+                ),
+                finger_parent_body_ids=torch.cat(
+                    (
+                        left_finger_parent_body_ids,
+                        right_finger_parent_body_ids,
+                    )
+                ),
             ),
             "previous_actions": previous_actions_factory(history_steps=1),
         },
@@ -185,10 +216,15 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 key_body_ids=key_body_ids,
                 rotation_body_ids=rotation_body_ids,
                 ankle_toe_body_ids=ankle_toe_body_ids,
+                left_finger_body_ids=left_finger_body_ids,
+                left_finger_parent_body_ids=left_finger_parent_body_ids,
+                right_finger_body_ids=right_finger_body_ids,
+                right_finger_parent_body_ids=right_finger_parent_body_ids,
                 position_weight=30.0,
                 rotation_weight=2.5,
                 energy_weight=2e-5,
                 distance_weight_scale=5.0,
+                finger_rotation_weight=0.5,
             ),
             "intermimic_object": intermimic_object_reward_factory(
                 position_weight=5.0,
