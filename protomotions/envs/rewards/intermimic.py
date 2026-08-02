@@ -11,6 +11,7 @@ from torch import Tensor
 from protomotions.envs.utils.intermimic import (
     nearest_object_surface_distances,
     nearest_object_surface_vectors,
+    object_contact_target_masks,
     pairwise_body_object_vectors,
 )
 from protomotions.utils import rotations
@@ -285,30 +286,31 @@ def compute_intermimic_contact_reward(
     negative_weight: float,
     contact_energy_weight: float,
 ) -> Tensor:
-    """Three-state body-object contact reward with hand-level promotion."""
+    """Per-body object-contact reward with separate positive/negative terms."""
     object_contacts = body_object_contacts.float()
     labels = ref_body_contact_labels.float()
+    required_contacts, forbidden_contacts = object_contact_target_masks(labels)
 
     left_reward = _hand_contact_reward(
         object_contacts[:, left_hand_body_ids],
-        labels[:, left_hand_body_ids],
+        required_contacts[:, left_hand_body_ids],
         hand_weight,
     )
     right_reward = _hand_contact_reward(
         object_contacts[:, right_hand_body_ids],
-        labels[:, right_hand_body_ids],
+        required_contacts[:, right_hand_body_ids],
         hand_weight,
     )
 
-    other_labels = labels[:, other_body_ids]
+    other_required = required_contacts[:, other_body_ids]
     other_contacts = object_contacts[:, other_body_ids]
     positive_cost = (
-        torch.abs(other_contacts - other_labels) * (other_labels > 0).float()
+        torch.abs(other_contacts - 1.0) * other_required.float()
     ).mean(dim=-1)
     positive_reward = torch.exp(-other_weight * positive_cost)
 
     negative_cost = (
-        object_contacts * (labels < 0).float()
+        object_contacts * forbidden_contacts.float()
     ).mean(dim=-1)
     negative_reward = torch.exp(-negative_weight * negative_cost)
 
@@ -431,9 +433,9 @@ def _fingertip_bearing_reward_for_hand(
 
 
 def _hand_contact_reward(
-    contacts: Tensor, labels: Tensor, weight: float
+    contacts: Tensor, required_contacts: Tensor, weight: float
 ) -> Tensor:
-    required = torch.any(labels > 0, dim=-1)
-    cost = torch.abs(contacts - 1.0).mean(dim=-1)
+    required = torch.any(required_contacts, dim=-1)
+    cost = ((1.0 - contacts) * required_contacts.float()).mean(dim=-1)
     promoted = 0.5 * (1.0 + torch.exp(-weight * cost))
     return torch.where(required, promoted, torch.ones_like(promoted))

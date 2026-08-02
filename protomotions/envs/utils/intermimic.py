@@ -11,6 +11,33 @@ from torch import Tensor
 from protomotions.utils import rotations
 
 
+def object_contact_target_masks(
+    contact_labels: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Return required and forbidden object-contact masks.
+
+    Labels are interpreted independently per body: positive requires object
+    contact, while zero and negative labels forbid object contact.
+    """
+    required = contact_labels > 0
+    return required, ~required
+
+
+def object_contact_residual(
+    contact_labels: Tensor,
+    object_contacts: Tensor,
+) -> Tensor:
+    """Return missing-required or present-forbidden contact violations."""
+    required, forbidden = object_contact_target_masks(contact_labels)
+    contacts = object_contacts.float()
+    for _ in range(contact_labels.dim() - object_contacts.dim()):
+        contacts = contacts.unsqueeze(-2)
+    return (
+        required.float() * (1.0 - contacts)
+        + forbidden.float() * contacts
+    )
+
+
 def transform_object_pointclouds(
     object_pos: Tensor,
     object_rot: Tensor,
