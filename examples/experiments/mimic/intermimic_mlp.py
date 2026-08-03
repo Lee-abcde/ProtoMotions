@@ -131,7 +131,7 @@ def _intermimic_body_groups(robot_cfg: RobotConfig):
 
 
 def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
-    from protomotions.envs.action import make_pd_action_config
+    from protomotions.envs.action import make_asymmetric_pd_action_config
     from protomotions.envs.component_factories import (
         intermimic_contact_loss_term_factory,
         intermimic_contact_reward_factory,
@@ -268,7 +268,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             ),
             "required_hand_contact": intermimic_contact_loss_term_factory(),
         },
-        action_config=make_pd_action_config(robot_cfg),
+        action_config=make_asymmetric_pd_action_config(robot_cfg),
         motion_manager=MimicMotionManagerConfig(
             # Hybrid initialization: 10% from frame zero; PSI samples the
             # remaining starts from full-horizon, difficult frames.

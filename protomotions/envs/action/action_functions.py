@@ -117,7 +117,7 @@ Unlike observations, rewards, and terminations:
    are passed directly from robot config, not from environment context
 """
 
-from typing import Any, Dict, Literal
+from typing import Any, Dict, Literal, Tuple
 import numpy as np
 import torch
 from torch import Tensor
@@ -172,6 +172,43 @@ def normalized_pd_fixed_gains_action(
     processed_action = pd_action_offset + pd_action_scale * action
 
     # Clone outputs for CUDA graphs compatibility
+    return {
+        "processed_action": processed_action.clone(),
+        "stiffness_targets": stiffness.unsqueeze(0).expand(batch_size, -1).clone(),
+        "damping_targets": damping.unsqueeze(0).expand(batch_size, -1).clone(),
+    }
+
+
+def normalized_pd_asymmetric_fixed_gains_action(
+    action: Tensor,
+    pd_action_offset: Tensor,
+    pd_action_negative_scale: Tensor,
+    pd_action_positive_scale: Tensor,
+    stiffness: Tensor,
+    damping: Tensor,
+    action_transform: ActionTransform = "tanh",
+    clamp_value: float = 1.0,
+) -> Dict[str, Tensor]:
+    """Map each action direction to its own per-DOF PD target range.
+
+    Negative actions interpolate from the default joint position toward the
+    lower limit, while positive actions interpolate toward the upper limit.
+    This preserves ``action == 0`` as the default pose without generating
+    targets outside asymmetric joint limits.
+    """
+    if action_transform == "tanh":
+        action = torch.tanh(action)
+    elif action_transform == "clamp":
+        action = torch.clamp(action, -clamp_value, clamp_value)
+
+    batch_size = action.shape[0]
+    directional_scale = torch.where(
+        action < 0.0,
+        pd_action_negative_scale,
+        pd_action_positive_scale,
+    )
+    processed_action = pd_action_offset + directional_scale * action
+
     return {
         "processed_action": processed_action.clone(),
         "stiffness_targets": stiffness.unsqueeze(0).expand(batch_size, -1).clone(),
@@ -266,6 +303,35 @@ def build_pd_action_offset_scale(
     return pd_action_offset, pd_action_scale
 
 
+def build_pd_action_asymmetric_scales(
+    dof_limits_lower: Tensor,
+    dof_limits_upper: Tensor,
+    default_dof_pos: Tensor,
+    action_scale: float,
+    device: torch.device,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """Build per-DOF scales from the default pose to each joint limit."""
+    if action_scale <= 0.0:
+        raise ValueError(f"action_scale must be positive, got {action_scale}")
+    if torch.any(default_dof_pos < dof_limits_lower) or torch.any(
+        default_dof_pos > dof_limits_upper
+    ):
+        raise ValueError("Default DOF positions must lie within joint limits")
+
+    pd_action_offset = default_dof_pos.detach().clone().to(device)
+    pd_action_negative_scale = (
+        action_scale * (default_dof_pos - dof_limits_lower)
+    ).to(device)
+    pd_action_positive_scale = (
+        action_scale * (dof_limits_upper - default_dof_pos)
+    ).to(device)
+    return (
+        pd_action_offset,
+        pd_action_negative_scale,
+        pd_action_positive_scale,
+    )
+
+
 def make_pd_action_config(
     robot_config,
     action_transform: ActionTransform = "tanh",
@@ -312,6 +378,43 @@ def make_pd_action_config(
         "fn": normalized_pd_fixed_gains_action,
         "pd_action_offset": pd_action_offset,
         "pd_action_scale": pd_action_scale,
+        "stiffness": stiffness,
+        "damping": damping,
+        "action_transform": action_transform,
+        "clamp_value": clamp_value,
+    }
+
+
+def make_asymmetric_pd_action_config(
+    robot_config,
+    action_transform: ActionTransform = "tanh",
+    clamp_value: float = 1.0,
+    action_scale: float = 1.0,
+) -> Dict[str, Any]:
+    """Create zero-centered, asymmetric, per-DOF normalized PD control."""
+    offset, negative_scale, positive_scale = build_pd_action_asymmetric_scales(
+        robot_config.kinematic_info.dof_limits_lower,
+        robot_config.kinematic_info.dof_limits_upper,
+        robot_config.default_dof_pos,
+        action_scale,
+        torch.device("cpu"),
+    )
+
+    joint_names = robot_config.kinematic_info.dof_names
+    stiffness = torch.tensor(
+        [robot_config.control.control_info[j].stiffness for j in joint_names],
+        dtype=torch.float32,
+    )
+    damping = torch.tensor(
+        [robot_config.control.control_info[j].damping for j in joint_names],
+        dtype=torch.float32,
+    )
+
+    return {
+        "fn": normalized_pd_asymmetric_fixed_gains_action,
+        "pd_action_offset": offset,
+        "pd_action_negative_scale": negative_scale,
+        "pd_action_positive_scale": positive_scale,
         "stiffness": stiffness,
         "damping": damping,
         "action_transform": action_transform,
