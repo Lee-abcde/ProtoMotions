@@ -135,6 +135,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     from protomotions.envs.component_factories import (
         intermimic_contact_loss_term_factory,
         intermimic_contact_reward_factory,
+        intermimic_finger_rotation_reward_factory,
         intermimic_human_error_term_factory,
         intermimic_human_reward_factory,
         intermimic_interaction_error_term_factory,
@@ -216,15 +217,19 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 key_body_ids=key_body_ids,
                 rotation_body_ids=rotation_body_ids,
                 ankle_toe_body_ids=ankle_toe_body_ids,
-                left_finger_body_ids=left_finger_body_ids,
-                left_finger_parent_body_ids=left_finger_parent_body_ids,
-                right_finger_body_ids=right_finger_body_ids,
-                right_finger_parent_body_ids=right_finger_parent_body_ids,
                 position_weight=30.0,
                 rotation_weight=2.5,
                 energy_weight=2e-5,
                 distance_weight_scale=5.0,
-                finger_rotation_weight=0.5,
+            ),
+            "intermimic_finger_rotation": (
+                intermimic_finger_rotation_reward_factory(
+                    left_finger_body_ids=left_finger_body_ids,
+                    left_finger_parent_body_ids=left_finger_parent_body_ids,
+                    right_finger_body_ids=right_finger_body_ids,
+                    right_finger_parent_body_ids=right_finger_parent_body_ids,
+                    weight=0.5,
+                )
             ),
             "intermimic_object": intermimic_object_reward_factory(
                 position_weight=5.0,

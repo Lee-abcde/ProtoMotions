@@ -74,6 +74,7 @@ from protomotions.envs.rewards.regularization import (
     impact_force_penalty,
 )
 from protomotions.envs.rewards.intermimic import (
+    compute_intermimic_finger_rotation_reward,
     compute_intermimic_human_reward,
     compute_intermimic_object_reward,
     compute_intermimic_interaction_reward,
@@ -129,6 +130,7 @@ __all__ = [
     "joint_limit_violation",
     "contact_mismatch_sum",
     "impact_force_penalty",
+    "compute_intermimic_finger_rotation_reward",
     "compute_intermimic_human_reward",
     "compute_intermimic_object_reward",
     "compute_intermimic_interaction_reward",
