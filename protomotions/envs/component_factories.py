@@ -1693,6 +1693,11 @@ def intermimic_human_reward_factory(
     rotation_weight: float = 1.5,
     energy_weight: float = 2e-5,
     distance_weight_scale: float = 5.0,
+    left_finger_body_ids: Optional[Tensor] = None,
+    left_finger_parent_body_ids: Optional[Tensor] = None,
+    right_finger_body_ids: Optional[Tensor] = None,
+    right_finger_parent_body_ids: Optional[Tensor] = None,
+    finger_rotation_weight: float = 0.0,
 ) -> MdpComponent:
     from protomotions.envs.rewards import compute_intermimic_human_reward
 
@@ -1716,39 +1721,16 @@ def intermimic_human_reward_factory(
             "key_body_ids": key_body_ids,
             "rotation_body_ids": rotation_body_ids,
             "ankle_toe_body_ids": ankle_toe_body_ids,
-            "position_weight": position_weight,
-            "rotation_weight": rotation_weight,
-            "energy_weight": energy_weight,
-            "distance_weight_scale": distance_weight_scale,
-            "multiplicative": True,
-        },
-    )
-
-
-def intermimic_finger_rotation_reward_factory(
-    left_finger_body_ids: Tensor,
-    left_finger_parent_body_ids: Tensor,
-    right_finger_body_ids: Tensor,
-    right_finger_parent_body_ids: Tensor,
-    weight: float = 0.5,
-) -> MdpComponent:
-    from protomotions.envs.rewards import (
-        compute_intermimic_finger_rotation_reward,
-    )
-
-    return MdpComponent(
-        compute_func=compute_intermimic_finger_rotation_reward,
-        dynamic_vars={
-            "body_rot": EnvContext.current.rigid_body_rot,
-            "ref_body_rot": EnvContext.mimic.ref_state.rigid_body_rot,
-        },
-        static_params={
             "left_finger_body_ids": left_finger_body_ids,
             "left_finger_parent_body_ids": left_finger_parent_body_ids,
             "right_finger_body_ids": right_finger_body_ids,
             "right_finger_parent_body_ids": right_finger_parent_body_ids,
-            "weight": weight,
-            "multiplicative": False,
+            "position_weight": position_weight,
+            "rotation_weight": rotation_weight,
+            "energy_weight": energy_weight,
+            "distance_weight_scale": distance_weight_scale,
+            "finger_rotation_weight": finger_rotation_weight,
+            "multiplicative": True,
         },
     )
 
