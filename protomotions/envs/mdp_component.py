@@ -151,6 +151,13 @@ class MdpComponent:
         self.dynamic_vars = dynamic_vars
         self.static_params = static_params or {}
         self._device_ready = False
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Restore serialized state and require runtime device validation."""
+        self.__dict__.update(state)
+        # torch.load(map_location=...) can remap tensors without updating the
+        # serialized readiness flag.
+        self._device_ready = False
     
     def resolve_args(self, ctx: "EnvContext") -> tuple:
         """Resolve dynamic_vars from context and prepare func params.
