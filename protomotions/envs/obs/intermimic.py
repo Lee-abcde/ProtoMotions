@@ -12,7 +12,6 @@ from protomotions.envs.utils.intermimic import (
     heading_rotate_vectors,
     interaction_geometry_embedding,
     nearest_object_surface_vectors,
-    object_contact_residual as compute_object_contact_residual,
     parent_relative_body_rotations,
 )
 from protomotions.utils import rotations
@@ -223,11 +222,10 @@ def compute_intermimic_target_observation(
         ref_object_rot_local, True
     )
 
-    signed_contact_residual = compute_object_contact_residual(
-        future_body_contact_labels,
-        body_object_contacts,
+    signed_contact_residual = future_body_contact_labels * (
+        (future_body_contact_labels + 1.0) * 0.5
+        - body_object_contacts.float().unsqueeze(1)
     )
-    future_body_contact_targets = (future_body_contact_labels > 0).float()
     object_contact_residual = (
         future_object_contact_labels.squeeze(-1)
         - object_contacts.float().unsqueeze(1)
@@ -251,7 +249,7 @@ def compute_intermimic_target_observation(
         object_vel_diff,
         object_ang_vel_diff,
         interaction_residual,
-        future_body_contact_targets,
+        future_body_contact_labels,
         signed_contact_residual,
         future_object_contact_labels,
         object_contact_residual,
