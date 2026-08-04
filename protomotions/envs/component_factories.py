@@ -1759,7 +1759,7 @@ def intermimic_object_reward_factory(
     velocity_weight: float = 0.1,
     angular_velocity_weight: float = 0.0,
     energy_weight: float = 2e-5,
-    surface_weight: float = 5.0,
+    surface_weight: float = 0.0,
 ) -> MdpComponent:
     from protomotions.envs.rewards import compute_intermimic_object_reward
 

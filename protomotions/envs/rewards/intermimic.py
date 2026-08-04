@@ -203,14 +203,16 @@ def compute_intermimic_object_reward(
     energy_per_object += angular_acceleration.pow(2).mean(dim=-1)
     energy_cost = (energy_per_object * valid).sum(dim=-1) / denom
     energy_cost = energy_cost * (progress_buf > 2).float()
-    surface_cost = _object_surface_point_rms_cost(
-        current_local_pos,
-        current_local_rot,
-        ref_local_pos,
-        ref_local_rot,
-        neutral_pointclouds,
-        object_valid_mask,
-    )
+    surface_cost = torch.zeros_like(position_cost)
+    if surface_weight != 0.0:
+        surface_cost = _object_surface_point_rms_cost(
+            current_local_pos,
+            current_local_rot,
+            ref_local_pos,
+            ref_local_rot,
+            neutral_pointclouds,
+            object_valid_mask,
+        )
 
     return torch.exp(
         -position_weight * position_cost
