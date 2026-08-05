@@ -174,6 +174,19 @@ class BaseEvaluator:
             return None
 
         env_ids = torch.arange(self.env.num_envs, device=self.device, dtype=torch.long)
+        motion_sampling_mask = getattr(
+            motion_manager, "motion_sampling_mask_per_env", None
+        )
+        if motion_sampling_mask is not None:
+            compatible = motion_sampling_mask[:, requested_motion_id].bool()
+            env_ids = env_ids[compatible]
+            if env_ids.numel() == 0:
+                print(
+                    "[motion-debug] Motion switch skipped: no environment "
+                    f"has an object type compatible with motion {requested_motion_id}."
+                )
+                return None
+
         old_motion_ids = motion_manager.motion_ids[env_ids].clone()
         new_motion_ids = torch.full_like(old_motion_ids, requested_motion_id)
 
@@ -195,13 +208,28 @@ class BaseEvaluator:
             fixed_motion_ids[env_ids] = new_motion_ids
             motion_manager._env_has_fixed_motion[env_ids] = True
 
+        target_env_id = int(env_ids[0].item())
+        simulator = getattr(self.env, "simulator", None)
+        camera_target = getattr(simulator, "_camera_target", None)
+        if isinstance(camera_target, dict):
+            camera_target["env"] = target_env_id
+            camera_target["element"] = 0
+        user_interface = getattr(simulator, "user_interface", None)
+        if user_interface is not None and hasattr(user_interface, "active_env_id"):
+            user_interface.active_env_id = target_env_id
+
         old_ids_list = old_motion_ids.detach().cpu().tolist()
         new_ids_list = new_motion_ids.detach().cpu().tolist()
         max_print = 16
         if len(old_ids_list) > max_print:
             old_ids_list = old_ids_list[:max_print] + ["..."]
             new_ids_list = new_ids_list[:max_print] + ["..."]
-        print(f"[motion-debug] Interactive motion switch: {old_ids_list} -> {new_ids_list}")
+        env_ids_list = env_ids.detach().cpu().tolist()
+        print(
+            "[motion-debug] Interactive motion switch on compatible envs "
+            f"{env_ids_list}: {old_ids_list} -> {new_ids_list}; "
+            f"camera -> env {target_env_id}"
+        )
 
         return env_ids
 
