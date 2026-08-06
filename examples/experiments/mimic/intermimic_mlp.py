@@ -338,7 +338,7 @@ def agent_config(
                 ),
             },
             motion_weights_rules=MotionWeightsRulesConfig(
-                motion_weights_update_success_discount=0.999,
+                motion_weights_update_success_discount=1.0,
                 motion_weights_update_failure_discount=0,
             ),
         ),
