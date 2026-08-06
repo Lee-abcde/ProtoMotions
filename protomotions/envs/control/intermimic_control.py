@@ -400,6 +400,7 @@ class InterMimicControl(MimicControl):
             self._episode_target_steps[env_ids],
             self.env.max_episode_length,
         )
+        remaining_survival_steps = recorded.unsqueeze(1) - step_ids
         frames = self._episode_motion_frames[env_ids]
         valid = (
             (recorded > min_steps).unsqueeze(1)
@@ -407,6 +408,12 @@ class InterMimicControl(MimicControl):
             # from which to assess future survival.
             & (step_ids > 0)
             & (step_ids < recorded.unsqueeze(1))
+            # Do not promote states immediately preceding a failure. These
+            # states may already be close to an early-termination threshold.
+            & (
+                remaining_survival_steps
+                > self.config.physical_buffer_margin_steps
+            )
             & (
                 scores
                 > self.config.physical_buffer_min_success_fraction
