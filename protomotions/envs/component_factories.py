@@ -1698,6 +1698,7 @@ def intermimic_human_reward_factory(
     right_finger_body_ids: Optional[Tensor] = None,
     right_finger_parent_body_ids: Optional[Tensor] = None,
     finger_rotation_weight: float = 0.0,
+    distance_weighted_position: bool = True,
 ) -> MdpComponent:
     from protomotions.envs.rewards import compute_intermimic_human_reward
 
@@ -1730,6 +1731,7 @@ def intermimic_human_reward_factory(
             "energy_weight": energy_weight,
             "distance_weight_scale": distance_weight_scale,
             "finger_rotation_weight": finger_rotation_weight,
+            "distance_weighted_position": distance_weighted_position,
             "multiplicative": True,
         },
     )

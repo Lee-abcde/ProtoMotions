@@ -42,8 +42,9 @@ def compute_intermimic_human_reward(
     right_finger_body_ids: Tensor | None = None,
     right_finger_parent_body_ids: Tensor | None = None,
     finger_rotation_weight: float = 0.0,
+    distance_weighted_position: bool = True,
 ) -> Tensor:
-    """Distance-weighted human pose tracking matching InterMimic."""
+    """Human pose tracking with optional object-distance position weighting."""
     reference_distances = nearest_object_surface_distances(
         ref_body_pos,
         ref_object_pos,
@@ -58,11 +59,13 @@ def compute_intermimic_human_reward(
         .pow(2)
         .sum(dim=-1)
     )
-    position_proximity_weights = proximity_weights.clone()
-    position_proximity_weights[:, ankle_toe_body_ids] = 1.0
-    position_cost = (
-        position_error * position_proximity_weights[:, key_body_ids]
-    ).mean(dim=-1)
+    if distance_weighted_position:
+        position_proximity_weights = proximity_weights.clone()
+        position_proximity_weights[:, ankle_toe_body_ids] = 1.0
+        position_error = (
+            position_error * position_proximity_weights[:, key_body_ids]
+        )
+    position_cost = position_error.mean(dim=-1)
 
     rotation_error = rotations.quat_diff_norm(
         ref_body_rot[:, rotation_body_ids],
