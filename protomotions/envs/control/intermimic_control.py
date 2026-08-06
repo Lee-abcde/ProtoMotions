@@ -35,7 +35,6 @@ class InterMimicControlConfig(MimicControlConfig):
     physical_buffer_margin_steps: int = 10
     physical_buffer_min_episode_steps: int = 30
     physical_buffer_min_success_fraction: float = 0.5
-    physical_buffer_survival_tie_epsilon: float = 1e-6
     physical_buffer_update_probability: float = 0.005
     physical_buffer_decay: float = 1e-5
 
@@ -47,10 +46,6 @@ class InterMimicControlConfig(MimicControlConfig):
         if not 0.0 <= self.physical_buffer_min_success_fraction <= 1.0:
             raise ValueError(
                 "physical_buffer_min_success_fraction must be in [0, 1]"
-            )
-        if self.physical_buffer_survival_tie_epsilon < 0.0:
-            raise ValueError(
-                "physical_buffer_survival_tie_epsilon must be non-negative"
             )
         if not 0.0 <= self.physical_buffer_update_probability <= 1.0:
             raise ValueError(
@@ -71,15 +66,6 @@ class _PhysicalStateBuffer:
         self.scores = torch.zeros(
             num_slots, total_frames, dtype=torch.float, device=device
         )
-        # Keep un-decayed survival values for Top-K ranking. ``scores`` remain
-        # decayed sampling weights, matching the original PSI curriculum.
-        self.survival_scores = torch.zeros_like(self.scores)
-        self.quality_scores = torch.full(
-            (num_slots, total_frames),
-            -torch.inf,
-            dtype=torch.float,
-            device=device,
-        )
         self.states = torch.zeros(
             num_slots,
             total_frames,
@@ -93,21 +79,13 @@ class _PhysicalStateBuffer:
         frame_ids: Tensor,
         states: Tensor,
         scores: Tensor,
-        quality_scores: Optional[Tensor] = None,
-        survival_tie_epsilon: float = 1e-6,
     ) -> None:
-        """Keep candidates by survival, breaking survival ties by quality."""
+        """Keep the strongest candidate for each frame in its weakest slot."""
         if frame_ids.numel() == 0:
             return
-        if quality_scores is None:
-            quality_scores = torch.zeros_like(scores)
-        if quality_scores.shape != scores.shape:
-            raise ValueError("quality_scores and scores must have the same shape")
-        if survival_tie_epsilon < 0.0:
-            raise ValueError("survival_tie_epsilon must be non-negative")
 
         # Several environments may finish the same motion frame together.
-        # Retain the lexicographically best candidate for each frame.
+        # Match the official implementation by retaining only the best one.
         total_frames = self.scores.shape[1]
         best_scores = torch.full(
             (total_frames,),
@@ -118,29 +96,10 @@ class _PhysicalStateBuffer:
         best_scores.scatter_reduce_(
             0, frame_ids, scores, reduce="amax", include_self=True
         )
-        tied_for_best_survival = (
-            torch.abs(scores - best_scores[frame_ids])
-            <= survival_tie_epsilon
-        )
-        best_quality_scores = torch.full(
-            (total_frames,),
-            -torch.inf,
-            dtype=quality_scores.dtype,
-            device=quality_scores.device,
-        )
-        best_quality_scores.scatter_reduce_(
-            0,
-            frame_ids[tied_for_best_survival],
-            quality_scores[tied_for_best_survival],
-            reduce="amax",
-            include_self=True,
-        )
         candidate_indices = torch.arange(
             frame_ids.numel(), dtype=torch.long, device=frame_ids.device
         )
-        is_best = tied_for_best_survival & (
-            quality_scores == best_quality_scores[frame_ids]
-        )
+        is_best = scores == best_scores[frame_ids]
         best_indices = torch.full(
             (total_frames,),
             frame_ids.numel(),
@@ -156,51 +115,15 @@ class _PhysicalStateBuffer:
         )
 
         unique_frames = torch.unique(frame_ids)
-        selected_indices = best_indices[unique_frames]
-        unique_scores = scores[selected_indices]
-        unique_quality_scores = quality_scores[selected_indices]
-        unique_states = states[selected_indices]
-
-        stored_scores = self.survival_scores[:, unique_frames]
-        stored_quality_scores = self.quality_scores[:, unique_frames]
-        weakest_scores = torch.min(stored_scores, dim=0).values
-        tied_for_weakest_survival = (
-            torch.abs(stored_scores - weakest_scores.unsqueeze(0))
-            <= survival_tie_epsilon
+        unique_scores = best_scores[unique_frames]
+        unique_states = states[best_indices[unique_frames]]
+        weakest_scores, weakest_slots = torch.min(
+            self.scores[:, unique_frames], dim=0
         )
-        weakest_quality_scores = torch.min(
-            torch.where(
-                tied_for_weakest_survival,
-                stored_quality_scores,
-                torch.full_like(stored_quality_scores, torch.inf),
-            ),
-            dim=0,
-        ).values
-        weakest_slots = torch.argmax(
-            (
-                tied_for_weakest_survival
-                & (stored_quality_scores == weakest_quality_scores.unsqueeze(0))
-            ).to(torch.int64),
-            dim=0,
-        )
-        survival_better = (
-            unique_scores > weakest_scores + survival_tie_epsilon
-        )
-        survival_tied = (
-            torch.abs(unique_scores - weakest_scores)
-            <= survival_tie_epsilon
-        )
-        quality_better = unique_quality_scores > weakest_quality_scores
-        replace = survival_better | (survival_tied & quality_better)
+        replace = unique_scores > weakest_scores
         replace_frames = unique_frames[replace]
         replace_slots = weakest_slots[replace]
         self.scores[replace_slots, replace_frames] = unique_scores[replace]
-        self.survival_scores[replace_slots, replace_frames] = unique_scores[
-            replace
-        ]
-        self.quality_scores[replace_slots, replace_frames] = (
-            unique_quality_scores[replace]
-        )
         self.states[replace_slots, replace_frames] = unique_states[replace]
 
     def sample(self, frame_ids: Tensor) -> Tuple[Tensor, Tensor]:
@@ -236,41 +159,19 @@ class _PhysicalStateBuffer:
     def get_state_dict(self) -> Dict[str, Tensor]:
         return {
             "scores": self.scores.detach().cpu(),
-            "survival_scores": self.survival_scores.detach().cpu(),
-            "quality_scores": self.quality_scores.detach().cpu(),
             "states": self.states.detach().cpu(),
         }
 
     def load_state_dict(self, state_dict: Dict[str, Tensor]) -> None:
         scores = state_dict["scores"]
         states = state_dict["states"]
-        survival_scores = state_dict.get("survival_scores", scores)
-        quality_scores = state_dict.get("quality_scores")
-        if (
-            scores.shape != self.scores.shape
-            or survival_scores.shape != self.survival_scores.shape
-            or states.shape != self.states.shape
-        ):
+        if scores.shape != self.scores.shape or states.shape != self.states.shape:
             raise ValueError(
                 "Physical-state buffer shape does not match the current "
                 "motion file or physical_buffer_size"
             )
         self.scores.copy_(scores.to(self.scores.device))
-        self.survival_scores.copy_(
-            survival_scores.to(self.survival_scores.device)
-        )
         self.states.copy_(states.to(self.states.device))
-        if quality_scores is None:
-            self.quality_scores.fill_(-torch.inf)
-        elif quality_scores.shape != self.quality_scores.shape:
-            raise ValueError(
-                "Physical-state buffer quality score shape does not match "
-                "the current motion file or physical_buffer_size"
-            )
-        else:
-            self.quality_scores.copy_(
-                quality_scores.to(self.quality_scores.device)
-            )
 
 
 def _survival_fraction_scores(
@@ -293,41 +194,6 @@ def _survival_fraction_scores(
     scores = remaining_recorded.float() / remaining_target.float()
     valid = step_ids < target_steps.unsqueeze(1)
     return torch.where(valid, scores.clamp_max(1.0), torch.zeros_like(scores))
-
-
-def _mean_future_reward_scores(
-    rewards: Tensor,
-    recorded_steps: Tensor,
-) -> Tensor:
-    """Return the mean future transition reward for each recorded state."""
-    if rewards.ndim != 2:
-        raise ValueError("rewards must have shape [num_envs, num_steps]")
-    if recorded_steps.shape != rewards.shape[:1]:
-        raise ValueError(
-            "recorded_steps must have shape [rewards.shape[0]]"
-        )
-
-    num_steps = rewards.shape[1]
-    step_ids = torch.arange(
-        num_steps,
-        dtype=torch.long,
-        device=rewards.device,
-    ).unsqueeze(0)
-    # Reward index j describes the transition from saved state j to j + 1.
-    valid_rewards = step_ids < (recorded_steps - 1).clamp_min(0).unsqueeze(1)
-    masked_rewards = rewards * valid_rewards
-    future_sums = torch.flip(
-        torch.cumsum(torch.flip(masked_rewards, dims=(1,)), dim=1),
-        dims=(1,),
-    )
-    future_counts = (
-        recorded_steps.unsqueeze(1) - 1 - step_ids
-    ).clamp_min(0)
-    return torch.where(
-        future_counts > 0,
-        future_sums / future_counts.clamp_min(1),
-        torch.zeros_like(future_sums),
-    )
 
 
 class InterMimicControl(MimicControl):
@@ -359,7 +225,6 @@ class InterMimicControl(MimicControl):
         self._physical_state_buffer: Optional[_PhysicalStateBuffer] = None
         self._episode_physical_states: Optional[Tensor] = None
         self._episode_motion_frames: Optional[Tensor] = None
-        self._episode_rewards: Optional[Tensor] = None
         self._episode_recorded_steps: Optional[Tensor] = None
         self._episode_target_steps: Optional[Tensor] = None
         self._episode_psi_eligible: Optional[Tensor] = None
@@ -391,11 +256,6 @@ class InterMimicControl(MimicControl):
                 history_shape[:2],
                 -1,
                 dtype=torch.long,
-                device=env.device,
-            )
-            self._episode_rewards = torch.zeros(
-                history_shape[:2],
-                dtype=torch.float,
                 device=env.device,
             )
             self._episode_recorded_steps = torch.zeros(
@@ -509,22 +369,6 @@ class InterMimicControl(MimicControl):
 
         self._record_physical_states(robot_state, object_state)
 
-    def post_reward(self, rewards: Tensor) -> None:
-        """Store each transition reward with its preceding saved state."""
-        if (
-            self._physical_state_buffer is None
-            or getattr(self, "_evaluation_runtime_state", None) is not None
-        ):
-            return
-        # step() has just stored s_{t+1}. Reward r_t belongs to the future
-        # quality of s_t, which is the preceding saved physical state.
-        active = self._episode_recorded_steps > 1
-        if not torch.any(active):
-            return
-        env_ids = torch.where(active)[0]
-        reward_steps = self._episode_recorded_steps[env_ids] - 2
-        self._episode_rewards[env_ids, reward_steps] = rewards[env_ids]
-
     def before_reset(self, env_ids: Tensor) -> None:
         """Promote sufficiently long-lived outgoing states into the PSI buffer."""
         if getattr(self, "_evaluation_runtime_state", None) is not None:
@@ -556,10 +400,6 @@ class InterMimicControl(MimicControl):
             self._episode_target_steps[env_ids],
             self.env.max_episode_length,
         )
-        quality_scores = _mean_future_reward_scores(
-            self._episode_rewards[env_ids],
-            recorded,
-        )
         frames = self._episode_motion_frames[env_ids]
         valid = (
             (recorded > min_steps).unsqueeze(1)
@@ -581,8 +421,6 @@ class InterMimicControl(MimicControl):
                     env_ids[valid_rows], valid_steps
                 ],
                 scores[valid_rows, valid_steps],
-                quality_scores[valid_rows, valid_steps],
-                self.config.physical_buffer_survival_tie_epsilon,
             )
         self._physical_state_buffer.decay(self.config.physical_buffer_decay)
 
@@ -643,7 +481,6 @@ class InterMimicControl(MimicControl):
             return
         self._episode_recorded_steps[env_ids] = 0
         self._episode_motion_frames[env_ids] = -1
-        self._episode_rewards[env_ids] = 0.0
         speed_scale = float(
             getattr(
                 self.env.motion_manager,
