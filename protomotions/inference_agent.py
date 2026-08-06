@@ -210,6 +210,31 @@ def create_parser():
         help="Repeat full evaluation this many times and report per-run plus averaged metrics.",
     )
     parser.add_argument(
+        "--best-trial-output",
+        type=str,
+        default=None,
+        help=(
+            "JSON output path for --parallel-trials-per-motion. Defaults to "
+            "<checkpoint-dir>/best_trial_eval_<N>x.json."
+        ),
+    )
+    parser.add_argument(
+        "--parallel-trials-per-motion",
+        type=int,
+        default=None,
+        help=(
+            "Run this many trials per motion using all compatible environments "
+            "in parallel, then save private-style best-of-K metrics. This is "
+            "much faster than serial --repeat-eval for large K."
+        ),
+    )
+    parser.add_argument(
+        "--parallel-trial-seed",
+        type=int,
+        default=0,
+        help="Seed used to vary compatible motion-to-environment assignments.",
+    )
+    parser.add_argument(
         "--posterior-anchor-rotation-mode",
         type=str,
         default=None,
@@ -510,6 +535,48 @@ def _average_evaluation_logs(evaluation_runs: list[dict]) -> dict:
     for key in keys:
         averaged[key] = sum(run[key] for run in evaluation_runs) / len(evaluation_runs)
     return averaged
+
+
+def _motion_names_for_evaluation(motion_lib) -> list[str]:
+    num_motions = int(motion_lib.num_motions())
+    motion_files = getattr(motion_lib, "motion_files", None)
+    if motion_files is None or len(motion_files) != num_motions:
+        return [f"motion_{motion_id}" for motion_id in range(num_motions)]
+    return [Path(str(motion_file)).stem for motion_file in motion_files]
+
+
+def _print_best_trial_summary(summary: dict, output_path: Path) -> None:
+    print("\n" + "=" * 60)
+    print(f"PRIVATE-STYLE BEST-OF-{summary['num_trials']} RESULTS")
+    print("=" * 60)
+    print(f"  Motions Evaluated: {summary['num_motions']}")
+    print(f"  Per-Trial Success Rate: {summary['per_trial_success_rate']:.6f}")
+    print(f"  Best-of-N Success Rate: {summary['best_of_n_success_rate']:.6f}")
+    curve = summary["best_of_k_success_curve"]
+    milestones = {1, 2, 3, 5, 10, 20, 50, 100, len(curve)}
+    print("  Best-of-K Success Curve:")
+    for point in curve:
+        if point["num_trials"] in milestones:
+            print(
+                f"    K={point['num_trials']}: "
+                f"{point['success_rate']:.2%} "
+                f"({point['num_successes']}/{summary['num_motions']})"
+            )
+    print(
+        "  Average Best Execution Fraction: "
+        f"{summary['average_best_execution_fraction']:.6f}"
+    )
+    print(f"  Average Best Human Error: {summary['average_best_human_error']:.6f}")
+    print(f"  Average Best Object Error: {summary['average_best_object_error']:.6f}")
+    print(f"  Saved: {output_path}")
+    print("=" * 60 + "\n")
+
+
+def _save_best_trial_summary(summary: dict, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as stream:
+        json.dump(summary, stream, indent=2, sort_keys=True)
+        stream.write("\n")
 
 
 def _is_transition_text_segment(segment: dict) -> bool:
@@ -1147,6 +1214,26 @@ def main():
     global parser, args
     args = parser.parse_args()
 
+    if args.repeat_eval < 1:
+        raise ValueError("--repeat-eval must be at least 1.")
+    if args.parallel_trials_per_motion is not None:
+        if not args.full_eval:
+            raise ValueError("--parallel-trials-per-motion requires --full-eval.")
+        if args.parallel_trials_per_motion < 1:
+            raise ValueError("--parallel-trials-per-motion must be at least 1.")
+        if args.repeat_eval != 1:
+            raise ValueError(
+                "--parallel-trials-per-motion cannot be combined with "
+                "--repeat-eval."
+            )
+    if (
+        args.best_trial_output is not None
+        and args.parallel_trials_per_motion is None
+    ):
+        raise ValueError(
+            "--best-trial-output requires --parallel-trials-per-motion."
+        )
+
     if args.random_text_single_video and not args.random_text_videos:
         raise ValueError("--random-text-single-video requires --random-text-videos.")
     force_root_condition = (
@@ -1505,6 +1592,50 @@ def main():
             _run_random_text_video_worker(agent, env, args)
             return
         if args.full_eval:
+            if args.parallel_trials_per_motion is not None:
+                from protomotions.agents.evaluators.inference_trials import (
+                    aggregate_best_trials,
+                    run_parallel_mimic_trials,
+                )
+
+                required_attributes = (
+                    "motion_lib",
+                    "motion_manager",
+                    "_select_evaluation_actions",
+                )
+                missing_attributes = [
+                    name
+                    for name in required_attributes
+                    if not hasattr(agent.evaluator, name)
+                ]
+                if missing_attributes:
+                    raise TypeError(
+                        "--parallel-trials-per-motion requires a Mimic "
+                        f"evaluator; missing attributes {missing_attributes}."
+                    )
+
+                trial_results = run_parallel_mimic_trials(
+                    agent.evaluator,
+                    args.parallel_trials_per_motion,
+                    args.parallel_trial_seed,
+                )
+                summary = aggregate_best_trials(
+                    trial_results,
+                    _motion_names_for_evaluation(agent.evaluator.motion_lib),
+                )
+                output_path = (
+                    Path(args.best_trial_output).expanduser()
+                    if args.best_trial_output is not None
+                    else Path(args.checkpoint).resolve().parent
+                    / (
+                        "best_trial_eval_"
+                        f"{args.parallel_trials_per_motion}x.json"
+                    )
+                )
+                _save_best_trial_summary(summary, output_path)
+                _print_best_trial_summary(summary, output_path)
+                return
+
             evaluation_runs = []
             evaluated_scores = []
             eval_item_counts = []
