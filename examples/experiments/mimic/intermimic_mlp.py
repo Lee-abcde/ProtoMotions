@@ -50,7 +50,7 @@ def terrain_config(args: argparse.Namespace) -> TerrainConfig:
         sim_config=TerrainSimConfig(
             static_friction=0.9,
             dynamic_friction=0.9,
-            restitution=0.7,
+            restitution=0.1,
         )
     )
 
