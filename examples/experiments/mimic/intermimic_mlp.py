@@ -147,6 +147,8 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     ) = _intermimic_body_groups(robot_cfg)
 
     return EnvConfig(
+        ref_respawn_offset=0.0,
+        ref_object_respawn_offset=0.0,
         ref_contact_smooth_window=0,
         max_episode_length=300,
         num_state_history_steps=1,
