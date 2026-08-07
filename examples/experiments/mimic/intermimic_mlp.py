@@ -188,7 +188,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 rotation_body_ids=rotation_body_ids,
                 ankle_toe_body_ids=ankle_toe_body_ids,
                 position_weight=30.0,
-                rotation_weight=2.5,
+                rotation_weight=1.5,
                 energy_weight=2e-5,
                 distance_weight_scale=5.0,
                 distance_weighted_position=True,
@@ -211,7 +211,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 hand_weight=5.0,
                 other_weight=5.0,
                 negative_weight=3.0,
-                contact_energy_weight=1e-9,
+                contact_energy_weight=1e-11,
             ),
         },
         termination_components={
