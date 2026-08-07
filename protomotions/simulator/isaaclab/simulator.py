@@ -58,6 +58,7 @@ class IsaacLabSimulator(Simulator):
         1: (1.0, 0.0, 0.0),
         0: (0.0, 1.0, 0.0),
         -1: (0.0, 0.0, 1.0),
+        2: (1.0, 1.0, 1.0),
     }
 
     # =====================================================
@@ -1119,7 +1120,7 @@ class IsaacLabSimulator(Simulator):
         self._last_rigid_body_color_labels = labels.clone()
 
     def set_rigid_body_color_labels(self, labels: torch.Tensor) -> None:
-        """Map contact labels +1/0/-1 to red/green/blue body materials."""
+        """Map body labels +1/0/-1/+2 to red/green/blue/white materials."""
         labels = labels.detach().to(device="cpu", dtype=torch.int8)
 
         if not hasattr(self, "_rigid_body_color_attributes"):

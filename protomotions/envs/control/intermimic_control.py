@@ -37,6 +37,7 @@ class InterMimicControlConfig(MimicControlConfig):
     physical_buffer_min_success_fraction: float = 0.5
     physical_buffer_update_probability: float = 0.005
     physical_buffer_decay: float = 1e-5
+    show_object_contact_body_colors: bool = False
 
     def __post_init__(self):
         if self.future_steps is None:
@@ -368,6 +369,37 @@ class InterMimicControl(MimicControl):
                 )
 
         self._record_physical_states(robot_state, object_state)
+
+    def before_render(self) -> None:
+        """Color the robot white and object-contacting bodies red."""
+        if (
+            not self.config.show_object_contact_body_colors
+            or self.env.simulator.headless
+        ):
+            return
+
+        robot_state = self.env.simulator.get_robot_state()
+        contacts = robot_state.rigid_body_object_contacts
+        if contacts is None:
+            raise RuntimeError(
+                "InterMimic contact-body coloring requires object-filtered "
+                "contacts from force_matrix_w"
+            )
+        set_color_labels = getattr(
+            self.env.simulator,
+            "set_rigid_body_color_labels",
+            None,
+        )
+        if set_color_labels is None:
+            raise RuntimeError(
+                "InterMimic contact-body coloring is only supported by IsaacLab"
+            )
+        color_labels = torch.where(
+            contacts.bool(),
+            torch.ones_like(contacts, dtype=torch.int8),
+            torch.full_like(contacts, 2, dtype=torch.int8),
+        )
+        set_color_labels(color_labels)
 
     def before_reset(self, env_ids: Tensor) -> None:
         """Promote sufficiently long-lived outgoing states into the PSI buffer."""

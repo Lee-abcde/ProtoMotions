@@ -147,6 +147,15 @@ def create_parser():
         "--scenes-file", type=str, default=None, help="Path to scenes file (optional)"
     )
     parser.add_argument(
+        "--show-object-contact-body-colors",
+        action="store_true",
+        default=False,
+        help=(
+            "Color IsaacLab robot bodies white and bodies contacting a scene "
+            "object red."
+        ),
+    )
+    parser.add_argument(
         "--overrides",
         nargs="*",
         default=[],
@@ -1329,6 +1338,24 @@ def main():
     if args.headless is not None:
         log.info(f"CLI override: headless = {args.headless}")
         simulator_config.headless = args.headless
+
+    if args.show_object_contact_body_colors:
+        if args.simulator != "isaaclab":
+            raise ValueError(
+                "--show-object-contact-body-colors requires --simulator isaaclab."
+            )
+        if args.headless:
+            raise ValueError(
+                "--show-object-contact-body-colors cannot be used with --headless."
+            )
+        intermimic_control = env_config.control_components.get("intermimic")
+        if intermimic_control is None:
+            raise ValueError(
+                "--show-object-contact-body-colors requires an InterMimic "
+                "control component."
+            )
+        intermimic_control.show_object_contact_body_colors = True
+        log.info("CLI override: show object-contact body colors")
 
     # Parse and apply general CLI overrides
     from protomotions.utils.config_utils import (
