@@ -161,9 +161,9 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 # InterMimic PSI: one raw-reference slot plus two learned
                 # physically valid simulated-state slots.
                 physical_buffer_size=3,
-                # Admit every positive-survival candidate; the top-K buffer
-                # keeps it only when it improves the weakest state per frame.
-                physical_buffer_min_success_fraction=0.0,
+                # Match always_keypos: accept states whose rollout survives
+                # more than half of its available short-motion horizon.
+                physical_buffer_min_success_fraction=0.5,
                 # Match the dense update behavior used by always_keypos:
                 # every eligible rollout may contribute PSI candidates.
                 physical_buffer_update_probability=1.0,
@@ -341,7 +341,7 @@ def agent_config(
                 ),
             },
             motion_weights_rules=MotionWeightsRulesConfig(
-                motion_weights_update_success_discount=1.0,
+                motion_weights_update_success_discount=0.999,
                 motion_weights_update_failure_discount=0,
             ),
         ),
