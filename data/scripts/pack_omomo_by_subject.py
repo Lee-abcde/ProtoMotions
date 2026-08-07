@@ -171,7 +171,7 @@ def create_scene(
         contact_labels=converted.object_contact_labels,
         options=ObjectOptions(
             fix_base_link=False,
-            density=1000.0,
+            density=200.0,
             angular_damping=0.01,
             linear_damping=0.01,
             max_angular_velocity=100.0,
