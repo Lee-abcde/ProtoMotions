@@ -45,6 +45,37 @@ KEY_BODY_NAMES = [
     "R_Wrist",
 ]
 
+LEFT_FINGERTIP_NAMES = [
+    "L_Thumb3",
+    "L_Index3",
+    "L_Middle3",
+    "L_Ring3",
+    "L_Pinky3",
+]
+RIGHT_FINGERTIP_NAMES = [
+    "R_Thumb3",
+    "R_Index3",
+    "R_Middle3",
+    "R_Ring3",
+    "R_Pinky3",
+]
+# Distal capsule endpoints in each fingertip body's local frame.
+LEFT_FINGERTIP_LOCAL_OFFSETS = [
+    [0.0140, 0.0180, -0.0025],
+    [0.0016, 0.0196, -0.0003],
+    [-0.0017, 0.0204, 0.0000],
+    [-0.0041, 0.0199, 0.0004],
+    [-0.0074, 0.0140, 0.0003],
+]
+RIGHT_FINGERTIP_LOCAL_OFFSETS = [
+    [0.0140, -0.0148, -0.0025],
+    [0.0016, -0.0164, -0.0003],
+    [-0.0017, -0.0172, 0.0000],
+    [-0.0041, -0.0167, 0.0004],
+    [-0.0074, -0.0108, 0.0003],
+]
+
+
 def terrain_config(args: argparse.Namespace) -> TerrainConfig:
     return TerrainConfig(
         sim_config=TerrainSimConfig(
@@ -145,6 +176,14 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         rotation_body_ids,
         ankle_toe_body_ids,
     ) = _intermimic_body_groups(robot_cfg)
+    left_fingertip_body_ids = _body_ids(robot_cfg, LEFT_FINGERTIP_NAMES)
+    right_fingertip_body_ids = _body_ids(robot_cfg, RIGHT_FINGERTIP_NAMES)
+    left_fingertip_local_offsets = torch.tensor(
+        LEFT_FINGERTIP_LOCAL_OFFSETS, dtype=torch.float
+    )
+    right_fingertip_local_offsets = torch.tensor(
+        RIGHT_FINGERTIP_LOCAL_OFFSETS, dtype=torch.float
+    )
 
     return EnvConfig(
         ref_respawn_offset=0.0,
@@ -207,8 +246,13 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             "intermimic_contact": intermimic_contact_reward_factory(
                 left_hand_body_ids=left_hand_body_ids,
                 right_hand_body_ids=right_hand_body_ids,
+                left_fingertip_body_ids=left_fingertip_body_ids,
+                right_fingertip_body_ids=right_fingertip_body_ids,
+                left_fingertip_local_offsets=left_fingertip_local_offsets,
+                right_fingertip_local_offsets=right_fingertip_local_offsets,
                 other_body_ids=other_body_ids,
-                hand_weight=5.0,
+                hand_distance_scale=20.0,
+                hand_contact_bonus_weight=0.2,
                 other_weight=5.0,
                 negative_weight=3.0,
                 contact_energy_weight=1e-9,

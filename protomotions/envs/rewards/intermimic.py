@@ -335,21 +335,87 @@ def compute_intermimic_contact_reward(
     other_weight: float,
     negative_weight: float,
     contact_energy_weight: float,
+    body_pos: Tensor | None = None,
+    body_rot: Tensor | None = None,
+    object_pos: Tensor | None = None,
+    object_rot: Tensor | None = None,
+    neutral_pointclouds: Tensor | None = None,
+    object_valid_mask: Tensor | None = None,
+    left_fingertip_body_ids: Tensor | None = None,
+    right_fingertip_body_ids: Tensor | None = None,
+    left_fingertip_local_offsets: Tensor | None = None,
+    right_fingertip_local_offsets: Tensor | None = None,
+    hand_distance_scale: float = 20.0,
+    hand_contact_bonus_weight: float = 0.2,
 ) -> Tensor:
-    """Three-state body-object contact reward with hand-level promotion."""
+    """Three-state contact reward with dense fingertip attachment shaping."""
     object_contacts = body_object_contacts.float()
     labels = ref_body_contact_labels.float()
 
-    left_reward = _hand_contact_reward(
-        object_contacts[:, left_hand_body_ids],
-        labels[:, left_hand_body_ids],
-        hand_weight,
-    )
-    right_reward = _hand_contact_reward(
-        object_contacts[:, right_hand_body_ids],
-        labels[:, right_hand_body_ids],
-        hand_weight,
-    )
+    if left_fingertip_body_ids is None:
+        left_reward = _hand_contact_reward(
+            object_contacts[:, left_hand_body_ids],
+            labels[:, left_hand_body_ids],
+            hand_weight,
+        )
+        right_reward = _hand_contact_reward(
+            object_contacts[:, right_hand_body_ids],
+            labels[:, right_hand_body_ids],
+            hand_weight,
+        )
+    else:
+        attachment_inputs = (
+            body_pos,
+            body_rot,
+            object_pos,
+            object_rot,
+            neutral_pointclouds,
+            object_valid_mask,
+            right_fingertip_body_ids,
+            left_fingertip_local_offsets,
+            right_fingertip_local_offsets,
+        )
+        if any(value is None for value in attachment_inputs):
+            raise ValueError("Fingertip attachment reward inputs are incomplete")
+        fingertip_body_ids = torch.cat(
+            (left_fingertip_body_ids, right_fingertip_body_ids)
+        )
+        fingertip_local_offsets = torch.cat(
+            (left_fingertip_local_offsets, right_fingertip_local_offsets)
+        )
+        fingertip_rot = body_rot[:, fingertip_body_ids]
+        fingertip_pos = body_pos[:, fingertip_body_ids] + rotations.quat_rotate(
+            fingertip_rot,
+            fingertip_local_offsets.unsqueeze(0).expand_as(
+                fingertip_rot[..., :3]
+            ),
+            True,
+        )
+        fingertip_distances = nearest_object_surface_distances(
+            fingertip_pos,
+            object_pos,
+            object_rot,
+            neutral_pointclouds,
+            object_valid_mask,
+        )
+
+        num_left_fingertips = left_fingertip_body_ids.numel()
+        left_reward = _hand_attachment_reward(
+            fingertip_distances[:, :num_left_fingertips],
+            object_contacts[:, left_fingertip_body_ids],
+            labels[:, left_hand_body_ids],
+            object_valid_mask,
+            hand_distance_scale,
+            hand_contact_bonus_weight,
+        )
+        right_reward = _hand_attachment_reward(
+            fingertip_distances[:, num_left_fingertips:],
+            object_contacts[:, right_fingertip_body_ids],
+            labels[:, right_hand_body_ids],
+            object_valid_mask,
+            hand_distance_scale,
+            hand_contact_bonus_weight,
+        )
 
     other_labels = labels[:, other_body_ids]
     other_contacts = object_contacts[:, other_body_ids]
@@ -477,6 +543,27 @@ def _fingertip_bearing_reward_for_hand(
         & torch.any(object_valid_mask, dim=-1)
     )
     return torch.where(active, reward, torch.ones_like(reward))
+
+
+def _hand_attachment_reward(
+    fingertip_distances: Tensor,
+    fingertip_contacts: Tensor,
+    labels: Tensor,
+    object_valid_mask: Tensor,
+    distance_scale: float,
+    contact_bonus_weight: float,
+) -> Tensor:
+    proximity = torch.exp(-distance_scale * fingertip_distances).mean(dim=-1)
+    contact = fingertip_contacts.mean(dim=-1)
+    attachment = (
+        (1.0 - contact_bonus_weight) * proximity
+        + contact_bonus_weight * contact
+    )
+    promoted = 0.5 * (1.0 + attachment)
+    required = torch.any(labels > 0, dim=-1) & torch.any(
+        object_valid_mask, dim=-1
+    )
+    return torch.where(required, promoted, torch.ones_like(promoted))
 
 
 def _hand_contact_reward(contacts: Tensor, labels: Tensor, weight: float) -> Tensor:

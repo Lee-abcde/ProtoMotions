@@ -1817,12 +1817,24 @@ def intermimic_contact_reward_factory(
     other_weight: float = 5.0,
     negative_weight: float = 3.0,
     contact_energy_weight: float = 1e-9,
+    left_fingertip_body_ids: Tensor | None = None,
+    right_fingertip_body_ids: Tensor | None = None,
+    left_fingertip_local_offsets: Tensor | None = None,
+    right_fingertip_local_offsets: Tensor | None = None,
+    hand_distance_scale: float = 20.0,
+    hand_contact_bonus_weight: float = 0.2,
 ) -> MdpComponent:
     from protomotions.envs.rewards import compute_intermimic_contact_reward
 
     return MdpComponent(
         compute_func=compute_intermimic_contact_reward,
         dynamic_vars={
+            "body_pos": EnvContext.current.rigid_body_pos,
+            "body_rot": EnvContext.current.rigid_body_rot,
+            "object_pos": EnvContext.scene.object_pos,
+            "object_rot": EnvContext.scene.object_rot,
+            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
             "body_object_contacts": (
                 EnvContext.current.rigid_body_object_contacts
             ),
@@ -1834,8 +1846,14 @@ def intermimic_contact_reward_factory(
         static_params={
             "left_hand_body_ids": left_hand_body_ids,
             "right_hand_body_ids": right_hand_body_ids,
+            "left_fingertip_body_ids": left_fingertip_body_ids,
+            "right_fingertip_body_ids": right_fingertip_body_ids,
+            "left_fingertip_local_offsets": left_fingertip_local_offsets,
+            "right_fingertip_local_offsets": right_fingertip_local_offsets,
             "other_body_ids": other_body_ids,
             "hand_weight": hand_weight,
+            "hand_distance_scale": hand_distance_scale,
+            "hand_contact_bonus_weight": hand_contact_bonus_weight,
             "other_weight": other_weight,
             "negative_weight": negative_weight,
             "contact_energy_weight": contact_energy_weight,
