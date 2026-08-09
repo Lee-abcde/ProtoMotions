@@ -48,7 +48,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         contact_match_rew_factory,
         tracking_error_term_factory,
     )
-    from protomotions.envs.action import make_pd_action_config
+    from protomotions.envs.action import make_asymmetric_pd_action_config
 
     control_components = {
         "mimic": MimicControlConfig(
@@ -94,7 +94,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         observation_components=observation_components,
         termination_components=termination_components,
         reward_components=reward_components,
-        action_config=make_pd_action_config(robot_cfg),
+        action_config=make_asymmetric_pd_action_config(robot_cfg),
         motion_manager=MimicMotionManagerConfig(
             init_start_prob=0.2,
             resample_on_reset=True,
