@@ -410,7 +410,7 @@ def configure_robot_and_simulator(
     simulator_cfg.binary_contact_mode = "componentwise"
     physx_cfg = getattr(getattr(simulator_cfg, "sim", None), "physx", None)
     if physx_cfg is not None:
-        physx_cfg.num_position_iterations = 4
+        physx_cfg.num_position_iterations = 8
         physx_cfg.num_velocity_iterations = 1
         physx_cfg.max_depenetration_velocity = 100.0
 
