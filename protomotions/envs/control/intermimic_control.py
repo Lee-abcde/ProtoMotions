@@ -361,7 +361,9 @@ class InterMimicControl(MimicControl):
             for hand_idx, body_ids in enumerate(hand_groups):
                 required = torch.any(labels[:, body_ids] > 0, dim=-1)
                 has_contact = torch.any(contacts[:, body_ids], dim=-1)
-                missing = required & ~has_contact & (self.env.progress_buf > 2)
+                # InterMimic counts required-contact misses from the first
+                # simulated frame in both training and evaluation.
+                missing = required & ~has_contact
                 self.contact_loss_counter[:, hand_idx] = torch.where(
                     missing,
                     self.contact_loss_counter[:, hand_idx] + 1,

@@ -2017,6 +2017,40 @@ def intermimic_contact_loss_term_factory() -> MdpComponent:
     )
 
 
+def intermimic_root_height_evaluation_factory(
+    minimum_height: float = 0.3,
+) -> MdpComponent:
+    """Evaluate InterMimic root-height failure with the private threshold."""
+    from protomotions.envs.terminations import intermimic_root_height_term
+
+    return MdpComponent(
+        compute_func=intermimic_root_height_term,
+        dynamic_vars={
+            "root_pos": EnvContext.current.root_pos,
+            "progress_buf": EnvContext.progress_buf,
+        },
+        static_params={
+            "minimum_height": minimum_height,
+            "threshold": 0.5,
+        },
+    )
+
+
+def intermimic_contact_loss_evaluation_factory() -> MdpComponent:
+    """Evaluate required-hand-contact loss as a binary failure metric."""
+    from protomotions.envs.terminations import intermimic_contact_loss_term
+
+    return MdpComponent(
+        compute_func=intermimic_contact_loss_term,
+        dynamic_vars={
+            "contact_loss_exceeded": (
+                EnvContext.intermimic.contact_loss_exceeded
+            )
+        },
+        static_params={"threshold": 0.5},
+    )
+
+
 def intermimic_human_error_factory(
     key_body_ids: Tensor, threshold: float = None
 ) -> MdpComponent:
@@ -2174,8 +2208,10 @@ __all__ = [
     "relative_body_pos_metric_factory",
     "path_distance_error_factory",
     "steering_velocity_error_factory",
+    "intermimic_contact_loss_evaluation_factory",
     "intermimic_human_error_factory",
     "intermimic_object_error_factory",
     "intermimic_interaction_error_factory",
     "intermimic_object_contact_error_factory",
+    "intermimic_root_height_evaluation_factory",
 ]

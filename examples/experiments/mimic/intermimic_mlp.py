@@ -308,10 +308,12 @@ def agent_config(
         PPOModelConfig,
     )
     from protomotions.envs.component_factories import (
+        intermimic_contact_loss_evaluation_factory,
         intermimic_human_error_factory,
         intermimic_interaction_error_factory,
         intermimic_object_contact_error_factory,
         intermimic_object_error_factory,
+        intermimic_root_height_evaluation_factory,
     )
 
     key_body_ids = _body_ids(robot_config, KEY_BODY_NAMES)
@@ -379,6 +381,12 @@ def agent_config(
                 "object_error": intermimic_object_error_factory(threshold=0.5),
                 "interaction_error": intermimic_interaction_error_factory(
                     key_body_ids=key_body_ids, threshold=2.0
+                ),
+                "root_height": intermimic_root_height_evaluation_factory(
+                    minimum_height=0.3
+                ),
+                "required_hand_contact": (
+                    intermimic_contact_loss_evaluation_factory()
                 ),
                 "object_contact_error": (
                     intermimic_object_contact_error_factory()
