@@ -74,6 +74,11 @@ RIGHT_FINGERTIP_LOCAL_OFFSETS = [
     [-0.0041, -0.0167, 0.0004],
     [-0.0074, -0.0108, 0.0003],
 ]
+# SMPL-X represents each palm with the box geometry on its wrist body.
+LEFT_PALM_NAME = "L_Wrist"
+RIGHT_PALM_NAME = "R_Wrist"
+LEFT_PALM_LOCAL_OFFSET = [-0.0031, 0.0523, -0.0013]
+RIGHT_PALM_LOCAL_OFFSET = [-0.0029, -0.0537, -0.0044]
 
 
 def terrain_config(args: argparse.Namespace) -> TerrainConfig:
@@ -176,13 +181,22 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         rotation_body_ids,
         ankle_toe_body_ids,
     ) = _intermimic_body_groups(robot_cfg)
-    left_fingertip_body_ids = _body_ids(robot_cfg, LEFT_FINGERTIP_NAMES)
-    right_fingertip_body_ids = _body_ids(robot_cfg, RIGHT_FINGERTIP_NAMES)
+    # The contact kernel accepts arbitrary hand attachment samples despite its
+    # legacy fingertip parameter names. Include the palm box center so palm
+    # contact and proximity are rewarded together with the five fingertips.
+    left_fingertip_body_ids = _body_ids(
+        robot_cfg, LEFT_FINGERTIP_NAMES + [LEFT_PALM_NAME]
+    )
+    right_fingertip_body_ids = _body_ids(
+        robot_cfg, RIGHT_FINGERTIP_NAMES + [RIGHT_PALM_NAME]
+    )
     left_fingertip_local_offsets = torch.tensor(
-        LEFT_FINGERTIP_LOCAL_OFFSETS, dtype=torch.float
+        LEFT_FINGERTIP_LOCAL_OFFSETS + [LEFT_PALM_LOCAL_OFFSET],
+        dtype=torch.float,
     )
     right_fingertip_local_offsets = torch.tensor(
-        RIGHT_FINGERTIP_LOCAL_OFFSETS, dtype=torch.float
+        RIGHT_FINGERTIP_LOCAL_OFFSETS + [RIGHT_PALM_LOCAL_OFFSET],
+        dtype=torch.float,
     )
 
     return EnvConfig(
