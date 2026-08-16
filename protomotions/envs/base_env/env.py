@@ -419,7 +419,7 @@ class BaseEnv:
 
     _action_config_device_ready: bool = False
 
-    def _process_action(self, action: Tensor, context: EnvContext) -> Dict[str, Tensor]:
+    def _process_action(self, action: Tensor) -> Dict[str, Tensor]:
         """Process action using single action config dict.
 
         action_config is a single dict with "fn" key and parameters.
@@ -688,7 +688,7 @@ class BaseEnv:
         self._current_raw_action[:] = action
 
         # Process action
-        action_dict = self._process_action(action, self.context)
+        action_dict = self._process_action(action)
         processed_action = action_dict["processed_action"]
         self._current_processed_action[:] = processed_action
 
@@ -719,11 +719,11 @@ class BaseEnv:
         self.progress_buf += 1
 
         if self.state_history is not None:
-            current_state = self.simulator.get_robot_state()
+            history_state = self.simulator.get_robot_state()
             ground_heights = self.terrain.get_ground_heights(
-                current_state.rigid_body_pos[:, 0]
+                history_state.rigid_body_pos[:, 0]
             ).squeeze(-1)
-            body_contacts = current_state.rigid_body_contacts[
+            body_contacts = history_state.rigid_body_contacts[
                 :, self.contact_body_ids
             ].bool()
 
@@ -737,7 +737,7 @@ class BaseEnv:
                 # Single source of truth: uniform noise via apply_observation_noise
                 noisy = apply_observation_noise(
                     obs_noise_cfg=obs_noise_cfg,
-                    robot_state=current_state,
+                    robot_state=history_state,
                     anchor_idx=self.robot_config.anchor_body_index,
                     ground_heights=ground_heights,
                 )
@@ -753,12 +753,12 @@ class BaseEnv:
                 noisy_kwargs["noisy_ground_heights"] = noisy.ground_heights
 
             self.state_history.rotate_and_update(
-                rigid_body_pos=current_state.rigid_body_pos,
-                rigid_body_rot=current_state.rigid_body_rot,
-                rigid_body_vel=current_state.rigid_body_vel,
-                rigid_body_ang_vel=current_state.rigid_body_ang_vel,
-                dof_pos=current_state.dof_pos,
-                dof_vel=current_state.dof_vel,
+                rigid_body_pos=history_state.rigid_body_pos,
+                rigid_body_rot=history_state.rigid_body_rot,
+                rigid_body_vel=history_state.rigid_body_vel,
+                rigid_body_ang_vel=history_state.rigid_body_ang_vel,
+                dof_pos=history_state.dof_pos,
+                dof_vel=history_state.dof_vel,
                 actions=self._current_raw_action,
                 ground_heights=ground_heights,
                 body_contacts=body_contacts,
@@ -773,6 +773,11 @@ class BaseEnv:
 
         self.control_manager.step()
 
+        # Control components may reset or kinematically overwrite simulator
+        # state. Read it after those hooks so observations, rewards,
+        # terminations, and raw extras all describe the final state.
+        current_state = self.simulator.get_robot_state()
+
         if (
             self.motion_manager is not None
             and self.motion_manager.config.realign_motion_with_humanoid_on_each_step
@@ -785,7 +790,7 @@ class BaseEnv:
             )
 
         # Build context once and reuse for observations, rewards, and terminations
-        self._current_context = self._build_global_context()
+        self._current_context = self._build_global_context(current_state)
 
         self.compute_observations(context=self._current_context)
         self.compute_reward(context=self._current_context)
@@ -796,7 +801,7 @@ class BaseEnv:
 
         self.extras["terminate"] = self.terminate_buf
 
-        rbs: RobotState = self.simulator.get_robot_state()
+        rbs = current_state
         for k, _ in rbs.get_shape_mapping(flattened=True).items():
             self.extras[f"raw/{k}"] = rbs.flatten_bodies(k)
 
@@ -880,7 +885,9 @@ class BaseEnv:
             self._current_context = self._build_global_context()
         return self._current_context
 
-    def _build_global_context(self) -> EnvContext:
+    def _build_global_context(
+        self, current_state: Optional[RobotState] = None
+    ) -> EnvContext:
         """Build a fresh global context for observations, rewards, and terminations.
 
         Creates typed EnvContext with view wrappers around existing data structures.
@@ -896,7 +903,8 @@ class BaseEnv:
         Returns:
             Typed EnvContext for observation/reward/termination functions.
         """
-        current_state = self.simulator.get_robot_state()
+        if current_state is None:
+            current_state = self.simulator.get_robot_state()
         anchor_idx = self.robot_config.anchor_body_index
 
         ground_heights = self.terrain.get_ground_heights(
