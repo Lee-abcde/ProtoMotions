@@ -156,6 +156,42 @@ def create_parser():
         ),
     )
     parser.add_argument(
+        "--psi-state-checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Load an InterMimic env checkpoint and hold a sampled physical "
+            "PSI initialization state in the viewer. Press R to sample again."
+        ),
+    )
+    parser.add_argument(
+        "--psi-replay-motion-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "Replay the full timeline for these motion IDs, using the "
+            "highest-scoring PSI state when available and a blue reference "
+            "state otherwise. Requires --psi-state-checkpoint."
+        ),
+    )
+    parser.add_argument(
+        "--psi-replay-fps",
+        type=float,
+        default=30.0,
+        help="Viewer frame rate for --psi-replay-motion-ids.",
+    )
+    parser.add_argument(
+        "--psi-replay-slot",
+        type=int,
+        choices=(0, 1),
+        default=None,
+        help=(
+            "Replay only physical PSI slot 0 or 1. By default, each frame "
+            "uses whichever slot has the higher score."
+        ),
+    )
+    parser.add_argument(
         "--overrides",
         nargs="*",
         default=[],
@@ -375,6 +411,7 @@ import random  # noqa: E402
 import re  # noqa: E402
 import subprocess  # noqa: E402
 import sys  # noqa: E402
+import time  # noqa: E402
 import torch  # noqa: E402
 from protomotions.agents.common.transformer import Transformer  # noqa: E402
 from protomotions.utils.hydra_replacement import get_class  # noqa: E402
@@ -1218,6 +1255,358 @@ def apply_command_source_overrides(env_config, command_source_specs):
             )
 
 
+def prepare_psi_initialization(
+    checkpoint_path: str,
+    env_config,
+    *,
+    headless: bool,
+) -> dict:
+    """Load a PSI buffer and configure the env to sample its start states."""
+    if headless:
+        raise ValueError("--psi-state-checkpoint requires a non-headless viewer.")
+
+    checkpoint = Path(checkpoint_path).expanduser().resolve()
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"PSI state checkpoint not found: {checkpoint}")
+
+    state_dict = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    try:
+        physical_buffer = state_dict["control_manager"]["intermimic"][
+            "physical_state_buffer"
+        ]
+        scores = physical_buffer["scores"]
+        states = physical_buffer["states"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            f"Checkpoint does not contain an InterMimic PSI buffer: {checkpoint}"
+        ) from exc
+
+    if scores.ndim != 2 or states.ndim != 3:
+        raise ValueError("Invalid InterMimic PSI buffer tensor shapes.")
+    if scores.shape[:2] != states.shape[:2]:
+        raise ValueError("InterMimic PSI score/state shapes do not match.")
+
+    intermimic_config = env_config.control_components.get("intermimic")
+    if intermimic_config is None:
+        raise ValueError(
+            "--psi-state-checkpoint requires an InterMimic environment config."
+        )
+
+    intermimic_config.physical_buffer_size = int(scores.shape[0]) + 1
+    # The frozen inference config uses a very large episode length because PSI
+    # is normally disabled. Restore the training horizon to avoid allocating a
+    # multi-GiB rollout-history tensor solely for visualization.
+    env_config.max_episode_length = 300
+    env_config.motion_manager.init_start_prob = 0.0
+    covered_frames = int((scores.sum(dim=0) > 0).sum().item())
+    log.info(
+        "Loaded PSI buffer from %s: %d physical slots, %d/%d covered frames",
+        checkpoint,
+        scores.shape[0],
+        covered_frames,
+        scores.shape[1],
+    )
+    return state_dict
+
+
+def show_psi_initialization(env, state_dict: dict) -> None:
+    """Sample and hold physical PSI reset states until the viewer closes."""
+    intermimic = env.control_manager.components.get("intermimic")
+    if intermimic is None or intermimic._physical_state_buffer is None:
+        raise RuntimeError("InterMimic PSI buffer was not allocated.")
+
+    env.load_state_dict(state_dict)
+
+    def reset_to_physical_state() -> int:
+        for _ in range(100):
+            env.reset()
+            physical_ids = torch.nonzero(
+                intermimic._last_physical_reset_mask, as_tuple=False
+            ).flatten()
+            if physical_ids.numel() > 0:
+                env_id = int(physical_ids[0].item())
+                motion_id = int(env.motion_manager.motion_ids[env_id].item())
+                motion_time = float(env.motion_manager.motion_times[env_id].item())
+                motion_name = str(env.motion_lib.motion_files[motion_id])
+                log.info(
+                    "Showing physical PSI initialization: env=%d motion_id=%d "
+                    "motion=%s time=%.3fs",
+                    env_id,
+                    motion_id,
+                    Path(motion_name).stem,
+                    motion_time,
+                )
+                return env_id
+        raise RuntimeError("Could not sample a covered physical PSI state.")
+
+    try:
+        active_env_id = reset_to_physical_state()
+        env.simulator._camera_target["env"] = active_env_id
+        env.simulator.user_interface.active_env_id = active_env_id
+        print(
+            "Physical PSI initialization is held in the viewer. "
+            "Press R to resample; Q to quit."
+        )
+        while env.is_simulation_running():
+            if env.consume_reset_request():
+                active_env_id = reset_to_physical_state()
+                env.simulator._camera_target["env"] = active_env_id
+                env.simulator.user_interface.active_env_id = active_env_id
+            markers = env._prepare_for_render()
+            env.simulator._update_simulator_markers(markers)
+            env.simulator.render()
+    finally:
+        if hasattr(env.simulator, "shutdown"):
+            env.simulator.shutdown()
+
+
+def replay_psi_buffer(
+    env,
+    state_dict: dict,
+    motion_ids: list[int],
+    replay_fps: float,
+    replay_slot: int | None,
+    key_handler_targets: dict,
+) -> None:
+    """Replay PSI states with blue reference states filling uncovered frames."""
+    if replay_fps <= 0:
+        raise ValueError("--psi-replay-fps must be positive.")
+
+    intermimic = env.control_manager.components.get("intermimic")
+    if intermimic is None or intermimic._physical_state_buffer is None:
+        raise RuntimeError("InterMimic PSI buffer was not allocated.")
+    env.load_state_dict(state_dict)
+
+    scores = intermimic._physical_state_buffer.scores
+    states = intermimic._physical_state_buffer.states
+    if replay_slot is not None and replay_slot >= scores.shape[0]:
+        raise ValueError(
+            f"PSI replay slot {replay_slot} is unavailable; checkpoint has "
+            f"{scores.shape[0]} physical slots."
+        )
+    num_motions = env.motion_lib.num_motions()
+    set_color_labels = getattr(
+        env.simulator, "set_rigid_body_color_labels", None
+    )
+    if set_color_labels is None:
+        raise RuntimeError("PSI reference coloring requires IsaacLab.")
+    num_bodies = len(env.robot_config.kinematic_info.body_names)
+    color_labels = torch.full(
+        (env.num_envs, num_bodies),
+        2,
+        dtype=torch.int8,
+        device=env.device,
+    )
+
+    def build_sequence(motion_id: int) -> dict:
+        if not 0 <= motion_id < num_motions:
+            raise ValueError(
+                f"PSI replay motion ID {motion_id} is outside [0, {num_motions})."
+            )
+
+        compatible_envs = torch.where(
+            env.motion_manager.motion_sampling_mask_per_env[:, motion_id]
+        )[0]
+        if compatible_envs.numel() == 0:
+            raise RuntimeError(
+                f"No object-compatible environment for motion ID {motion_id}."
+            )
+        env_id = int(compatible_envs[0].item())
+        frame_start = int(env.motion_lib.length_starts[motion_id].item())
+        num_frames = int(env.motion_lib.motion_num_frames[motion_id].item())
+        motion_scores = scores[:, frame_start : frame_start + num_frames]
+        if replay_slot is None:
+            selected_scores, selected_slots = motion_scores.max(dim=0)
+        else:
+            selected_scores = motion_scores[replay_slot]
+            selected_slots = torch.full(
+                (num_frames,),
+                replay_slot,
+                dtype=torch.long,
+                device=env.device,
+            )
+        local_frames = torch.arange(
+            num_frames, dtype=torch.long, device=env.device
+        )
+        return {
+            "motion_id": motion_id,
+            "env_id": env_id,
+            "global_frames": frame_start + local_frames,
+            "local_frames": local_frames,
+            "slots": selected_slots,
+            "physical_mask": selected_scores > 0,
+        }
+
+    sequences = [build_sequence(motion_id) for motion_id in motion_ids]
+    all_env_ids = torch.arange(
+        env.num_envs, dtype=torch.long, device=env.device
+    )
+    env.simulator.park_envs(all_env_ids)
+
+    def set_frame(sequence: dict, sequence_frame: int) -> None:
+        env_id = sequence["env_id"]
+        motion_id = sequence["motion_id"]
+        local_frame = sequence["local_frames"][sequence_frame]
+        global_frame = sequence["global_frames"][sequence_frame]
+        slot = sequence["slots"][sequence_frame]
+        env_ids_tensor = torch.tensor(
+            [env_id], dtype=torch.long, device=env.device
+        )
+        motion_ids_tensor = torch.tensor(
+            [motion_id], dtype=torch.long, device=env.device
+        )
+        motion_time = (
+            local_frame.to(env.motion_lib.motion_dt.dtype)
+            * env.motion_lib.motion_dt[motion_id]
+        ).reshape(1)
+        env.motion_manager.motion_ids[env_ids_tensor] = motion_id
+        env.motion_manager.motion_times[env_ids_tensor] = motion_time
+        robot_state, object_state = env.compute_ref_reset_state(
+            env_ids_tensor,
+            motion_ids_tensor,
+            motion_time,
+            sample_flat=False,
+        )
+        is_physical = bool(sequence["physical_mask"][sequence_frame].item())
+        if is_physical:
+            packed_state = states[slot, global_frame].unsqueeze(0)
+            intermimic._unpack_reset_states(
+                packed_state,
+                env_ids_tensor,
+                torch.ones(1, dtype=torch.bool, device=env.device),
+                robot_state,
+                object_state,
+            )
+        env.simulator.reset_envs(robot_state, object_state, env_ids_tensor)
+        color_labels.fill_(2)
+        if is_physical:
+            physical_slot = int(slot.item())
+            # Saved InterMimic checkpoints currently use two physical slots.
+            # Keep slot 0 white and make slot 1 red so replay visibly shows
+            # which buffer supplied each frame.
+            color_labels[env_id].fill_(2 if physical_slot == 0 else 1)
+        else:
+            color_labels[env_id].fill_(-1)
+        set_color_labels(color_labels)
+        env._current_context = None
+        env._current_noisy_obs = None
+
+    sequence_index = 0
+    sequence_frame = 0
+    last_announced_sequence = -1
+    next_frame_time = time.monotonic()
+    requested_motion_id = None
+
+    def request_motion_id() -> None:
+        nonlocal requested_motion_id
+        current_motion_id = sequences[sequence_index]["motion_id"]
+        prompt = (
+            "\n[psi-replay] Enter motion id "
+            f"[0, {num_motions - 1}] (current {current_motion_id}, "
+            "empty to cancel): "
+        )
+        try:
+            raw_motion_id = input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            print("\n[psi-replay] Motion switch cancelled.")
+            return
+        raw_motion_id = raw_motion_id.strip()
+        if not raw_motion_id:
+            print("[psi-replay] Motion switch cancelled.")
+            return
+        try:
+            motion_id = int(raw_motion_id)
+        except ValueError:
+            print(f"[psi-replay] Invalid motion id: {raw_motion_id!r}")
+            return
+        if not 0 <= motion_id < num_motions:
+            print(
+                f"[psi-replay] Motion id {motion_id} is outside "
+                f"[0, {num_motions - 1}]."
+            )
+            return
+        requested_motion_id = motion_id
+        print(f"[psi-replay] Scheduled PSI replay for motion {motion_id}.")
+
+    key_handler_targets["F9"] = request_motion_id
+    try:
+        print(
+            "Replaying saved physical PSI frames. F9 switches motion; "
+            "R restarts; Q quits."
+        )
+        print(
+            "PSI replay colors: slot 0 = white, slot 1 = red, "
+            "reference fallback = blue."
+        )
+        if replay_slot is not None:
+            print(f"PSI replay is locked to physical slot {replay_slot}.")
+        while env.is_simulation_running():
+            if requested_motion_id is not None:
+                motion_id = requested_motion_id
+                requested_motion_id = None
+                try:
+                    sequences = [build_sequence(motion_id)]
+                except (ValueError, RuntimeError) as exc:
+                    print(f"[psi-replay] Motion switch skipped: {exc}")
+                else:
+                    env.simulator.park_envs(all_env_ids)
+                    sequence_index = 0
+                    sequence_frame = 0
+                    last_announced_sequence = -1
+
+            if env.consume_reset_request():
+                sequence_index = 0
+                sequence_frame = 0
+                last_announced_sequence = -1
+
+            sequence = sequences[sequence_index]
+            if sequence_index != last_announced_sequence:
+                motion_id = sequence["motion_id"]
+                motion_name = Path(
+                    str(env.motion_lib.motion_files[motion_id])
+                ).stem
+                physical_mask = sequence["physical_mask"]
+                slot_0_frames = int(
+                    (physical_mask & (sequence["slots"] == 0)).sum().item()
+                )
+                slot_1_frames = int(
+                    (physical_mask & (sequence["slots"] == 1)).sum().item()
+                )
+                log.info(
+                    "Replaying PSI motion_id=%d motion=%s "
+                    "slot_0_frames=%d slot_1_frames=%d reference_frames=%d",
+                    motion_id,
+                    motion_name,
+                    slot_0_frames,
+                    slot_1_frames,
+                    int((~physical_mask).sum().item()),
+                )
+                env.simulator._camera_target["env"] = sequence["env_id"]
+                env.simulator.user_interface.active_env_id = sequence["env_id"]
+                last_announced_sequence = sequence_index
+
+            set_frame(sequence, sequence_frame)
+            markers = env._prepare_for_render()
+            env.simulator._update_simulator_markers(markers)
+            env.simulator.render()
+
+            sequence_frame += 1
+            if sequence_frame >= sequence["local_frames"].numel():
+                sequence_frame = 0
+                sequence_index = (sequence_index + 1) % len(sequences)
+
+            next_frame_time += 1.0 / replay_fps
+            delay = next_frame_time - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                next_frame_time = time.monotonic()
+    finally:
+        key_handler_targets["F9"] = None
+        if hasattr(env.simulator, "shutdown"):
+            env.simulator.shutdown()
+
+
 def main():
     # Re-use the parser and args from module level
     global parser, args
@@ -1377,6 +1766,30 @@ def main():
             scene_lib_config,
         )
 
+    if (
+        args.psi_replay_motion_ids is not None
+        and args.psi_state_checkpoint is None
+    ):
+        raise ValueError(
+            "--psi-replay-motion-ids requires --psi-state-checkpoint."
+        )
+    if args.psi_replay_slot is not None and args.psi_replay_motion_ids is None:
+        raise ValueError(
+            "--psi-replay-slot requires --psi-replay-motion-ids."
+        )
+
+    psi_state_dict = None
+    if args.psi_state_checkpoint is not None:
+        if args.full_eval:
+            raise ValueError(
+                "--psi-state-checkpoint cannot be combined with --full-eval."
+            )
+        psi_state_dict = prepare_psi_initialization(
+            args.psi_state_checkpoint,
+            env_config,
+            headless=args.headless,
+        )
+
     if args.posterior_anchor_rotation_mode is not None:
         _set_posterior_anchor_rotation_mode(
             env_config, args.posterior_anchor_rotation_mode
@@ -1495,6 +1908,20 @@ def main():
         motion_lib=motion_lib,
         simulator=simulator,
     )
+
+    if psi_state_dict is not None:
+        if args.psi_replay_motion_ids is None:
+            show_psi_initialization(env, psi_state_dict)
+        else:
+            replay_psi_buffer(
+                env,
+                psi_state_dict,
+                args.psi_replay_motion_ids,
+                args.psi_replay_fps,
+                args.psi_replay_slot,
+                custom_key_handler_targets,
+            )
+        return
 
     # Determine root_dir for agent based on checkpoint path
     agent_kwargs = {}
