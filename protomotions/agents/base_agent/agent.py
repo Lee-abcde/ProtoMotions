@@ -299,7 +299,7 @@ class BaseAgent:
             if load_env:
                 # Load env state from the same directory as the checkpoint.
                 task_id = self.env.get_task_id()
-                env_checkpoint = self.root_dir / f"env_{task_id}.ckpt"
+                env_checkpoint = checkpoint.parent / f"env_{task_id}.ckpt"
                 if env_checkpoint.exists():
                     print(f"Loading env checkpoint: {env_checkpoint}")
                     env_state_dict = torch.load(

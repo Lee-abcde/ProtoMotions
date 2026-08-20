@@ -96,7 +96,10 @@ def scene_lib_config(args: argparse.Namespace) -> SceneLibConfig:
         raise ValueError("InterMimic training requires --scenes-file")
     return SceneLibConfig(
         scene_file=args.scenes_file,
-        replicate_method=ReplicationMethod.OBJECT_BALANCED,
+        # Reallocate env capacity toward difficult object types whenever the
+        # simulator is reconstructed from a curriculum checkpoint.
+        replicate_method=ReplicationMethod.OBJECT_CURRICULUM,
+        object_curriculum_min_envs_per_type=1,
         pointcloud_samples_per_object=1024,
         object_collision_contact_offset=0.02,
         object_collision_rest_offset=0.002,

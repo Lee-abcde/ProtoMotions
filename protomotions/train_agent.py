@@ -347,6 +347,17 @@ def detect_checkpoint_mode(args, save_dir):
         return "fresh", None, None
 
 
+def resolve_scene_weight_source(mode, save_dir, checkpoint_path, env_config):
+    """Choose the env checkpoint directory used for scene curriculum weights."""
+    if mode == "resume":
+        return str(save_dir)
+    if mode == "warm_start" and checkpoint_path is not None:
+        return str(checkpoint_path.resolve().parent)
+
+    configured_save_dir = getattr(env_config, "save_dir", None)
+    return configured_save_dir or None
+
+
 def load_experiment_module(experiment_path):
     """
     Load the experiment module from a given path.
@@ -781,10 +792,11 @@ def main():
 
     from protomotions.utils.component_builder import build_all_components
 
-    save_dir_for_weights = (
-        getattr(env_config, "save_dir", None)
-        if hasattr(env_config, "save_dir")
-        else None
+    save_dir_for_weights = resolve_scene_weight_source(
+        mode=mode,
+        save_dir=save_dir,
+        checkpoint_path=checkpoint_path,
+        env_config=env_config,
     )
     components = build_all_components(
         terrain_config=terrain_config,

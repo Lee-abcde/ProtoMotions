@@ -1048,6 +1048,7 @@ class ReplicationMethod(Enum):
     RANDOM = "random"
     SEQUENTIAL = "sequential"
     OBJECT_BALANCED = "object_balanced"
+    OBJECT_CURRICULUM = "object_curriculum"
 
     @classmethod
     def from_str(cls, value: str) -> "ReplicationMethod":
@@ -1119,8 +1120,18 @@ class SceneLibConfig:
         metadata={
             "help": (
                 "Method for replicating scenes: 'first', 'weighted', 'random', "
-                "'sequential', or 'object_balanced'."
+                "'sequential', 'object_balanced', or 'object_curriculum'."
             )
+        },
+    )
+    object_curriculum_min_envs_per_type: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "Minimum number of environments retained for each object type "
+                "when using object_curriculum replication."
+            ),
+            "min": 1,
         },
     )
     pointcloud_samples_per_object: Optional[int] = field(
@@ -1796,11 +1807,15 @@ class SceneLib:
         """Return one cyclic spawn template per object type when possible.
 
         IsaacLab's ``MultiAssetSpawnerCfg`` selects asset ``env_id % N``.  The
-        OBJECT_BALANCED assignment below deliberately follows that same cycle.
-        Other replication modes keep the conservative one-template-per-env path.
+        Balanced assignments deliberately follow that same cycle. Uneven object
+        curriculum quotas use the conservative one-template-per-env path.
         """
         if (
-            self.config.replicate_method != ReplicationMethod.OBJECT_BALANCED
+            self.config.replicate_method
+            not in {
+                ReplicationMethod.OBJECT_BALANCED,
+                ReplicationMethod.OBJECT_CURRICULUM,
+            }
             or not self.scenes
         ):
             return self.scenes
@@ -1840,6 +1855,99 @@ class SceneLib:
         )
         return assigned_scenes, original_ids
 
+    def _assign_object_curriculum_scenes(
+        self,
+        scenes: List[Scene],
+        scene_weights: Optional[List[float]],
+    ) -> Tuple[List[Scene], List[int]]:
+        """Allocate envs to object types using their aggregate motion weights."""
+        groups: Dict[Tuple, List[int]] = {}
+        for scene_idx, scene in enumerate(scenes):
+            signature = self._scene_object_type_signature(scene)
+            groups.setdefault(signature, []).append(scene_idx)
+
+        group_keys = sorted(groups, key=repr)
+        num_types = len(group_keys)
+        min_envs = int(
+            getattr(
+                self.config,
+                "object_curriculum_min_envs_per_type",
+                1,
+            )
+        )
+        if min_envs < 1:
+            raise ValueError(
+                "object_curriculum_min_envs_per_type must be at least 1"
+            )
+        required_envs = min_envs * num_types
+        if required_envs > self.num_envs:
+            raise ValueError(
+                "Object curriculum requires at least "
+                f"{required_envs} envs for {num_types} object types with "
+                f"object_curriculum_min_envs_per_type={min_envs}, got "
+                f"{self.num_envs}"
+            )
+
+        if scene_weights is None:
+            type_scores = np.ones(num_types, dtype=np.float64)
+        else:
+            weights = np.asarray(scene_weights, dtype=np.float64)
+            if not np.all(np.isfinite(weights)) or np.any(weights < 0):
+                raise ValueError(
+                    "Object curriculum scene_weights must be finite and "
+                    "non-negative"
+                )
+            type_scores = np.asarray(
+                [weights[groups[key]].sum() for key in group_keys],
+                dtype=np.float64,
+            )
+            if type_scores.sum() <= 0:
+                type_scores.fill(1.0)
+
+        # Reserve the exploration floor, then use largest-remainder
+        # apportionment for the curriculum-controlled envs.
+        remaining_envs = self.num_envs - required_envs
+        fractional_counts = remaining_envs * type_scores / type_scores.sum()
+        extra_counts = np.floor(fractional_counts).astype(np.int64)
+        unassigned = remaining_envs - int(extra_counts.sum())
+        if unassigned > 0:
+            remainders = fractional_counts - extra_counts
+            order = sorted(
+                range(num_types),
+                key=lambda type_id: (-remainders[type_id], type_id),
+            )
+            extra_counts[order[:unassigned]] += 1
+        type_counts = extra_counts + min_envs
+
+        # Round-robin placement preserves the compact IsaacLab asset-template
+        # path whenever quotas happen to be balanced.
+        type_sequence = []
+        counts_left = type_counts.tolist()
+        while len(type_sequence) < self.num_envs:
+            for type_id in range(num_types):
+                if counts_left[type_id] > 0:
+                    type_sequence.append(type_id)
+                    counts_left[type_id] -= 1
+
+        assigned_scenes: List[Scene] = []
+        original_ids: List[int] = []
+        occurrences = [0] * num_types
+        for type_id in type_sequence:
+            candidates = groups[group_keys[type_id]]
+            original_id = candidates[occurrences[type_id] % len(candidates)]
+            occurrences[type_id] += 1
+            assigned_scenes.append(copy.deepcopy(scenes[original_id]))
+            original_ids.append(original_id)
+
+        logger.info(
+            "Assigned %d environments across %d object types with curriculum "
+            "quotas %s",
+            self.num_envs,
+            num_types,
+            type_counts.tolist(),
+        )
+        return assigned_scenes, original_ids
+
     def _create_scenes(
         self, scenes: List[Scene], scene_weights: Optional[List[float]] = None
     ):
@@ -1861,6 +1969,10 @@ class SceneLib:
         if self.config.replicate_method == ReplicationMethod.OBJECT_BALANCED:
             assigned_scenes, scene_to_original_ids = (
                 self._assign_object_balanced_scenes(scenes)
+            )
+        elif self.config.replicate_method == ReplicationMethod.OBJECT_CURRICULUM:
+            assigned_scenes, scene_to_original_ids = (
+                self._assign_object_curriculum_scenes(scenes, scene_weights)
             )
         else:
             assigned_scenes = scenes
@@ -2189,7 +2301,8 @@ class SceneLib:
                 "Replicate method must be one of ReplicationMethod.FIRST, "
                 "ReplicationMethod.SEQUENTIAL, ReplicationMethod.RANDOM, or "
                 "ReplicationMethod.WEIGHTED, or "
-                "ReplicationMethod.OBJECT_BALANCED."
+                "ReplicationMethod.OBJECT_BALANCED, or "
+                "ReplicationMethod.OBJECT_CURRICULUM."
             )
 
         return replicated_scenes, replicated_ids
