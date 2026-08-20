@@ -14,11 +14,12 @@ splitting and packaging are deliberately left to downstream workflows.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -77,6 +78,7 @@ class ConvertedClip:
     object_reference_path: Path
     body_position_rmse_m: float
     root_rotation_max_error_rad: float
+    retarget_metrics: dict = field(default_factory=dict)
 
 
 def normalize_quaternions(quaternions: torch.Tensor) -> torch.Tensor:
@@ -377,6 +379,7 @@ def build_manifest(
                 ),
                 "body_position_rmse_m": clip.body_position_rmse_m,
                 "root_rotation_max_error_rad": clip.root_rotation_max_error_rad,
+                **clip.retarget_metrics,
             }
             for motion_id, clip in enumerate(clips)
         ],
@@ -421,6 +424,27 @@ def run_conversion(args: argparse.Namespace) -> dict:
     mjcf_path = args.mjcf.resolve()
     source_meshes = discover_object_meshes(object_root)
     records = discover_clips(motion_root, set(source_meshes))
+    if args.subjects is not None:
+        selected_subjects = set(args.subjects)
+        available_subjects = {record.subject for record in records}
+        unknown_subjects = selected_subjects - available_subjects
+        if unknown_subjects:
+            raise ValueError(
+                f"Subjects not present in source motions: {sorted(unknown_subjects)}"
+            )
+        records = [record for record in records if record.subject in selected_subjects]
+    if args.clip_names is not None:
+        selected_clip_names = set(args.clip_names)
+        available_clip_names = {record.clip_name for record in records}
+        unknown_clip_names = selected_clip_names - available_clip_names
+        if unknown_clip_names:
+            raise ValueError(
+                "Clips not present after subject filtering: "
+                f"{sorted(unknown_clip_names)}"
+            )
+        records = [
+            record for record in records if record.clip_name in selected_clip_names
+        ]
     if args.max_clips is not None:
         records = records[: args.max_clips]
     clips_dir = output_root / "motions" / "clips"
@@ -431,7 +455,7 @@ def run_conversion(args: argparse.Namespace) -> dict:
         args.overwrite,
         object_references_dir=object_references_dir,
     )
-    copy_object_assets(source_meshes, output_root)
+    copied_meshes = copy_object_assets(source_meshes, output_root)
 
     kinematic_info = extract_kinematic_info(str(mjcf_path))
     if kinematic_info.body_names[0] != "Pelvis":
@@ -448,6 +472,45 @@ def run_conversion(args: argparse.Namespace) -> dict:
         motion, obj_pos, obj_rot, metrics = convert_source_tensor(
             source, kinematic_info, args.fps
         )
+        retarget_metrics = {}
+        if args.contact_aware_retarget:
+            from data.scripts.omomo_contact_retarget import (
+                ContactRetargetConfig,
+                retarget_motion_contacts,
+            )
+
+            source_mjcf_path = (
+                args.source_mjcf_root / f"smplx_omomo_{record.subject}.xml"
+            ).resolve()
+            if not source_mjcf_path.is_file():
+                raise FileNotFoundError(
+                    f"Source subject MJCF not found: {source_mjcf_path}"
+                )
+            retarget_device = torch.device(args.retarget_device)
+            if retarget_device.type == "cuda" and not torch.cuda.is_available():
+                print(
+                    f"Warning: {retarget_device} unavailable; falling back to CPU"
+                )
+                retarget_device = torch.device("cpu")
+            motion, retarget_metrics = retarget_motion_contacts(
+                data=source,
+                initial_motion=motion,
+                kinematic_info=kinematic_info,
+                target_mjcf_path=mjcf_path,
+                source_mjcf_path=source_mjcf_path,
+                object_mesh_path=copied_meshes[record.object_name],
+                fps=args.fps,
+                device=retarget_device,
+                config=ContactRetargetConfig(),
+            )
+            source_body_pos = source[:, BODY_POS].reshape(
+                -1, EXPECTED_BODY_COUNT, 3
+            )
+            metrics["body_position_rmse_m"] = float(
+                torch.sqrt(
+                    torch.mean((motion.rigid_body_pos - source_body_pos) ** 2)
+                )
+            )
         obj_vel, obj_ang_vel = compute_object_velocities(
             obj_pos, obj_rot, args.fps
         )
@@ -477,9 +540,15 @@ def run_conversion(args: argparse.Namespace) -> dict:
                 object_contact_labels=obj_contact_labels,
                 object_reference_path=object_reference_path,
                 **metrics,
+                retarget_metrics=retarget_metrics,
             )
         )
-        if index == 1 or index % 100 == 0 or index == len(records):
+        if (
+            args.contact_aware_retarget
+            or index == 1
+            or index % 100 == 0
+            or index == len(records)
+        ):
             print(f"[{index}/{len(records)}] {record.path.name}")
 
     manifest = build_manifest(
@@ -489,7 +558,68 @@ def run_conversion(args: argparse.Namespace) -> dict:
     with manifest_path.open("w") as stream:
         json.dump(manifest, stream, indent=2)
 
+    if args.contact_aware_retarget:
+        write_contact_retarget_report(manifest, output_root)
+
     return manifest
+
+
+def write_contact_retarget_report(manifest: dict, output_root: Path) -> None:
+    """Write concise JSON and CSV summaries for contact-retarget inspection."""
+
+    quality_dir = output_root / "quality"
+    quality_dir.mkdir(parents=True, exist_ok=True)
+    clips = manifest["clips"]
+    status_counts = {
+        status: sum(
+            clip.get("contact_retarget_quality_status") == status for clip in clips
+        )
+        for status in ("pass", "warn", "fail")
+    }
+    report = {
+        "schema_version": 1,
+        "algorithm": "canonical_smplx_arm_contact_retarget_v3",
+        "num_clips": len(clips),
+        "status_counts": status_counts,
+        "clips": clips,
+    }
+    subjects = sorted({clip["subject"] for clip in clips})
+    report_stem = subjects[0] if len(subjects) == 1 else "all_subjects"
+    with (quality_dir / f"{report_stem}.json").open("w") as stream:
+        json.dump(report, stream, indent=2)
+
+    csv_fields = [
+        "motion_id",
+        "clip_name",
+        "object",
+        "num_frames",
+        "contact_retarget_quality_status",
+        "contact_active_group_frames",
+        "contact_anchor_fallback_frames",
+        "initial_contact_surface_mean_error_m",
+        "initial_contact_surface_p95_error_m",
+        "initial_contact_surface_max_error_m",
+        "initial_hand_penetration_mean_m",
+        "initial_hand_penetration_p95_m",
+        "initial_hand_penetration_max_m",
+        "contact_surface_mean_error_m",
+        "contact_surface_p95_error_m",
+        "contact_surface_max_error_m",
+        "hand_penetration_mean_m",
+        "hand_penetration_p95_m",
+        "hand_penetration_max_m",
+        "pose_drift_mean_m",
+        "pose_drift_p95_m",
+        "pose_drift_max_m",
+        "max_correction_rad",
+        "max_joint_limit_violation_rad",
+        "preclamp_max_joint_limit_violation_rad",
+        "joint_limit_clamped_values",
+    ]
+    with (quality_dir / f"{report_stem}.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=csv_fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(clips)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -506,6 +636,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--fps", type=float, default=FPS)
     parser.add_argument(
+        "--subjects",
+        nargs="+",
+        default=None,
+        help="Optional subject filter, e.g. --subjects sub2.",
+    )
+    parser.add_argument(
+        "--clip-names",
+        nargs="+",
+        default=None,
+        help="Optional exact clip-name filter, without the .pt suffix.",
+    )
+    parser.add_argument(
+        "--contact-aware-retarget",
+        action="store_true",
+        help="Optimize canonical upper limbs against source object contact anchors.",
+    )
+    parser.add_argument(
+        "--source-mjcf-root",
+        type=Path,
+        default=None,
+        help="Directory containing smplx_omomo_<subject>.xml files.",
+    )
+    parser.add_argument(
+        "--retarget-device",
+        default="cuda:0",
+        help="Torch device for contact-aware optimization; falls back to CPU.",
+    )
+    parser.add_argument(
         "--max-clips",
         type=int,
         default=None,
@@ -521,6 +679,10 @@ def main() -> None:
         raise ValueError("--fps must be a positive finite number")
     if args.max_clips is not None and args.max_clips < 1:
         raise ValueError("--max-clips must be at least 1")
+    if args.contact_aware_retarget and args.source_mjcf_root is None:
+        raise ValueError(
+            "--source-mjcf-root is required with --contact-aware-retarget"
+        )
     manifest = run_conversion(args)
     print(f"Conversion complete: {len(manifest['clips'])} individual motions")
 
