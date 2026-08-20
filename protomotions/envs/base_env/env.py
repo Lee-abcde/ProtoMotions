@@ -1146,6 +1146,23 @@ class BaseEnv:
             env_ids, new_states, new_object_states
         )
 
+    def _sync_support_surfaces(self, env_ids: torch.Tensor) -> None:
+        """Match optional support fixtures to the current reference motions."""
+        if self.motion_manager is None:
+            return
+
+        reset_support_surfaces = getattr(
+            self.simulator, "reset_support_surfaces", None
+        )
+        if reset_support_surfaces is None:
+            return
+
+        reset_support_surfaces(
+            env_ids,
+            self.motion_manager.motion_ids[env_ids],
+            self.respawn_root_offset[env_ids],
+        )
+
     def reset(
         self,
         env_ids=None,
@@ -1229,6 +1246,7 @@ class BaseEnv:
             )
 
         self.simulator.reset_envs(new_states, new_object_states, env_ids)
+        self._sync_support_surfaces(env_ids)
 
         default_mask = ~torch.isin(env_ids, ref_env_ids)
         if self.state_history is not None:
@@ -1681,6 +1699,7 @@ class BaseEnv:
         self.reset_buf.copy_(snapshot["reset_buf"])
         self.terminate_buf.copy_(snapshot["terminate_buf"])
         self.respawn_root_offset.copy_(snapshot["respawn_root_offset"])
+        self._sync_support_surfaces(env_ids)
         if "odom_scale" in snapshot:
             self.odom_scale.copy_(snapshot["odom_scale"])
             self.odom_yaw_cos_sin.copy_(snapshot["odom_yaw_cos_sin"])

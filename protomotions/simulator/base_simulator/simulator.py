@@ -753,6 +753,27 @@ class Simulator(RecordingMixin, ABC):
         # Reset projectiles for reset environments
         self._reset_projectiles(env_ids)
 
+    def reset_support_surfaces(
+        self,
+        env_ids: torch.Tensor,
+        motion_ids: torch.Tensor,
+        root_offsets: torch.Tensor,
+    ) -> None:
+        """Ignore support metadata on backends without fixture support.
+
+        IsaacLab overrides this hook. Other backends can still consume the
+        shared SceneLib data without failing during environment resets.
+        """
+        del env_ids, motion_ids, root_offsets
+        if getattr(self.scene_lib, "has_support_surfaces", False) and not getattr(
+            self, "_warned_unsupported_support_surfaces", False
+        ):
+            log.warning(
+                "%s does not support collision-only support surfaces; ignoring them.",
+                type(self).__name__,
+            )
+            self._warned_unsupported_support_surfaces = True
+
     def park_envs(
         self,
         env_ids: torch.Tensor,

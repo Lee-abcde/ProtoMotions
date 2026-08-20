@@ -37,6 +37,9 @@ from protomotions.simulator.isaaclab.utils.collision_baking import (
     ensure_baked_collision_usd,
 )
 from protomotions.simulator.base_simulator.simulator import Simulator
+from protomotions.simulator.base_simulator.utils import (
+    exclude_contact_filter_force,
+)
 from protomotions.simulator.base_simulator.config import (
     MarkerState,
     VisualizationMarkerConfig,
@@ -60,6 +63,8 @@ class IsaacLabSimulator(Simulator):
         -1: (0.0, 0.0, 1.0),
         2: (1.0, 1.0, 1.0),
     }
+    # Object contact filters are ordered as ground, support surface, objects.
+    _SUPPORT_SURFACE_OBJECT_CONTACT_FILTER_INDEX = 1
 
     # =====================================================
     # Group 1: Initialization & Configuration
@@ -150,6 +155,9 @@ class IsaacLabSimulator(Simulator):
                     )
                 else:
                     self._object_contact_sensor.append(None)
+        self._support_surface = None
+        if self.scene_lib.has_support_surfaces:
+            self._support_surface = self._scene["support_surface"]
         # Retrieve projectile rigid objects from scene
         self._projectile_objects = []
         for proj_idx in range(self._proj_config.num_projectiles):
@@ -176,6 +184,8 @@ class IsaacLabSimulator(Simulator):
             num_envs=self.config.num_envs,
             env_spacing=2.0,
             scene_cfgs=scene_cfgs,
+            support_surface_size=self.scene_lib.support_surface_size,
+            support_surface_hidden_z=self.scene_lib.support_surface_hidden_z,
             terrain=self.terrain,
             projectile_config=self._proj_config,
             replicate_physics=(
@@ -675,6 +685,26 @@ class IsaacLabSimulator(Simulator):
                     init_object_root_state[:, object_idx], env_ids
                 )
 
+    def reset_support_surfaces(
+        self,
+        env_ids: torch.Tensor,
+        motion_ids: torch.Tensor,
+        root_offsets: torch.Tensor,
+    ) -> None:
+        """Move the kinematic tabletop for active placement motions."""
+        if not self.scene_lib.has_support_surfaces:
+            return
+        if self._support_surface is None:
+            raise RuntimeError("Support surface actor was not created")
+        state = self.scene_lib.get_support_surface_state(
+            motion_ids, root_offsets
+        ).convert_to_sim(self.data_conversion)
+        root_state = torch.cat(
+            (state.root_pos, state.root_rot, state.root_vel, state.root_ang_vel),
+            dim=-1,
+        )
+        self._support_surface.write_root_state_to_sim(root_state, env_ids)
+
     # =====================================================
     # Group 4: State Getters
     # =====================================================
@@ -880,9 +910,14 @@ class IsaacLabSimulator(Simulator):
             for obj_idx in range(self.scene_lib.num_objects_per_scene):
                 contact_sensor = self._object_contact_sensor[obj_idx]
                 if contact_sensor is not None:
-                    object_forces.append(
-                        contact_sensor.data.net_forces_w.clone().unsqueeze(2)
-                    )
+                    net_forces = contact_sensor.data.net_forces_w.clone()
+                    if self.scene_lib.has_support_surfaces:
+                        net_forces = exclude_contact_filter_force(
+                            net_forces,
+                            contact_sensor.data.force_matrix_w,
+                            self._SUPPORT_SURFACE_OBJECT_CONTACT_FILTER_INDEX,
+                        )
+                    object_forces.append(net_forces.unsqueeze(2))
                 else:
                     object_forces.append(
                         torch.zeros(

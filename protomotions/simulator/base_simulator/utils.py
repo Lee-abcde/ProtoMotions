@@ -19,6 +19,32 @@ if TYPE_CHECKING:
     )
 
 
+def exclude_contact_filter_force(
+    net_forces: torch.Tensor,
+    force_matrix: Optional[torch.Tensor],
+    filter_index: int,
+) -> torch.Tensor:
+    """Remove one filtered collider's force from an aggregate contact signal."""
+    if force_matrix is None:
+        raise RuntimeError("Filtered contact forces are unavailable")
+    if force_matrix.ndim != net_forces.ndim + 1:
+        raise ValueError(
+            "force_matrix must have exactly one more dimension than net_forces"
+        )
+    if filter_index < 0 or filter_index >= force_matrix.shape[-2]:
+        raise IndexError(
+            f"Contact filter index {filter_index} is out of range for "
+            f"{force_matrix.shape[-2]} filters"
+        )
+    filtered_force = force_matrix.select(dim=-2, index=filter_index)
+    if filtered_force.shape != net_forces.shape:
+        raise ValueError(
+            "Filtered contact force shape does not match aggregate force shape: "
+            f"{tuple(filtered_force.shape)} != {tuple(net_forces.shape)}"
+        )
+    return net_forces - filtered_force
+
+
 def build_motion_data(
     recorded_motion: Dict[str, List[torch.Tensor]],
     fps: int,

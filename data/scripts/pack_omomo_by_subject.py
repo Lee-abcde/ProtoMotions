@@ -41,6 +41,7 @@ from data.scripts.convert_omomo_to_proto import (
     normalize_quaternions,
     validate_source_tensor,
 )
+from data.scripts.detect_omomo_support_surfaces import detect_support_surfaces
 from protomotions.components.motion_lib import MotionLib, MotionLibConfig
 from protomotions.components.scene_lib import (
     MeshSceneObject,
@@ -378,11 +379,20 @@ def pack_subject(
         )
         for local_motion_id, converted_clip in enumerate(converted)
     ]
+    support_surfaces, support_candidates = detect_support_surfaces(scenes)
+    for candidate in support_candidates:
+        motion_id = candidate["motion_id"]
+        print(
+            "Detected support surface: "
+            f"{clips[motion_id]['clip_name']} "
+            f"top_z={candidate['top_height']:.4f}"
+        )
     scene_output.parent.mkdir(parents=True, exist_ok=True)
     SceneLib.save_scenes_to_file(
         scenes,
         str(scene_output),
         asset_root=str(output_root / "scenes"),
+        support_surfaces=support_surfaces,
     )
 
     packed_entries = [

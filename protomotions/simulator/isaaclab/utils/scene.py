@@ -37,6 +37,8 @@ class SceneCfg(InteractiveSceneCfg):
         robot_config: RobotConfig,
         terrain: Optional[Terrain] = None,
         scene_cfgs=None,
+        support_surface_size=None,
+        support_surface_hidden_z: float = -10.0,
         projectile_config: Optional[ProjectileConfig] = None,
         pretty=False,
         *args,
@@ -90,6 +92,13 @@ class SceneCfg(InteractiveSceneCfg):
 
                 # Object contact sensors are used to detect collisions between objects.
                 object_contact_paths = ["/World/ground/terrain/mesh"]
+                if support_surface_size is not None:
+                    # Keep the fixture in a dedicated filter column so its
+                    # force can be removed from the task contact signal. This
+                    # filter does not control physical collision behavior.
+                    object_contact_paths.append(
+                        "/World/envs/env_.*/SupportSurface"
+                    )
                 for i in range(num_objects_per_scene):
                     if i != obj_idx:
                         object_contact_paths.append(f"/World/envs/env_.*/Object_{i}")
@@ -101,6 +110,36 @@ class SceneCfg(InteractiveSceneCfg):
                         history_length=config.sim.decimation,
                     )
                     setattr(self, f"object_{obj_idx}_contact_sensor", object_sensor_cfg)
+
+        # A support surface is a collision-only fixture, not a task object.
+        # It is deliberately omitted from robot object-contact filters below.
+        if support_surface_size is not None:
+            self.support_surface = RigidObjectCfg(
+                prim_path="/World/envs/env_.*/SupportSurface",
+                spawn=sim_utils.CuboidCfg(
+                    size=tuple(support_surface_size),
+                    rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                        kinematic_enabled=True,
+                        disable_gravity=True,
+                    ),
+                    mass_props=sim_utils.MassPropertiesCfg(density=1000.0),
+                    collision_props=sim_utils.CollisionPropertiesCfg(
+                        contact_offset=config.sim.physx.contact_offset,
+                        rest_offset=config.sim.physx.rest_offset,
+                    ),
+                    physics_material=sim_utils.RigidBodyMaterialCfg(
+                        static_friction=0.8,
+                        dynamic_friction=0.8,
+                        restitution=0.0,
+                    ),
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(0.45, 0.32, 0.2)
+                    ),
+                ),
+                init_state=RigidObjectCfg.InitialStateCfg(
+                    pos=(0.0, 0.0, support_surface_hidden_z)
+                ),
+            )
 
         # Projectile rigid objects (always created, independent of scene objects)
         if projectile_config is not None:

@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OBJECT_DENSITY: float = 1000.0  # kg/m³, typical physics sim default
 DEFAULT_PRIMITIVE_DENSITY: float = DEFAULT_OBJECT_DENSITY
+SUPPORT_SURFACE_SCHEMA_VERSION: int = 1
 
 
 def _sample_mesh_pointcloud(
@@ -1319,6 +1320,18 @@ class SceneLib:
         self._motion_dts = None
         self._motion_num_frames = None
 
+        # Optional collision-only support fixture metadata.  These fixtures are
+        # intentionally separate from Scene.objects so they never change task
+        # observation/reward dimensions or object-filtered robot contacts.
+        self._support_surface_size = None
+        self._support_surface_hidden_z = -10.0
+        self._support_surface_motion_ids = torch.empty(
+            0, dtype=torch.long, device=self.device
+        )
+        self._support_surface_positions = torch.empty(
+            0, 3, dtype=torch.float, device=self.device
+        )
+
         # Bbox extents from scaled pointclouds (populated by _compute_bbox_extents)
         self._object_bbox_extents = None  # (num_orig_scenes, objs_per_scene, 3)
 
@@ -1358,8 +1371,19 @@ class SceneLib:
                 raise ValueError(
                     "Cannot provide both config.scene_file and scenes parameter"
                 )
-            scenes = self._load_scenes_from_file(
-                config.scene_file, device, asset_root=config.asset_root
+            loaded_data = self._load_scene_storage_from_file(
+                config.scene_file, device
+            )
+            asset_root = config.asset_root
+            if asset_root is None:
+                asset_root = os.path.dirname(
+                    os.path.dirname(os.path.abspath(config.scene_file))
+                )
+            scenes = self._deserialize_scenes_from_storage_static(
+                loaded_data["original_scenes"], asset_root=asset_root
+            )
+            self._set_support_surface_metadata(
+                loaded_data.get("support_surfaces")
             )
             logger.info(
                 f"Loaded {len(scenes)} original scenes from {config.scene_file}"
@@ -1457,6 +1481,17 @@ class SceneLib:
         )
 
     @staticmethod
+    def _load_scene_storage_from_file(file_path: str, device: str) -> Dict:
+        """Load and minimally validate a serialized SceneLib payload."""
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"SceneLib file not found: {file_path}")
+
+        loaded_data = torch.load(file_path, map_location=device, weights_only=False)
+        if not isinstance(loaded_data, dict) or "original_scenes" not in loaded_data:
+            raise ValueError(f"Invalid SceneLib file: {file_path}")
+        return loaded_data
+
+    @staticmethod
     def _load_scenes_from_file(
         file_path: str, device: str, asset_root: Optional[str] = None
     ) -> List[Scene]:
@@ -1471,15 +1506,142 @@ class SceneLib:
         Returns:
             List[Scene]: Original scenes from the file
         """
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"SceneLib file not found: {file_path}")
-
         if asset_root is None:
             asset_root = os.path.dirname(os.path.dirname(os.path.abspath(file_path)))
 
-        loaded_data = torch.load(file_path, map_location=device, weights_only=False)
+        loaded_data = SceneLib._load_scene_storage_from_file(file_path, device)
         return SceneLib._deserialize_scenes_from_storage_static(
             loaded_data["original_scenes"], asset_root=asset_root
+        )
+
+    @staticmethod
+    def _normalize_support_surface_metadata(
+        metadata: Optional[Dict],
+    ) -> Optional[Dict]:
+        """Validate collision-only support metadata and return plain values."""
+        if metadata is None:
+            return None
+        if not isinstance(metadata, dict):
+            raise ValueError("support_surfaces must be a dictionary")
+        if metadata.get("schema_version") != SUPPORT_SURFACE_SCHEMA_VERSION:
+            raise ValueError(
+                "Unsupported support_surfaces schema_version: "
+                f"{metadata.get('schema_version')}"
+            )
+
+        size = tuple(float(value) for value in metadata.get("size", ()))
+        if (
+            len(size) != 3
+            or not np.isfinite(size).all()
+            or any(value <= 0.0 for value in size)
+        ):
+            raise ValueError("support_surfaces.size must contain three positive values")
+        hidden_z = float(metadata.get("hidden_z", -10.0))
+        if not np.isfinite(hidden_z):
+            raise ValueError("support_surfaces.hidden_z must be finite")
+        entries = metadata.get("entries")
+        if not isinstance(entries, list):
+            raise ValueError("support_surfaces.entries must be a list")
+
+        normalized_entries = []
+        seen_motion_ids = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("Each support surface entry must be a dictionary")
+            motion_id = int(entry.get("motion_id", -1))
+            if motion_id < 0:
+                raise ValueError("support surface motion_id must be non-negative")
+            if motion_id in seen_motion_ids:
+                raise ValueError(f"Duplicate support surface motion_id: {motion_id}")
+            position = tuple(float(value) for value in entry.get("position", ()))
+            if len(position) != 3 or not np.isfinite(position).all():
+                raise ValueError(
+                    "support surface position must contain three finite values"
+                )
+            normalized_entries.append(
+                {"motion_id": motion_id, "position": position}
+            )
+            seen_motion_ids.add(motion_id)
+
+        return {
+            "schema_version": SUPPORT_SURFACE_SCHEMA_VERSION,
+            "size": size,
+            "hidden_z": hidden_z,
+            "entries": normalized_entries,
+        }
+
+    def _set_support_surface_metadata(self, metadata: Optional[Dict]) -> None:
+        normalized = self._normalize_support_surface_metadata(metadata)
+        if normalized is None or not normalized["entries"]:
+            return
+        self._support_surface_size = normalized["size"]
+        self._support_surface_hidden_z = normalized["hidden_z"]
+        self._support_surface_motion_ids = torch.tensor(
+            [entry["motion_id"] for entry in normalized["entries"]],
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._support_surface_positions = torch.tensor(
+            [entry["position"] for entry in normalized["entries"]],
+            dtype=torch.float,
+            device=self.device,
+        )
+
+    @property
+    def has_support_surfaces(self) -> bool:
+        """Whether this library declares any collision-only support fixtures."""
+        return self._support_surface_motion_ids.numel() > 0
+
+    @property
+    def support_surface_size(self) -> Optional[Tuple[float, float, float]]:
+        """Shared `(width, depth, thickness)` of the kinematic tabletop."""
+        return self._support_surface_size
+
+    @property
+    def support_surface_hidden_z(self) -> float:
+        """Underground parking height used for motions without a tabletop."""
+        return self._support_surface_hidden_z
+
+    def get_support_surface_state(
+        self,
+        motion_ids: torch.Tensor,
+        root_offsets: Optional[torch.Tensor] = None,
+    ) -> ObjectState:
+        """Return active tabletop poses and park all other tables underground."""
+        motion_ids = motion_ids.to(device=self.device, dtype=torch.long)
+        if motion_ids.ndim != 1:
+            raise ValueError("motion_ids must be one-dimensional")
+        num_envs = motion_ids.numel()
+        positions = torch.zeros(num_envs, 3, device=self.device)
+        positions[:, 2] = self._support_surface_hidden_z
+        rotations = torch.zeros(num_envs, 4, device=self.device)
+        rotations[:, 3] = 1.0  # xyzw identity in common convention
+        if root_offsets is not None:
+            root_offsets = root_offsets.to(
+                device=self.device, dtype=positions.dtype
+            )
+            if root_offsets.shape != positions.shape:
+                raise ValueError(
+                    "root_offsets must have shape "
+                    f"{tuple(positions.shape)}, got {tuple(root_offsets.shape)}"
+                )
+
+        if self.has_support_surfaces and num_envs > 0:
+            matches = motion_ids.unsqueeze(1) == self._support_surface_motion_ids
+            active = matches.any(dim=1)
+            if active.any():
+                entry_indices = matches[active].float().argmax(dim=1)
+                positions[active] = self._support_surface_positions[entry_indices]
+                if root_offsets is not None:
+                    positions[active] += root_offsets[active]
+
+        zeros = torch.zeros_like(positions)
+        return ObjectState(
+            root_pos=positions,
+            root_rot=rotations,
+            root_vel=zeros,
+            root_ang_vel=zeros,
+            state_conversion=StateConversion.COMMON,
         )
 
     def get_humanoid_motion_ids(self):
@@ -2832,7 +2994,10 @@ class SceneLib:
 
     @staticmethod
     def save_scenes_to_file(
-        scenes: List[Scene], file_path: str, asset_root: Optional[str] = None
+        scenes: List[Scene],
+        file_path: str,
+        asset_root: Optional[str] = None,
+        support_surfaces: Optional[Dict] = None,
     ):
         """Save scenes to file without creating a SceneLib instance.
 
@@ -2845,6 +3010,8 @@ class SceneLib:
             file_path: Path to save the scenes file (.pt)
             asset_root: Root directory that mesh paths are relative to.
                 If None, uses the scene file's parent directory.
+            support_surfaces: Optional collision-only tabletop metadata. These
+                fixtures are spawned separately from ``Scene.objects``.
 
         Raises:
             ValueError: If scenes have inconsistent number of objects
@@ -2890,6 +3057,11 @@ class SceneLib:
             "num_original_scenes": len(scenes),
             "num_objects_per_scene": object_counts[0],
         }
+        normalized_supports = SceneLib._normalize_support_surface_metadata(
+            support_surfaces
+        )
+        if normalized_supports is not None:
+            save_data["support_surfaces"] = normalized_supports
 
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         torch.save(save_data, file_path)
