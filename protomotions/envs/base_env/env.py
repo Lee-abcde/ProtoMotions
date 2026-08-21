@@ -812,6 +812,14 @@ class BaseEnv:
 
     def user_reset(self):
         """Force environments to reset on next check (triggered by user input)."""
+        if self.motion_manager is not None:
+            env_ids = torch.arange(
+                self.num_envs, device=self.device, dtype=torch.long
+            )
+            self.motion_manager.motion_times[env_ids] = 0.0
+            self.reset(env_ids, disable_motion_resample=True)
+            return
+
         self.progress_buf[:] = 100000000000
 
     def compute_observations(self, env_ids=None, context: EnvContext = None):
