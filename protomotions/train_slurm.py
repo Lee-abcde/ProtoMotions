@@ -163,6 +163,16 @@ def create_parser():
 
     # Optional arguments
     parser.add_argument("--scenes-file", type=str, default=None, help="Path to scenes file (optional)")
+    parser.add_argument(
+        "--intermimic-data-dir",
+        type=str,
+        default=None,
+        help=(
+            "InterMimic dataset root to bind read-only into Euler containers at "
+            "the same path. Use this when motion and scene files are in different "
+            "subdirectories."
+        ),
+    )
     parser.add_argument("--headless", default=True, help="Run headless (no GUI)")
     parser.add_argument("--training-max-steps", type=int, default=10000000000, help="Max training steps")
     parser.add_argument("--checkpoint", type=str, default=None, help="Resume from checkpoint")
@@ -396,11 +406,15 @@ def generate_euler_slurm_script(args):
 
     train_cmd = build_train_agent_command(args)
     python_bin = "/opt/env_isaaclab/bin/python"
-    motion_path = Path(args.motion_file)
-    motion_dir = str(motion_path.parent) if motion_path.is_absolute() else None
-    motion_bind = (
-        f'  --bind {shlex.quote(motion_dir)}:{shlex.quote(motion_dir)}:ro \\\n'
-        if motion_dir
+    data_path = (
+        Path(args.intermimic_data_dir)
+        if args.intermimic_data_dir
+        else Path(args.motion_file).parent
+    )
+    data_dir = str(data_path) if data_path.is_absolute() else None
+    data_bind = (
+        f'  --bind {shlex.quote(data_dir)}:{shlex.quote(data_dir)}:ro \\\n'
+        if data_dir
         else ""
     )
 
@@ -455,7 +469,7 @@ export APPTAINER_BIND="$OUTPUT_DIR/tmp:/tmp"
 srun --kill-on-bad-exit=1 --wait=60 apptainer exec --nv \\
   --bind "$PROTOMOTIONS_DIR":/workspace/ProtoMotions:rw \\
   --bind "$OUTPUT_DIR":/workspace/ProtoMotions/results:rw \\
-{motion_bind}\
+{data_bind}\
   --bind /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro \\
   "$CONTAINER" \\
   bash -lc {shlex.quote(inner_cmd)}
