@@ -1862,6 +1862,50 @@ def intermimic_contact_reward_factory(
     )
 
 
+def intermimic_grip_reward_factory(
+    left_hand_body_ids: Tensor,
+    right_hand_body_ids: Tensor,
+    left_fingertip_body_ids: Tensor,
+    right_fingertip_body_ids: Tensor,
+    left_finger_dof_ids: Tensor,
+    right_finger_dof_ids: Tensor,
+    left_finger_effort_limits: Tensor,
+    right_finger_effort_limits: Tensor,
+    target_force: float = 5.0,
+    target_effort_ratio: float = 0.3,
+    grip_weight: float = 0.2,
+) -> MdpComponent:
+    from protomotions.envs.rewards import compute_intermimic_grip_reward
+
+    return MdpComponent(
+        compute_func=compute_intermimic_grip_reward,
+        dynamic_vars={
+            "body_object_contact_forces": (
+                EnvContext.current.rigid_body_object_contact_forces
+            ),
+            "dof_forces": EnvContext.current.dof_forces,
+            "ref_body_contact_labels": (
+                EnvContext.mimic.ref_state.rigid_body_contact_labels
+            ),
+            "object_valid_mask": EnvContext.scene.object_valid_mask,
+        },
+        static_params={
+            "left_hand_body_ids": left_hand_body_ids,
+            "right_hand_body_ids": right_hand_body_ids,
+            "left_fingertip_body_ids": left_fingertip_body_ids,
+            "right_fingertip_body_ids": right_fingertip_body_ids,
+            "left_finger_dof_ids": left_finger_dof_ids,
+            "right_finger_dof_ids": right_finger_dof_ids,
+            "left_finger_effort_limits": left_finger_effort_limits,
+            "right_finger_effort_limits": right_finger_effort_limits,
+            "target_force": target_force,
+            "target_effort_ratio": target_effort_ratio,
+            "grip_weight": grip_weight,
+            "multiplicative": True,
+        },
+    )
+
+
 def intermimic_fingertip_bearing_reward_factory(
     left_fingertip_body_ids: Tensor,
     right_fingertip_body_ids: Tensor,
@@ -2182,6 +2226,7 @@ __all__ = [
     "intermimic_object_reward_factory",
     "intermimic_interaction_reward_factory",
     "intermimic_contact_reward_factory",
+    "intermimic_grip_reward_factory",
     "intermimic_fingertip_bearing_reward_factory",
     # Termination factories
     "tracking_error_term_factory",

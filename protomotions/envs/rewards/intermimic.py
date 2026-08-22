@@ -440,6 +440,99 @@ def compute_intermimic_contact_reward(
     )
 
 
+def compute_intermimic_grip_reward(
+    body_object_contact_forces: Tensor,
+    dof_forces: Tensor,
+    ref_body_contact_labels: Tensor,
+    object_valid_mask: Tensor,
+    left_hand_body_ids: Tensor,
+    right_hand_body_ids: Tensor,
+    left_fingertip_body_ids: Tensor,
+    right_fingertip_body_ids: Tensor,
+    left_finger_dof_ids: Tensor,
+    right_finger_dof_ids: Tensor,
+    left_finger_effort_limits: Tensor,
+    right_finger_effort_limits: Tensor,
+    target_force: float,
+    target_effort_ratio: float,
+    grip_weight: float,
+) -> Tensor:
+    """Reward object-loaded finger actuation during required hand contact."""
+    if target_force <= 0.0:
+        raise ValueError(f"target_force must be positive, got {target_force}")
+    if target_effort_ratio <= 0.0:
+        raise ValueError(
+            "target_effort_ratio must be positive, got "
+            f"{target_effort_ratio}"
+        )
+    if not 0.0 <= grip_weight <= 1.0:
+        raise ValueError(f"grip_weight must be in [0, 1], got {grip_weight}")
+
+    left_reward = _finger_grip_reward_for_hand(
+        body_object_contact_forces,
+        dof_forces,
+        ref_body_contact_labels,
+        object_valid_mask,
+        left_hand_body_ids,
+        left_fingertip_body_ids,
+        left_finger_dof_ids,
+        left_finger_effort_limits,
+        target_force,
+        target_effort_ratio,
+        grip_weight,
+    )
+    right_reward = _finger_grip_reward_for_hand(
+        body_object_contact_forces,
+        dof_forces,
+        ref_body_contact_labels,
+        object_valid_mask,
+        right_hand_body_ids,
+        right_fingertip_body_ids,
+        right_finger_dof_ids,
+        right_finger_effort_limits,
+        target_force,
+        target_effort_ratio,
+        grip_weight,
+    )
+    return left_reward * right_reward
+
+
+def _finger_grip_reward_for_hand(
+    body_object_contact_forces: Tensor,
+    dof_forces: Tensor,
+    ref_body_contact_labels: Tensor,
+    object_valid_mask: Tensor,
+    hand_body_ids: Tensor,
+    fingertip_body_ids: Tensor,
+    finger_dof_ids: Tensor,
+    finger_effort_limits: Tensor,
+    target_force: float,
+    target_effort_ratio: float,
+    grip_weight: float,
+) -> Tensor:
+    valid_objects = object_valid_mask[:, None, :, None].float()
+    fingertip_forces = (
+        body_object_contact_forces[:, fingertip_body_ids] * valid_objects
+    )
+    # Sum magnitudes rather than vectors so forces from different objects
+    # cannot cancel each other.
+    fingertip_force_magnitudes = fingertip_forces.norm(dim=-1).sum(dim=-1)
+    force_score = (fingertip_force_magnitudes / target_force).clamp(0.0, 1.0)
+
+    normalized_effort = (
+        dof_forces[:, finger_dof_ids].abs()
+        / finger_effort_limits.clamp_min(1e-6)
+    ).mean(dim=-1)
+    effort_score = (normalized_effort / target_effort_ratio).clamp(0.0, 1.0)
+    hand_grip_score = (force_score * effort_score).mean(dim=-1)
+    hand_reward = 1.0 - grip_weight * (1.0 - hand_grip_score)
+
+    required = torch.any(
+        ref_body_contact_labels[:, hand_body_ids] > 0, dim=-1
+    ) & torch.any(object_valid_mask, dim=-1)
+    return torch.where(required, hand_reward, torch.ones_like(hand_reward))
+
+
 def compute_intermimic_fingertip_bearing_reward(
     body_pos: Tensor,
     body_rot: Tensor,

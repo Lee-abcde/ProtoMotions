@@ -59,6 +59,7 @@ RIGHT_FINGERTIP_NAMES = [
     "R_Ring3",
     "R_Pinky3",
 ]
+FINGER_NAMES = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
 # Distal capsule endpoints in each fingertip body's local frame.
 LEFT_FINGERTIP_LOCAL_OFFSETS = [
     [0.0140, 0.0180, -0.0025],
@@ -115,6 +116,38 @@ def _body_ids(robot_cfg: RobotConfig, names: list[str]) -> torch.Tensor:
     return torch.tensor([body_names.index(name) for name in names], dtype=torch.long)
 
 
+def _finger_dof_groups(
+    robot_cfg: RobotConfig, side: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return five finger DOF groups and their actuator effort limits."""
+    dof_names = robot_cfg.kinematic_info.dof_names
+    finger_dof_ids = []
+    finger_effort_limits = []
+    for finger_name in FINGER_NAMES:
+        prefix = f"{side}_{finger_name}"
+        dof_ids = [
+            dof_id
+            for dof_id, dof_name in enumerate(dof_names)
+            if dof_name.startswith(prefix)
+        ]
+        if len(dof_ids) != 9:
+            raise ValueError(
+                f"Expected 9 DOFs for {prefix}, found {len(dof_ids)}"
+            )
+        effort_limits = [
+            robot_cfg.control.control_info[dof_names[dof_id]].effort_limit
+            for dof_id in dof_ids
+        ]
+        if any(limit is None or limit <= 0 for limit in effort_limits):
+            raise ValueError(f"{prefix} requires positive effort limits")
+        finger_dof_ids.append(dof_ids)
+        finger_effort_limits.append(effort_limits)
+    return (
+        torch.tensor(finger_dof_ids, dtype=torch.long),
+        torch.tensor(finger_effort_limits, dtype=torch.float),
+    )
+
+
 def _intermimic_body_groups(robot_cfg: RobotConfig):
     body_names = robot_cfg.kinematic_info.body_names
     aliases = robot_cfg.common_naming_to_robot_body_names
@@ -156,6 +189,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     from protomotions.envs.component_factories import (
         intermimic_contact_loss_term_factory,
         intermimic_contact_reward_factory,
+        intermimic_grip_reward_factory,
         intermimic_human_error_term_factory,
         intermimic_human_reward_factory,
         intermimic_interaction_error_term_factory,
@@ -200,6 +234,14 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     right_fingertip_local_offsets = torch.tensor(
         RIGHT_FINGERTIP_LOCAL_OFFSETS + [RIGHT_PALM_LOCAL_OFFSET],
         dtype=torch.float,
+    )
+    left_grip_fingertip_body_ids = _body_ids(robot_cfg, LEFT_FINGERTIP_NAMES)
+    right_grip_fingertip_body_ids = _body_ids(robot_cfg, RIGHT_FINGERTIP_NAMES)
+    left_finger_dof_ids, left_finger_effort_limits = _finger_dof_groups(
+        robot_cfg, "L"
+    )
+    right_finger_dof_ids, right_finger_effort_limits = _finger_dof_groups(
+        robot_cfg, "R"
     )
 
     return EnvConfig(
@@ -273,6 +315,19 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 other_weight=5.0,
                 negative_weight=3.0,
                 contact_energy_weight=1e-9,
+            ),
+            "intermimic_grip": intermimic_grip_reward_factory(
+                left_hand_body_ids=left_hand_body_ids,
+                right_hand_body_ids=right_hand_body_ids,
+                left_fingertip_body_ids=left_grip_fingertip_body_ids,
+                right_fingertip_body_ids=right_grip_fingertip_body_ids,
+                left_finger_dof_ids=left_finger_dof_ids,
+                right_finger_dof_ids=right_finger_dof_ids,
+                left_finger_effort_limits=left_finger_effort_limits,
+                right_finger_effort_limits=right_finger_effort_limits,
+                target_force=5.0,
+                target_effort_ratio=0.3,
+                grip_weight=0.2,
             ),
         },
         termination_components={
