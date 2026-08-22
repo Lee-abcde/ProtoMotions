@@ -115,9 +115,12 @@ def prepare_packed_manifest(
 ) -> dict:
     """Create a packed manifest, optionally preserving existing subject entries."""
 
+    relative_dataset_root = Path(
+        os.path.relpath(dataset_root, start=manifest_path.parent)
+    ).as_posix()
     packed_manifest = {
         "schema_version": 1,
-        "dataset_root": str(dataset_root),
+        "dataset_root": relative_dataset_root,
         "fps": fps,
         "subjects": {},
     }
@@ -131,11 +134,14 @@ def prepare_packed_manifest(
             f"Unsupported packed manifest schema in {manifest_path}: "
             f"{existing.get('schema_version')}"
         )
-    existing_root = Path(existing.get("dataset_root", "")).expanduser().resolve()
-    if existing_root != dataset_root:
+    existing_root_value = existing.get("dataset_root")
+    if not isinstance(existing_root_value, str) or not existing_root_value:
         raise ValueError(
-            f"Packed manifest dataset root mismatch: {existing_root} != {dataset_root}"
+            f"Packed manifest has invalid dataset root: {manifest_path}"
         )
+    # The packed manifest lives with its dataset and may be moved between
+    # machines. Its previous root is location metadata, so normalize it to the
+    # current relative root instead of rejecting a relocated dataset.
     if float(existing.get("fps", -1.0)) != fps:
         raise ValueError(
             f"Packed manifest FPS mismatch: {existing.get('fps')} != {fps}"
