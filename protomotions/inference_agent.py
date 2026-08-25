@@ -597,6 +597,8 @@ def _print_best_trial_summary(summary: dict, output_path: Path) -> None:
     print("=" * 60)
     print(f"  Motions Evaluated: {summary['num_motions']}")
     print(f"  Per-Trial Success Rate: {summary['per_trial_success_rate']:.6f}")
+    print(f"  Average Trial Human Error: {summary['average_trial_human_error']:.6f}")
+    print(f"  Average Trial Object Error: {summary['average_trial_object_error']:.6f}")
     print(f"  Best-of-N Success Rate: {summary['best_of_n_success_rate']:.6f}")
     curve = summary["best_of_k_success_curve"]
     milestones = {1, 2, 3, 5, 10, 20, 50, 100, len(curve)}

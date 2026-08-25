@@ -260,7 +260,7 @@ def run_parallel_mimic_trials(
             max_steps = int(frame_limits.max().item()) if batch_size else 0
 
             for step_index in range(max_steps):
-                active = (frame_limits > step_index) & ~failed
+                active = frame_limits > step_index
                 if not active.any():
                     break
 
@@ -298,7 +298,7 @@ def run_parallel_mimic_trials(
                     component_sums[name][active] += values[env_ids][active]
                     component_counts[name][active] += 1
 
-                newly_failed = active & failed_buf[env_ids]
+                newly_failed = active & ~failed & failed_buf[env_ids]
                 execution_steps[newly_failed] = step_index + 1
                 for name, failures in component_failures.items():
                     failed_indices = torch.where(
@@ -308,9 +308,7 @@ def run_parallel_mimic_trials(
                         failure_components[batch_index].add(name)
                 failed |= newly_failed
 
-                finished = newly_failed | (
-                    active & (frame_limits <= step_index + 1)
-                )
+                finished = active & (frame_limits <= step_index + 1)
                 if finished.any():
                     evaluator.env.simulator.park_envs(env_ids[finished])
 
@@ -363,7 +361,7 @@ def run_parallel_mimic_trials(
 def aggregate_best_trials(
     trial_results: List[Dict[str, Any]], motion_names: List[str]
 ) -> Dict[str, Any]:
-    """Select private-style best trials and calculate aggregate metrics."""
+    """Calculate repeated-trial averages and private-style best metrics."""
 
     if not trial_results:
         return {"num_trials": 0, "num_motions": 0, "motions": []}
@@ -374,7 +372,16 @@ def aggregate_best_trials(
             f"Expected {num_motions} motion names, got {len(motion_names)}"
         )
 
+    def finite_mean(values: List[float]) -> float:
+        finite_values = [value for value in values if math.isfinite(value)]
+        return (
+            sum(finite_values) / len(finite_values)
+            if finite_values
+            else float("nan")
+        )
+
     best_motions = []
+    evaluated_candidates = []
     total_successes = 0
     evaluated_trials = 0
     cumulative_successes = [0] * len(trial_results)
@@ -386,6 +393,7 @@ def aggregate_best_trials(
             candidate["trial_index"] = trial_index
             candidates.append(candidate)
             if candidate["evaluated"]:
+                evaluated_candidates.append(candidate)
                 evaluated_trials += 1
                 total_successes += int(candidate["success"])
 
@@ -410,6 +418,34 @@ def aggregate_best_trials(
             {
                 "motion_id": motion_id,
                 "motion_name": motion_names[motion_id],
+                "average_success_rate": (
+                    sum(
+                        int(candidate["success"])
+                        for candidate in candidates
+                        if candidate["evaluated"]
+                    )
+                    / sum(int(candidate["evaluated"]) for candidate in candidates)
+                    if any(candidate["evaluated"] for candidate in candidates)
+                    else 0.0
+                ),
+                "average_human_error": finite_mean(
+                    [
+                        candidate["component_means"].get(
+                            "human_error", float("nan")
+                        )
+                        for candidate in candidates
+                        if candidate["evaluated"]
+                    ]
+                ),
+                "average_object_error": finite_mean(
+                    [
+                        candidate["component_means"].get(
+                            "object_error", float("nan")
+                        )
+                        for candidate in candidates
+                        if candidate["evaluated"]
+                    ]
+                ),
                 "best_trial": best,
                 "trials": candidates,
             }
@@ -420,19 +456,23 @@ def aggregate_best_trials(
     ]
     num_evaluated_motions = len(evaluated_best)
 
-    def finite_mean(values: List[float]) -> float:
-        finite_values = [value for value in values if math.isfinite(value)]
-        return (
-            sum(finite_values) / len(finite_values)
-            if finite_values
-            else float("nan")
-        )
-
     return {
         "num_trials": len(trial_results),
         "num_motions": len(evaluated_best),
         "per_trial_success_rate": (
             total_successes / evaluated_trials if evaluated_trials else 0.0
+        ),
+        "average_trial_human_error": finite_mean(
+            [
+                item["component_means"].get("human_error", float("nan"))
+                for item in evaluated_candidates
+            ]
+        ),
+        "average_trial_object_error": finite_mean(
+            [
+                item["component_means"].get("object_error", float("nan"))
+                for item in evaluated_candidates
+            ]
         ),
         "best_of_n_success_rate": (
             cumulative_successes[-1] / num_evaluated_motions
