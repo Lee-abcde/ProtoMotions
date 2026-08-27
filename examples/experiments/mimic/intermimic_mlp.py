@@ -486,6 +486,8 @@ def configure_robot_and_simulator(
             "reward and IET use object-filtered force_matrix_w contacts"
         )
     robot_cfg.update_fields(contact_bodies="all")
+    simulator_cfg.sim.fps = 240
+    simulator_cfg.sim.decimation = 8
     simulator_cfg.binary_contact_threshold = 0.1
     simulator_cfg.binary_contact_mode = "componentwise"
     physx_cfg = getattr(getattr(simulator_cfg, "sim", None), "physx", None)
