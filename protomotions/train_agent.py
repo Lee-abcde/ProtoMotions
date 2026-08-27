@@ -78,6 +78,7 @@ Example
 import os
 import sys
 import json
+from datetime import timedelta
 
 os.environ["WANDB_DISABLE_SENTRY"] = "true"  # Must be first environment variable
 os.environ["WANDB_SILENT"] = "true"
@@ -228,6 +229,12 @@ def create_parser():
     )
     parser.add_argument(
         "--nodes", type=int, default=1, help="Number of nodes for distributed training"
+    )
+    parser.add_argument(
+        "--distributed-timeout-sec",
+        type=int,
+        default=300,
+        help="Seconds before a distributed collective operation times out",
     )
     parser.add_argument(
         "--headless",
@@ -716,6 +723,12 @@ def main():
     fabric_config = FabricConfig(
         devices=args.ngpu,
         num_nodes=args.nodes,
+        strategy={
+            "_target_": "lightning.fabric.strategies.DDPStrategy",
+            "timeout": timedelta(
+                seconds=getattr(args, "distributed_timeout_sec", 300)
+            ),
+        },
         loggers=loggers,
         callbacks=callbacks,
     )

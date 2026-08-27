@@ -135,39 +135,69 @@ def aggregate_scalar_metrics(log_dict: Dict, fabric: Fabric, weight: int = 1) ->
     from rank 0 (via Lightning's rank_zero_only pattern), so wandb logs the average
     across all ranks rather than just rank 0's local metrics.
     """
-    aggregated_dict = {}
-
-    if fabric.world_size > 1:
-        weight_tensor = torch.tensor(weight, device=fabric.device, dtype=torch.float32)
-        all_weights = fabric.all_gather(weight_tensor)
-        total_weight = all_weights.sum()
-    else:
-        all_weights = None
-        total_weight = None
-
+    numeric_metrics = {}
+    other_metrics = {}
     for key, value in log_dict.items():
         if isinstance(value, (int, float)):
-            value_tensor = torch.tensor(
-                value, device=fabric.device, dtype=torch.float32
-            )
+            numeric_metrics[key] = float(value)
         elif isinstance(value, torch.Tensor):
             if value.numel() == 1:
-                value_tensor = value.float().to(fabric.device)
+                numeric_metrics[key] = value.detach().float().item()
             else:
-                value_tensor = value.mean().float().to(fabric.device)
+                numeric_metrics[key] = value.detach().float().mean().item()
         else:
-            aggregated_dict[key] = value
-            continue
+            other_metrics[key] = value
 
-        if fabric.world_size > 1:
-            all_values = fabric.all_gather(value_tensor)
-            # Weighted mean: sum(value_i * weight_i) / sum(weight_i)
-            aggregated_value = (all_values * all_weights).sum() / total_weight
-            aggregated_value = aggregated_value.item()
+    if fabric.world_size == 1:
+        return {**numeric_metrics, **other_metrics}
+
+    # Gather the complete payload in one fixed collective before validating its
+    # schema. This lets every rank fail immediately with a useful error instead
+    # of entering a different number or order of per-metric collectives.
+    local_payload = (float(weight), numeric_metrics, other_metrics)
+    gather_object = getattr(fabric, "all_gather_object", None)
+    if callable(gather_object):
+        all_payloads = gather_object(local_payload)
+    else:
+        all_payloads = [None] * fabric.world_size
+        torch.distributed.all_gather_object(all_payloads, local_payload)
+
+    schemas = [
+        (frozenset(metrics), frozenset(other))
+        for _, metrics, other in all_payloads
+    ]
+    if any(schema != schemas[0] for schema in schemas[1:]):
+        schema_details = "; ".join(
+            f"rank {rank}: numeric={sorted(numeric)}, other={sorted(other)}"
+            for rank, (numeric, other) in enumerate(schemas)
+        )
+        raise RuntimeError(
+            "Distributed metric schema mismatch; every rank must provide the same "
+            f"metric keys and value kinds. {schema_details}"
+        )
+
+    aggregated_dict = {}
+    numeric_keys = sorted(schemas[0][0])
+    for key in numeric_keys:
+        contributions = [
+            (rank_weight, metrics[key])
+            for rank_weight, metrics, _ in all_payloads
+        ]
+        total_weight = sum(rank_weight for rank_weight, _ in contributions)
+        if total_weight > 0:
+            aggregated_dict[key] = (
+                sum(rank_weight * value for rank_weight, value in contributions)
+                / total_weight
+            )
         else:
-            aggregated_value = value_tensor.item()
+            # Avoid NaN when every rank evaluated zero items.
+            aggregated_dict[key] = sum(value for _, value in contributions) / len(
+                contributions
+            )
 
-        aggregated_dict[key] = aggregated_value
+    other_keys = sorted(schemas[0][1])
+    for key in other_keys:
+        aggregated_dict[key] = all_payloads[0][2][key]
 
     return aggregated_dict
 

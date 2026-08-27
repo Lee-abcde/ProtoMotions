@@ -185,6 +185,12 @@ def create_parser():
     )
     parser.add_argument("--ngpu", type=int, default=1, help="GPUs per node")
     parser.add_argument("--nodes", type=int, default=1, help="Number of nodes")
+    parser.add_argument(
+        "--distributed-timeout-sec",
+        type=int,
+        default=300,
+        help="Seconds before a distributed collective operation times out",
+    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--overrides", nargs="*", default=[], help="Config overrides (key=value)")
 
@@ -244,6 +250,27 @@ def create_parser():
         ),
     )
     parser.add_argument(
+        "--nccl-trace-buffer-size",
+        type=int,
+        default=2000,
+        help=(
+            "Number of ProcessGroupNCCL Flight Recorder events retained per rank. "
+            "Set to 0 to disable tracing (default: 2000)."
+        ),
+    )
+    parser.add_argument(
+        "--nccl-dump-on-timeout",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Dump the NCCL Flight Recorder when a collective times out.",
+    )
+    parser.add_argument(
+        "--nccl-desync-debug",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable NCCL collective desynchronization diagnostics.",
+    )
+    parser.add_argument(
         "--slurm-autoresume-after",
         type=int,
         default=12600,
@@ -300,6 +327,8 @@ def build_train_agent_command(args):
         args.num_envs,
         "--batch-size",
         args.batch_size,
+        "--distributed-timeout-sec",
+        args.distributed_timeout_sec,
     ]
 
     if args.scenes_file:
@@ -361,6 +390,7 @@ def build_job_command(args, exp_folder, python_path):
         f"--experiment-path={args.experiment_path} "
         f"--num-envs={args.num_envs} "
         f"--batch-size={args.batch_size} "
+        f"--distributed-timeout-sec={args.distributed_timeout_sec} "
     )
 
     if args.use_slurm:
@@ -424,6 +454,9 @@ export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
 source {shlex.quote(args.container_env)}
 
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC={args.nccl_heartbeat_timeout_sec}
+export TORCH_NCCL_TRACE_BUFFER_SIZE={args.nccl_trace_buffer_size}
+export TORCH_NCCL_DUMP_ON_TIMEOUT={int(args.nccl_dump_on_timeout)}
+export TORCH_NCCL_DESYNC_DEBUG={int(args.nccl_desync_debug)}
 export WANDB_DIR=/workspace/ProtoMotions/results/wandb
 export WANDB_CACHE_DIR=/workspace/ProtoMotions/results/wandb_cache
 export WANDB_CONFIG_DIR=/workspace/ProtoMotions/results/wandb_config

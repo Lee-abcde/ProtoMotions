@@ -777,13 +777,14 @@ class BaseAgent:
                 eval_log_dict = aggregate_scalar_metrics(
                     eval_log_dict, self.fabric, weight=num_eval_items
                 )
-                if evaluated_score is not None:
-                    score_dict = aggregate_scalar_metrics(
-                        {"_score": evaluated_score},
-                        self.fabric,
-                        weight=num_eval_items,
-                    )
-                    evaluated_score = score_dict["_score"]
+                # All ranks must enter the same aggregation even when a local
+                # evaluator did not produce a score.
+                score_dict = aggregate_scalar_metrics(
+                    {} if evaluated_score is None else {"_score": evaluated_score},
+                    self.fabric,
+                    weight=num_eval_items,
+                )
+                evaluated_score = score_dict.get("_score")
 
                 if evaluated_score is not None:
                     if (
