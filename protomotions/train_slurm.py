@@ -93,7 +93,7 @@ CONTAINER_MOUNTS = "/scratch:/scratch:rw"
 EULER_LOGIN_NODE = "euler.ethz.ch"
 EULER_HOME_BASE = "/cluster/home"
 EULER_SCRATCH_BASE = "/cluster/scratch"
-EULER_ISAACLAB_ENV = "/opt/env_isaaclab/bin/activate"
+EULER_ISAACLAB_ENV = "/opt/IsaacLab_new/.venv/bin/activate"
 
 # =============================================================================
 # END CLUSTER CONFIGURATION
@@ -460,7 +460,10 @@ def generate_euler_slurm_script(args):
         optional_slurm.append(f"#SBATCH --array=0-{args.array_size - 1}%1")
 
     train_cmd = build_train_agent_command(args)
-    python_bin = "/opt/env_isaaclab/bin/python"
+    # Keep subprocesses launched by integrations such as WandB on the same
+    # interpreter selected by --container-env instead of an image-specific
+    # hard-coded Python path.
+    python_bin = str(Path(args.container_env).parent / "python")
     data_path = (
         Path(args.intermimic_data_dir)
         if args.intermimic_data_dir
@@ -477,6 +480,12 @@ def generate_euler_slurm_script(args):
 set -euo pipefail
 export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
 source {shlex.quote(args.container_env)}
+export ACCEPT_EULA=Y
+export OMNI_KIT_ACCEPT_EULA=Y
+# ProtoMotions is mounted at this path on Euler.  The package inside the new
+# IsaacLab image is an editable install whose original source path is not
+# present at runtime, so make the mounted checkout directly importable.
+export PYTHONPATH=/workspace/ProtoMotions:${{PYTHONPATH:-}}
 
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC={args.nccl_heartbeat_timeout_sec}
 export TORCH_NCCL_TRACE_BUFFER_SIZE={args.nccl_trace_buffer_size}
@@ -524,7 +533,7 @@ OUTPUT_DIR={shlex.quote(output_dir)}
 mkdir -p "$OUTPUT_DIR"/wandb "$OUTPUT_DIR"/wandb_cache "$OUTPUT_DIR"/wandb_config "$OUTPUT_DIR"/tmp
 export APPTAINER_BIND="$OUTPUT_DIR/tmp:/tmp"
 
-srun --kill-on-bad-exit=1 --wait=60 apptainer exec --nv \\
+srun --kill-on-bad-exit=1 --wait=60 apptainer exec --nv --writable-tmpfs \\
   --bind "$PROTOMOTIONS_DIR":/workspace/ProtoMotions:rw \\
   --bind "$OUTPUT_DIR":/workspace/ProtoMotions/results:rw \\
 {data_bind}\
