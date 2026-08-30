@@ -144,7 +144,7 @@ Once configured, launch training from your local machine:
        --num-envs=4096 \
        --batch-size=16384 \
        --motion-file=/cluster/path/to/motions.pt \
-       --experiment-path=examples/experiments/mimic/mlp.py \
+       --experiment-path=examples/experiments/mimic/mlp_bm_l2c2.py \
        --experiment-name=g1_motion_tracker \
        --user=myusername \
        --ngpu=4 \
@@ -184,8 +184,12 @@ Once configured, launch training from your local machine:
      - Job time limit (HH:MM:SS)
    * - ``--array-size``
      - Number of auto-resume attempts (default: 5)
+   * - ``--training-max-iterations``
+     - Maximum complete rollout and optimization iterations
    * - ``--use-wandb``
      - Enable Weights & Biases logging
+   * - ``--wandb-project``
+     - Weights & Biases project name (default: ``physical_animation``)
 
 Multi-Node Training
 -------------------

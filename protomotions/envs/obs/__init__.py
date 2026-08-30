@@ -52,7 +52,7 @@ from protomotions.envs.obs.target_poses import (
     build_target_root_vel,
     build_target_root_ang_vel,
     build_target_root_velocity_yaw_command,
-    build_corrupted_xy_offset,
+    compute_odom_offset_local,
 )
 
 # Masked mimic observation compute kernels
@@ -68,11 +68,13 @@ from protomotions.envs.obs.steering import compute_steering_obs
 # Path observation compute kernel
 from protomotions.envs.obs.path import compute_path_obs
 
+# Nearest-surface observation compute kernel
+from protomotions.envs.obs.nearest_surface_obs import compute_nearest_surface_vectors
+
 # Target observation compute kernel
 from protomotions.envs.obs.target import compute_target_obs
 
-# Nearest surface observation compute kernel
-from protomotions.envs.obs.nearest_surface_obs import compute_nearest_surface_vectors
+# InterMimic observation compute kernels
 from protomotions.envs.obs.intermimic import (
     compute_intermimic_object_observation,
     compute_intermimic_target_observation,
@@ -121,7 +123,7 @@ __all__ = [
     "build_target_root_vel",
     "build_target_root_ang_vel",
     "build_target_root_velocity_yaw_command",
-    "build_corrupted_xy_offset",
+    "compute_odom_offset_local",
     # Masked mimic observation compute kernels
     "compute_target_poses_only",
     "compute_target_masks_only",
@@ -130,10 +132,11 @@ __all__ = [
     "compute_steering_obs",
     # Path observation compute kernel
     "compute_path_obs",
+    # Nearest-surface observation compute kernel
+    "compute_nearest_surface_vectors",
     # Target observation compute kernel
     "compute_target_obs",
-    # Nearest surface observation compute kernel
-    "compute_nearest_surface_vectors",
+    # InterMimic observation compute kernels
     "compute_intermimic_object_observation",
     "compute_intermimic_target_observation",
     # Observation noise utilities

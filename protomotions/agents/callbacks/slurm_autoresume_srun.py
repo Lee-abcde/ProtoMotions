@@ -40,11 +40,13 @@ class AutoResumeCallbackSrun(Callback):
         # If only one rank enters save(), its collectives diverge from ranks that
         # continue training. Let rank 0 decide and broadcast that decision.
         should_autoresume = False
-        if agent.fabric.global_rank == 0:
+        if getattr(agent.fabric, "global_rank", 0) == 0:
             should_autoresume = (
                 time.time() - self.start_time >= self.autoresume_after
             )
-        should_autoresume = agent.fabric.broadcast(should_autoresume, src=0)
+        broadcast = getattr(agent.fabric, "broadcast", None)
+        if broadcast is not None:
+            should_autoresume = broadcast(should_autoresume, src=0)
 
         if should_autoresume:
             log.info("Should autoresume!")

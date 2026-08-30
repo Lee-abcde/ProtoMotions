@@ -158,6 +158,24 @@ def aggregate_scalar_metrics(log_dict: Dict, fabric: Fabric, weight: int = 1) ->
     gather_object = getattr(fabric, "all_gather_object", None)
     if callable(gather_object):
         all_payloads = gather_object(local_payload)
+    elif not torch.distributed.is_initialized():
+        # Compatibility fallback for Fabric-like strategies that expose only
+        # tensor all_gather (including lightweight unit-test doubles).
+        gathered_weights = fabric.all_gather(
+            torch.tensor(float(weight), device=fabric.device)
+        ).flatten()
+        total_weight = gathered_weights.sum().clamp_min(1.0)
+        aggregated_dict = {}
+        for key in sorted(numeric_metrics):
+            gathered_values = fabric.all_gather(
+                torch.tensor(numeric_metrics[key], device=fabric.device)
+            ).flatten()
+            aggregated_dict[key] = float(
+                (gathered_values * gathered_weights).sum().item()
+                / total_weight.item()
+            )
+        aggregated_dict.update(other_metrics)
+        return aggregated_dict
     else:
         all_payloads = [None] * fabric.world_size
         torch.distributed.all_gather_object(all_payloads, local_payload)

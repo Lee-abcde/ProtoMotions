@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from typing import Optional, TYPE_CHECKING
 
+import torch
 from torch import Tensor
 
 from protomotions.envs.context_paths import FieldPath, NestedField
@@ -157,18 +158,18 @@ class CurrentStateView:
         self.root_vel = state.root_vel
         self.root_ang_vel = state.root_ang_vel
         self.root_height = state.rigid_body_pos[:, 0, 2]
-        self.root_local_ang_vel = compute_local_ang_vel(
-            state.root_rot, state.root_ang_vel
-        )
 
         # Precompute anchor properties
         self.anchor_pos = state.rigid_body_pos[:, anchor_idx, :]
         self.anchor_rot = state.rigid_body_rot[:, anchor_idx, :]
         self.anchor_vel = state.rigid_body_vel[:, anchor_idx, :]
         self.anchor_ang_vel = state.rigid_body_ang_vel[:, anchor_idx, :]
-        self.anchor_local_ang_vel = compute_local_ang_vel(
-            self.anchor_rot, self.anchor_ang_vel
-        )
+
+    def _compute_root_local_ang_vel(self) -> Tensor:
+        return compute_local_ang_vel(self.root_rot, self.root_ang_vel)
+
+    def _compute_anchor_local_ang_vel(self) -> Tensor:
+        return compute_local_ang_vel(self.anchor_rot, self.anchor_ang_vel)
 
 
 # =============================================================================
@@ -210,54 +211,89 @@ class HistoricalView:
     anchor_vel: Tensor = FieldPath()
     anchor_ang_vel: Tensor = FieldPath()
 
-    def __init__(self, buffer: "StateHistoryBuffer", use_noisy: bool = False):
+    def __init__(
+        self,
+        buffer: "StateHistoryBuffer",
+        use_noisy: bool = False,
+        env_ids: Optional[Tensor] = None,
+    ):
         """Initialize HistoricalView with precomputed derived values.
 
         Args:
             buffer: The underlying StateHistoryBuffer containing historical state.
             use_noisy: If True, use noisy historical data. If False, use clean data.
         """
-        # Determine prefix based on use_noisy
-        prefix = "noisy_historical_" if use_noisy else "historical_"
+        self._buffer = buffer
+        self._use_noisy = use_noisy
+        self._env_ids = env_ids
+        self._prefix = "noisy_historical_" if use_noisy else "historical_"
 
-        # Store direct values from buffer
-        self.rigid_body_pos = getattr(buffer, f"{prefix}rigid_body_pos")
-        self.rigid_body_rot = getattr(buffer, f"{prefix}rigid_body_rot")
-        self.rigid_body_vel = getattr(buffer, f"{prefix}rigid_body_vel")
-        self.rigid_body_ang_vel = getattr(buffer, f"{prefix}rigid_body_ang_vel")
-        self.dof_pos = getattr(buffer, f"{prefix}dof_pos")
-        self.dof_vel = getattr(buffer, f"{prefix}dof_vel")
-        self.ground_heights = getattr(buffer, f"{prefix}ground_heights")
+    def _select(self, tensor: Optional[Tensor]) -> Optional[Tensor]:
+        if tensor is None or self._env_ids is None:
+            return tensor
+        return tensor[self._env_ids]
 
-        # Clean-only fields (not available in noisy version)
-        if not use_noisy:
-            self.actions = buffer.historical_actions
-            self.processed_actions = buffer.historical_processed_actions
-            self.body_contacts = buffer.historical_body_contacts
-        else:
-            self.actions = None
-            self.processed_actions = None
-            self.body_contacts = None
+    def _historical_field(self, name: str) -> Optional[Tensor]:
+        return self._select(getattr(self._buffer, f"{self._prefix}{name}"))
 
-        # Precompute root properties
-        self.root_pos = getattr(buffer, f"{prefix}root_pos")
-        self.root_rot = getattr(buffer, f"{prefix}root_rot")
-        self.root_ang_vel = getattr(buffer, f"{prefix}root_ang_vel")
-        self.root_local_ang_vel = compute_local_ang_vel(
-            self.root_rot, self.root_ang_vel
-        )
+    def _clean_field(self, name: str) -> Optional[Tensor]:
+        if self._use_noisy:
+            return None
+        return self._select(getattr(self._buffer, name))
 
-        # Precompute anchor properties
-        self.anchor_pos = getattr(buffer, f"{prefix}anchor_pos")
-        self.anchor_rot = getattr(buffer, f"{prefix}anchor_rot")
+    def _compute_rigid_body_pos(self) -> Tensor:
+        return self._historical_field("rigid_body_pos")
 
-        # Clean-only anchor properties
-        if not use_noisy:
-            self.anchor_vel = buffer.historical_anchor_vel
-            self.anchor_ang_vel = buffer.historical_anchor_ang_vel
-        else:
-            self.anchor_vel = None
-            self.anchor_ang_vel = None
+    def _compute_rigid_body_rot(self) -> Tensor:
+        return self._historical_field("rigid_body_rot")
+
+    def _compute_rigid_body_vel(self) -> Tensor:
+        return self._historical_field("rigid_body_vel")
+
+    def _compute_rigid_body_ang_vel(self) -> Tensor:
+        return self._historical_field("rigid_body_ang_vel")
+
+    def _compute_dof_pos(self) -> Tensor:
+        return self._historical_field("dof_pos")
+
+    def _compute_dof_vel(self) -> Tensor:
+        return self._historical_field("dof_vel")
+
+    def _compute_actions(self) -> Optional[Tensor]:
+        return self._clean_field("historical_actions")
+
+    def _compute_processed_actions(self) -> Optional[Tensor]:
+        return self._clean_field("historical_processed_actions")
+
+    def _compute_ground_heights(self) -> Tensor:
+        return self._historical_field("ground_heights")
+
+    def _compute_body_contacts(self) -> Optional[Tensor]:
+        return self._clean_field("historical_body_contacts")
+
+    def _compute_root_pos(self) -> Tensor:
+        return self._historical_field("root_pos")
+
+    def _compute_root_rot(self) -> Tensor:
+        return self._historical_field("root_rot")
+
+    def _compute_root_ang_vel(self) -> Tensor:
+        return self._historical_field("root_ang_vel")
+
+    def _compute_anchor_pos(self) -> Tensor:
+        return self._historical_field("anchor_pos")
+
+    def _compute_anchor_rot(self) -> Tensor:
+        return self._historical_field("anchor_rot")
+
+    def _compute_anchor_vel(self) -> Optional[Tensor]:
+        return self._clean_field("historical_anchor_vel")
+
+    def _compute_anchor_ang_vel(self) -> Optional[Tensor]:
+        return self._clean_field("historical_anchor_ang_vel")
+
+    def _compute_root_local_ang_vel(self) -> Tensor:
+        return compute_local_ang_vel(self.root_rot, self.root_ang_vel)
 
 
 # =============================================================================
@@ -322,15 +358,15 @@ class MimicContext:
         future_ang_vel: Tensor,
         future_dof_pos: Tensor,
         future_dof_vel: Tensor,
-        historical_root_rot: Tensor,
-        historical_root_ang_vel: Tensor,
-        historical_anchor_rot: Tensor,
-        historical_dof_pos: Tensor,
-        historical_dof_vel: Tensor,
         anchor_idx: int,
         ref_lr: Tensor,
-        text_embedding: Tensor,
-        text_embedding_valid_mask: Tensor,
+        historical_root_rot: Optional[Tensor] = None,
+        historical_root_ang_vel: Optional[Tensor] = None,
+        historical_anchor_rot: Optional[Tensor] = None,
+        historical_dof_pos: Optional[Tensor] = None,
+        historical_dof_vel: Optional[Tensor] = None,
+        text_embedding: Optional[Tensor] = None,
+        text_embedding_valid_mask: Optional[Tensor] = None,
     ):
         """Initialize MimicContext with precomputed derived values.
 
@@ -360,11 +396,33 @@ class MimicContext:
         self.future_ang_vel = future_ang_vel
         self.future_dof_pos = future_dof_pos
         self.future_dof_vel = future_dof_vel
-        self.historical_root_rot = historical_root_rot
-        self.historical_root_ang_vel = historical_root_ang_vel
-        self.historical_anchor_rot = historical_anchor_rot
-        self.historical_dof_pos = historical_dof_pos
-        self.historical_dof_vel = historical_dof_vel
+        num_envs = future_pos.shape[0]
+        num_dofs = future_dof_pos.shape[-1]
+        self.historical_root_rot = (
+            historical_root_rot
+            if historical_root_rot is not None
+            else future_rot.new_empty(num_envs, 0, 4)
+        )
+        self.historical_root_ang_vel = (
+            historical_root_ang_vel
+            if historical_root_ang_vel is not None
+            else future_ang_vel.new_empty(num_envs, 0, 3)
+        )
+        self.historical_anchor_rot = (
+            historical_anchor_rot
+            if historical_anchor_rot is not None
+            else future_rot.new_empty(num_envs, 0, 4)
+        )
+        self.historical_dof_pos = (
+            historical_dof_pos
+            if historical_dof_pos is not None
+            else future_dof_pos.new_empty(num_envs, 0, num_dofs)
+        )
+        self.historical_dof_vel = (
+            historical_dof_vel
+            if historical_dof_vel is not None
+            else future_dof_vel.new_empty(num_envs, 0, num_dofs)
+        )
         self.anchor_idx = anchor_idx
         self.ref_lr = ref_lr
 
@@ -383,8 +441,16 @@ class MimicContext:
         self.future_anchor_rot = future_rot[:, :, anchor_idx, :]
         self.future_anchor_vel = future_vel[:, :, anchor_idx, :]
         self.future_anchor_ang_vel = future_ang_vel[:, :, anchor_idx, :]
-        self.text_embedding = text_embedding
-        self.text_embedding_valid_mask = text_embedding_valid_mask
+        self.text_embedding = (
+            text_embedding
+            if text_embedding is not None
+            else future_pos.new_empty(num_envs, 0)
+        )
+        self.text_embedding_valid_mask = (
+            text_embedding_valid_mask
+            if text_embedding_valid_mask is not None
+            else future_pos.new_zeros(num_envs, dtype=torch.bool)
+        )
 
 
 class InterMimicContext:
@@ -473,9 +539,9 @@ class MaskedMimicContext:
         time_offsets: Tensor,
         target_poses_masks: Tensor,
         target_bodies_masks: Tensor,
-        reached_target_ref_pos: Tensor,
-        reached_target_ref_rot: Tensor,
-        reached_target_bodies_masks: Tensor,
+        reached_target_ref_pos: Optional[Tensor] = None,
+        reached_target_ref_rot: Optional[Tensor] = None,
+        reached_target_bodies_masks: Optional[Tensor] = None,
     ):
         """Initialize MaskedMimicContext.
 
@@ -498,9 +564,23 @@ class MaskedMimicContext:
         self.time_offsets = time_offsets
         self.target_poses_masks = target_poses_masks
         self.target_bodies_masks = target_bodies_masks
-        self.reached_target_ref_pos = reached_target_ref_pos
-        self.reached_target_ref_rot = reached_target_ref_rot
-        self.reached_target_bodies_masks = reached_target_bodies_masks
+        self.reached_target_ref_pos = (
+            reached_target_ref_pos
+            if reached_target_ref_pos is not None
+            else ref_pos[:, 0]
+        )
+        self.reached_target_ref_rot = (
+            reached_target_ref_rot
+            if reached_target_ref_rot is not None
+            else ref_rot[:, 0]
+        )
+        self.reached_target_bodies_masks = (
+            reached_target_bodies_masks
+            if reached_target_bodies_masks is not None
+            else target_bodies_masks.new_zeros(
+                target_bodies_masks.shape[0], ref_pos.shape[2] * 2
+            )
+        )
 
 
 class SteeringContext:
@@ -708,6 +788,7 @@ class EnvContext:
     previous_processed_action: Optional[Tensor] = FieldPath()
 
     # Environment state
+    env_ids: Optional[Tensor] = FieldPath()
     ground_heights: Optional[Tensor] = FieldPath()
     noisy_ground_heights: Optional[Tensor] = FieldPath()
     terrain: Optional[TerrainContext] = NestedField(TerrainContext)
@@ -730,6 +811,18 @@ class EnvContext:
     odom_scale: Tensor = FieldPath()
     odom_yaw_cos_sin: Tensor = FieldPath()
 
+    # Drift-from-episode-start odometer sensor fields (set once per step in
+    # _build_global_context). odom_disp_start_corrupt is the corrupted robot
+    # displacement from episode start expressed in the start-heading frame;
+    # odom_disp_start_clean is its ground-truth twin. odom_start_xy /
+    # odom_start_heading_inv anchor that frame. The heading-local offset to the
+    # reference is derived on demand from these raw ingredients by consumers
+    # (obs.target_poses.compute_odom_offset_local), not stored here.
+    odom_start_xy: Optional[Tensor] = FieldPath()
+    odom_start_heading_inv: Optional[Tensor] = FieldPath()
+    odom_disp_start_corrupt: Optional[Tensor] = FieldPath()
+    odom_disp_start_clean: Optional[Tensor] = FieldPath()
+
     # Control-specific contexts (populated by controllers via populate_context)
     mimic: Optional[MimicContext] = NestedField(MimicContext)
     intermimic: Optional[InterMimicContext] = NestedField(InterMimicContext)
@@ -748,6 +841,7 @@ class EnvContext:
         previous_action: Optional[Tensor] = None,
         current_processed_action: Optional[Tensor] = None,
         previous_processed_action: Optional[Tensor] = None,
+        env_ids: Optional[Tensor] = None,
         ground_heights: Optional[Tensor] = None,
         noisy_ground_heights: Optional[Tensor] = None,
         terrain: Optional[TerrainContext] = None,
@@ -760,6 +854,10 @@ class EnvContext:
         non_termination_contact_body_ids: Optional[Tensor] = None,
         odom_scale: Optional[Tensor] = None,
         odom_yaw_cos_sin: Optional[Tensor] = None,
+        odom_start_xy: Optional[Tensor] = None,
+        odom_start_heading_inv: Optional[Tensor] = None,
+        odom_disp_start_corrupt: Optional[Tensor] = None,
+        odom_disp_start_clean: Optional[Tensor] = None,
         mimic: Optional[MimicContext] = None,
         intermimic: Optional[InterMimicContext] = None,
         masked_mimic: Optional[MaskedMimicContext] = None,
@@ -778,6 +876,7 @@ class EnvContext:
             previous_action: Previous raw action [num_envs, action_dim] (optional).
             current_processed_action: Current processed action (optional).
             previous_processed_action: Previous processed action (optional).
+            env_ids: Optional subset represented by this context.
             ground_heights: Ground height beneath root position [num_envs] (optional).
             noisy_ground_heights: Noisy ground height for actor (optional).
             terrain: Terrain tensor context (optional).
@@ -811,6 +910,7 @@ class EnvContext:
         self.previous_processed_action = previous_processed_action
 
         # Environment state
+        self.env_ids = env_ids
         self.ground_heights = ground_heights
         self.noisy_ground_heights = noisy_ground_heights
         self.terrain = terrain
@@ -827,6 +927,11 @@ class EnvContext:
         # Per-episode odometer corruption parameters
         self.odom_scale = odom_scale
         self.odom_yaw_cos_sin = odom_yaw_cos_sin
+        # Drift-from-episode-start odometer fields (populated in _build_global_context)
+        self.odom_start_xy = odom_start_xy
+        self.odom_start_heading_inv = odom_start_heading_inv
+        self.odom_disp_start_corrupt = odom_disp_start_corrupt
+        self.odom_disp_start_clean = odom_disp_start_clean
 
         # Control-specific views
         self.mimic = mimic

@@ -174,9 +174,27 @@ def create_parser():
         ),
     )
     parser.add_argument("--headless", default=True, help="Run headless (no GUI)")
-    parser.add_argument("--training-max-steps", type=int, default=10000000000, help="Max training steps")
+    training_limit_group = parser.add_mutually_exclusive_group()
+    training_limit_group.add_argument(
+        "--training-max-steps",
+        type=int,
+        default=10000000000,
+        help="Max training steps",
+    )
+    training_limit_group.add_argument(
+        "--training-max-iterations",
+        type=int,
+        default=None,
+        help="Max complete training iterations",
+    )
     parser.add_argument("--checkpoint", type=str, default=None, help="Resume from checkpoint")
     parser.add_argument("--use-wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="physical_animation",
+        help="Weights & Biases project name",
+    )
     parser.add_argument(
         "--use-slurm",
         action=argparse.BooleanOptionalAction,
@@ -317,8 +335,6 @@ def build_train_agent_command(args):
         args.ngpu,
         "--nodes",
         args.nodes,
-        "--training-max-steps",
-        args.training_max_steps,
         "--experiment-name",
         args.experiment_name,
         "--experiment-path",
@@ -331,10 +347,15 @@ def build_train_agent_command(args):
         args.distributed_timeout_sec,
     ]
 
+    if args.training_max_iterations is not None:
+        cmd += ["--training-max-iterations", args.training_max_iterations]
+    else:
+        cmd += ["--training-max-steps", args.training_max_steps]
+
     if args.scenes_file:
         cmd += ["--scenes-file", args.scenes_file]
     if args.use_wandb:
-        cmd += ["--use-wandb"]
+        cmd += ["--use-wandb", "--wandb-project", args.wandb_project]
     if args.use_slurm:
         cmd += ["--use-slurm"]
         if not args.skip_slurm_autoresume_after_arg:
@@ -385,7 +406,6 @@ def build_job_command(args, exp_folder, python_path):
         f"--motion-file={args.motion_file} "
         f"--ngpu={args.ngpu} "
         f"--nodes={args.nodes} "
-        f"--training-max-steps={args.training_max_steps} "
         f"--experiment-name={args.experiment_name} "
         f"--experiment-path={args.experiment_path} "
         f"--num-envs={args.num_envs} "
@@ -398,10 +418,15 @@ def build_job_command(args, exp_folder, python_path):
         if not args.skip_slurm_autoresume_after_arg:
             job_cmd += f"--slurm-autoresume-after={args.slurm_autoresume_after} "
 
+    if args.training_max_iterations is not None:
+        job_cmd += f"--training-max-iterations={args.training_max_iterations} "
+    else:
+        job_cmd += f"--training-max-steps={args.training_max_steps} "
+
     if args.scenes_file:
         job_cmd += f"--scenes-file={args.scenes_file} "
     if args.use_wandb:
-        job_cmd += "--use-wandb "
+        job_cmd += f"--use-wandb --wandb-project={args.wandb_project} "
     if args.checkpoint:
         job_cmd += f"--checkpoint={args.checkpoint} "
     if args.overrides:

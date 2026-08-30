@@ -28,6 +28,8 @@ Usage (specific motion IDs — explicit list, must match --num-envs):
 When --scenes-file is given, matching scenes are automatically loaded alongside the motions.
 """
 
+from __future__ import annotations
+
 
 def create_parser():
     """Create and configure the argument parser."""

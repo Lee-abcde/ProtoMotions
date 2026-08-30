@@ -127,13 +127,13 @@ class FrictionDomainRandomizationConfig:
         default=10,
         metadata={"help": "Number of friction buckets for environments.", "min": 1},
     )
-    static_friction_range: Tuple[float, float] = field(
+    static_friction_range: Optional[Tuple[float, float]] = field(
         default=(0.5, 1.5), metadata={"help": "Range (min, max) for static friction."}
     )
-    dynamic_friction_range: Tuple[float, float] = field(
+    dynamic_friction_range: Optional[Tuple[float, float]] = field(
         default=(0.5, 1.5), metadata={"help": "Range (min, max) for dynamic friction."}
     )
-    restitution_range: Tuple[float, float] = field(
+    restitution_range: Optional[Tuple[float, float]] = field(
         default=(0.0, 0.1), metadata={"help": "Range (min, max) for restitution."}
     )
     body_names: Optional[List[str]] = field(
@@ -477,7 +477,7 @@ class PushDomainRandomizationConfig:
 class ProjectileConfig:
     """Configuration for projectile cube throwing (J-key perturbation)."""
 
-    num_projectiles: int = 5
+    num_projectiles: int = 0
     cube_half_size_range: Tuple[float, float] = (0.05, 0.15)  # per-pool-index size
     density: float = 500.0  # kg/m^3
     speed_range: Tuple[float, float] = (30.0, 40.0)  # m/s (ASE uses 30-40)
@@ -489,6 +489,7 @@ class ProjectileConfig:
     direction_noise_std: float = 0.1  # std of Gaussian noise added to aim direction
     hide_delay: float = 2.0  # seconds before cube disappears
     hide_z: float = -2.0  # z-position when hidden
+    hide_spacing: float = 4.0  # z-spacing between hidden projectile slots
 
     def get_sizes(self) -> list:
         """Return per-pool-index half sizes, linearly interpolated."""
@@ -497,6 +498,10 @@ class ProjectileConfig:
         if n == 1:
             return [lo]
         return [lo + (hi - lo) * i / (n - 1) for i in range(n)]
+
+    def hidden_z_for_index(self, projectile_index: int) -> float:
+        """Return a hidden z-position that avoids projectile-projectile overlap."""
+        return self.hide_z - self.hide_spacing * projectile_index
 
 
 @dataclass
@@ -550,6 +555,13 @@ class SimulatorConfig:
         default=None,
         metadata={"help": "Quaternion format: True for xyzw, False for wxyz."},
     )
+    default_robot_friction: float = field(
+        default=1.0,
+        metadata={
+            "help": "Friction coefficient assigned to character collision shapes.",
+            "min": 0.0,
+        },
+    )
     headless: bool = field(
         default=None, metadata={"help": "Run without GUI visualization."}
     )
@@ -599,7 +611,7 @@ class SimulatorConfig:
         metadata={
             "help": (
                 "Projectile cube perturbation configuration (J-key throws). "
-                "Set num_projectiles=0 to disable projectiles."
+                "Training defaults to no projectiles; inference enables one."
             )
         },
     )

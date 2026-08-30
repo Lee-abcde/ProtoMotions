@@ -105,6 +105,15 @@ class MotionManager:
         # Handle motion exclusion (store excluded IDs to apply during sampling)
         self._setup_motion_exclusion()
 
+        # Zero out weights for clips too short to satisfy sample_time_truncate_s.
+        # Reset sampling truncates the window by (truncate_s + env_dt); a clip
+        # shorter than that has no valid sampling window and would otherwise be
+        # forced to t=0 (see sample_time's clamp), so exclude it from sampling.
+        if self.config.sample_time_truncate_s is not None:
+            min_length = float(self.config.sample_time_truncate_s) + self.env_dt
+            too_short = self.motion_lib.motion_lengths.to(device=device) < min_length
+            self.motion_weights[too_short] = 0.0
+
         # Handle fixed motion IDs for scene-motion correspondence
         self._setup_fixed_motion_ids(fixed_motion_ids_per_env)
         self._setup_motion_sampling_mask(motion_sampling_mask_per_env)
@@ -469,7 +478,7 @@ class MotionManager:
         if truncate_time is not None:
             assert torch.all(torch.tensor(truncate_time) >= 0.0)
             max_time -= truncate_time
-            assert torch.all(max_time >= 0)
+            max_time = max_time.clamp(min=0.0)  # clips shorter than truncate_time start at t=0
 
         motion_time = phase * max_time
 
@@ -545,8 +554,13 @@ class MotionManager:
                 )
 
         if self._start_time_sampler is None:
+            # Keep reset samples away from the end of the clip by the simulator
+            # step plus any configured safety margin.
+            reset_truncate = self.env_dt
+            if self.config.sample_time_truncate_s is not None:
+                reset_truncate += float(self.config.sample_time_truncate_s)
             new_times = self.sample_time(
-                new_motion_ids, truncate_time=self.env_dt
+                new_motion_ids, truncate_time=reset_truncate
             )
         else:
             new_times = self._start_time_sampler(new_motion_ids)

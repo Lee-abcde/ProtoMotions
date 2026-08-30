@@ -548,8 +548,9 @@ class PPO(BaseAgent):
         extra_loss = torch.tensor(0.0, device=self.device)
         log_dict = {}
 
-        if hasattr(self.actor.mu, "calculate_aux_losses"):
-            aux_loss, aux_log_dict = self.actor.mu.calculate_aux_losses(batch_td)
+        actor_mu = getattr(self.actor_module, "mu", self.actor_module)
+        if hasattr(actor_mu, "calculate_aux_losses"):
+            aux_loss, aux_log_dict = actor_mu.calculate_aux_losses(batch_td)
             extra_loss = extra_loss + aux_loss
             log_dict.update(aux_log_dict)
 
@@ -557,19 +558,19 @@ class PPO(BaseAgent):
         if self.config.l2c2.enabled:
             mu_noisy = batch_td["mean_action"]
             is_vq_pae_actor = (
-                self.actor.mu.__class__.__module__
+                actor_mu.__class__.__module__
                 == "protomotions.agents.distill.vq_pae"
-                and self.actor.mu.__class__.__name__ == "DistillVQPAEModel"
+                and actor_mu.__class__.__name__ == "DistillVQPAEModel"
             )
             is_pae_actor = (
-                self.actor.mu.__class__.__module__
+                actor_mu.__class__.__module__
                 == "protomotions.agents.distill.pae"
-                and self.actor.mu.__class__.__name__ == "DistillPAEModel"
+                and actor_mu.__class__.__name__ == "DistillPAEModel"
             )
             is_deepphase_actor = (
-                self.actor.mu.__class__.__module__
+                actor_mu.__class__.__module__
                 == "protomotions.agents.distill.deepphase"
-                and self.actor.mu.__class__.__name__ == "DistillDeepPhaseModel"
+                and actor_mu.__class__.__name__ == "DistillDeepPhaseModel"
             )
             uses_eval_clean_pass = is_vq_pae_actor or is_pae_actor or is_deepphase_actor
 
@@ -596,16 +597,18 @@ class PPO(BaseAgent):
             input_dist = (input_ss / input_n).detach()
 
             if uses_eval_clean_pass:
-                mu_was_training = self.actor.mu.training
-                self.actor.mu.eval()
+                mu_was_training = actor_mu.training
+                actor_mu.eval()
                 try:
-                    clean_td = self.actor.mu(clean_td)
+                    clean_td = actor_mu(clean_td)
                 finally:
                     if mu_was_training:
-                        self.actor.mu.train()
+                        actor_mu.train()
                 mu_clean = clean_td[self.config.model.actor.mu_key]
             else:
-                clean_td = self.actor(clean_td)
+                # Avoid a second DDP/Fabric wrapper pass before backward; it can
+                # mutate broadcast buffers used by the first graph.
+                clean_td = self.actor_module(clean_td)
                 mu_clean = clean_td["mean_action"]
 
             output_dist = (mu_noisy - mu_clean).pow(2).mean()

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import logging
 import math
 from dataclasses import dataclass
@@ -156,7 +158,9 @@ class MimicEvaluator(BaseEvaluator):
         self._env_snapshot = self.env.save_state()
         self._cached_motion_ids = self.motion_manager.motion_ids.clone()
         self._cached_motion_times = self.motion_manager.motion_times.clone()
-        self.env.control_manager.set_evaluation_mode(True)
+        control_manager = getattr(self.env, "control_manager", None)
+        if control_manager is not None:
+            control_manager.set_evaluation_mode(True)
 
         return self._create_metrics(
             num_motions, motion_num_frames, self.config.max_eval_steps
@@ -304,7 +308,27 @@ class MimicEvaluator(BaseEvaluator):
             new_weights[failed_motions] /= failure_discount
         else:
             new_weights[failed_motions] = 1.0
+        new_weights.clamp_(min=self._resolved_min_motion_weight(new_weights.shape[0]))
         self.env.motion_manager.update_sampling_weights(new_weights)
+
+    def _resolved_min_motion_weight(self, num_motions: int) -> float:
+        """Resolve ``min_motion_weight``, which may be the string '1/num_motions'.
+
+        Without this floor the success discount compounds without bound: at the
+        default 0.999 with ``eval_metrics_every=200`` each update multiplies a
+        succeeding motion's weight by 0.82, so after ~80 updates it sits at ~1e-7
+        while any motion that failed once is reset to 1.0. Sampling then collapses
+        onto whichever handful of clips failed most recently, and every
+        distribution-sensitive metric starts tracking that churn rather than the
+        policy. The floor keeps the curriculum a re-weighting rather than a
+        replacement of the training set.
+        """
+        min_weight = self.config.motion_weights_rules.min_motion_weight
+        if isinstance(min_weight, str):
+            if min_weight == "1/num_motions":
+                return 1.0 / max(num_motions, 1)
+            return float(min_weight)
+        return float(min_weight)
 
     def _park_inactive_envs(self, active_env_ids: Tensor) -> None:
         """Move envs not in ``active_env_ids`` far below the terrain.
@@ -501,7 +525,9 @@ class MimicEvaluator(BaseEvaluator):
         self.motion_manager.motion_ids = self._cached_motion_ids
         self.motion_manager.motion_times = self._cached_motion_times
         self.env.restore_state(self._env_snapshot)
-        self.env.control_manager.set_evaluation_mode(False)
+        control_manager = getattr(self.env, "control_manager", None)
+        if control_manager is not None:
+            control_manager.set_evaluation_mode(False)
 
         del self._env_snapshot
         del self._cached_motion_ids
@@ -601,14 +627,41 @@ class MimicEvaluator(BaseEvaluator):
             source_motion_num_frames.shape[0] == num_motions
         ), "motion_num_frames size mismatch"
 
+        # Avoid exporting zero-filled phantom frames for motions that were not
+        # rolled out during this evaluation pass.
+        rolled_out = metrics["dof_pos"].frame_counts.to(device=device) > 0
+        num_skipped = int((~rolled_out).sum().item())
+        if num_skipped > 0:
+            print(
+                f"Predicted MotionLib: masking {num_skipped} / {num_motions} "
+                "un-rolled-out motions (length set to 0)"
+            )
+        source_motion_num_frames = torch.where(
+            rolled_out,
+            source_motion_num_frames,
+            torch.zeros_like(source_motion_num_frames),
+        )
+
         source_dt = float(self.env.dt)
-        output_fps = getattr(self.config, "predicted_motion_lib_output_fps", None)
+        output_fps = (
+            getattr(self.config, "predicted_motion_lib_output_fps", None)
+            if use_export_frames
+            else None
+        )
         target_dt = source_dt if output_fps is None else 1.0 / float(output_fps)
 
         resample_plans = []
         target_motion_num_frames = []
         for m in range(num_motions):
             source_frames = int(source_motion_num_frames[m].item())
+            if source_frames == 0:
+                target_motion_num_frames.append(0)
+                empty_idx = torch.empty(0, dtype=torch.long, device=device)
+                empty_blend = torch.empty(0, dtype=torch.float32, device=device)
+                resample_plans.append(
+                    (source_frames, empty_idx, empty_idx, empty_blend)
+                )
+                continue
             source_duration = max(0.0, float(source_frames - 1) * source_dt)
             target_frames = max(
                 1,
@@ -787,16 +840,16 @@ class MimicEvaluator(BaseEvaluator):
         # baked into ``gts[0, root, z]`` so playback renders the "drop from
         # 5 cm, then settle" trajectory the policy actually experienced.
         # Velocities/rotations are invariant under a constant translation.
-        per_motion_offset = torch.zeros(
-            num_motions, 3, device=device, dtype=gts.dtype
-        )
+        per_motion_offset = torch.zeros(num_motions, 3, device=device, dtype=gts.dtype)
         unique_motion_ids, first_env_indices = (
             self.motion_manager.get_unique_fixed_motions()
         )
         if unique_motion_ids.numel() > 0:
-            env_offsets = self.env.respawn_root_offset[first_env_indices].to(
-                device=device, dtype=gts.dtype
-            ).clone()
+            env_offsets = (
+                self.env.respawn_root_offset[first_env_indices]
+                .to(device=device, dtype=gts.dtype)
+                .clone()
+            )
             # Strip the spawn-only ref_respawn_offset from z; keep terrain
             # correction and scene xy.
             env_offsets[:, 2] -= float(self.env.config.ref_respawn_offset)
@@ -811,10 +864,13 @@ class MimicEvaluator(BaseEvaluator):
         # Pack predicted contacts from metrics
         contacts_list = []
         for m in range(num_motions):
-            source_frames, idx0, idx1, _ = resample_plans[m]
+            source_frames, idx0, idx1, blend = resample_plans[m]
             # Convert float contacts to bool for consistency with MotionLib format
             sequence = get_source_sequence("rigid_body_contacts", m).bool()
-            contacts_list.append(sequence[idx0] | sequence[idx1])
+            contacts0 = sequence[idx0]
+            contacts1 = sequence[idx1]
+            use_next = (blend > 0).view(-1, *([1] * (contacts1.ndim - 1)))
+            contacts_list.append(contacts0 | (contacts1 & use_next))
             processed = m + 1
             if processed == 1 or processed % 500 == 0 or processed == num_motions:
                 print(

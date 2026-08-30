@@ -56,6 +56,8 @@ Example
 >>> #     num_envs=16
 """
 
+from __future__ import annotations
+
 
 def create_parser():
     """Create and configure the argument parser for inference."""
@@ -1707,6 +1709,7 @@ def main():
     if args.motion_file is not None:
         log.info(f"CLI override: motion_file = {args.motion_file}")
         motion_lib_config.motion_file = args.motion_file  # Always present
+        motion_lib_config.motion_file_shard_indices = None
 
     if args.scenes_file is not None:
         # Normalise "None"/"null" strings to actual None (disable scenes)
@@ -1823,6 +1826,8 @@ def main():
         log.info(f"CLI override: command_source = {args.command_source}")
         apply_command_source_overrides(env_config, args.command_source)
 
+    motion_lib_config.validate()
+
     # Create fabric config for inference (simplified)
     # MuJoCo is CPU-only, so force CPU accelerator
     accelerator = "cpu" if args.simulator == "mujoco" else "gpu"
@@ -1839,7 +1844,15 @@ def main():
     # Setup IsaacLab simulation_app if using IsaacLab simulator
     simulator_extra_params = {}
     if args.simulator == "isaaclab":
+        # Old checkpoints may still have w_last=False from IsaacLab 2.x.
+        if hasattr(simulator_config, "w_last") and not simulator_config.w_last:
+            log.info(
+                "Overriding w_last=False -> True for IsaacLab 3 (xyzw quaternions)"
+            )
+            simulator_config.w_last = True
         app_launcher_flags = {"headless": args.headless, "device": str(fabric.device)}
+        if not args.headless:
+            app_launcher_flags["visualizer"] = ["kit"]
         app_launcher = AppLauncher(app_launcher_flags)
         simulator_extra_params["simulation_app"] = app_launcher.app
 
@@ -1960,8 +1973,9 @@ def main():
         )
 
         def get_vq_accumulator_alpha(branch: str, component: str):
+            model_config = getattr(agent_config, "model", None)
             return getattr(
-                agent_config.model,
+                model_config,
                 f"{branch}_{component}_accumulator_alpha",
                 None,
             )

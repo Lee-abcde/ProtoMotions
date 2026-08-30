@@ -463,8 +463,14 @@ class RecordingMixin:
                     if not images:
                         raise RuntimeError("No rendered frames were captured for video.")
 
-                    video_path = self._curr_user_recording_video_path
-                    artifact_base = self._curr_user_recording_artifact_base
+                    if self._recording_output_path_override is None:
+                        # Preserve callers that still set only the legacy
+                        # frame-directory field before finalization.
+                        video_path = f"{image_dir}.mp4"
+                        artifact_base = image_dir
+                    else:
+                        video_path = self._curr_user_recording_video_path
+                        artifact_base = self._curr_user_recording_artifact_base
                     clip = ImageSequenceClip(images, fps=self._recording_fps)
                     clip.write_videofile(
                         video_path,

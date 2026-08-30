@@ -6,6 +6,7 @@ import torch
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 
+from protomotions.assets import resolve_asset_root
 from protomotions.simulator.base_simulator.simulator import Simulator
 from protomotions.simulator.base_simulator.config import (
     MarkerState,
@@ -25,6 +26,13 @@ from protomotions.simulator.newton.config import NewtonSimulatorConfig
 from protomotions.simulator.newton.contact_utils import (
     get_contact_sensor_body_patterns,
     validate_contact_sensor_match,
+)
+from protomotions.simulator.base_simulator.utils import (
+    get_friction_bucket_count,
+    get_friction_table,
+)
+from protomotions.simulator.newton.randomization_utils import (
+    move_friction_tables_to_device,
 )
 import warp as wp
 import newton
@@ -129,6 +137,12 @@ class NewtonSimulator(Simulator):
 
     def _create_simulation(self) -> None:
         """Create the Newton simulation environment."""
+        # ModelBuilder.finalize() and other Newton allocations use Warp's current
+        # device when no explicit device is provided. Each distributed process has
+        # its own rank-local Torch device, so keep Warp on that same device before
+        # creating any simulation state.
+        wp.set_device(str(self.device))
+
         self._create_envs()
         self._zero_passive_forces()
         self._setup_robot()
@@ -174,7 +188,7 @@ class NewtonSimulator(Simulator):
         Follows the Newton G1 example pattern: configure joint properties
         on the builder BEFORE finalize, then use replicate() for multi-env.
         """
-        asset_root = self.robot_config.asset.asset_root
+        asset_root = resolve_asset_root(self.robot_config.asset.asset_root)
         asset_file = self.robot_config.asset.asset_file_name
         asset_path = os.path.join(asset_root, asset_file)
 
@@ -210,7 +224,11 @@ class NewtonSimulator(Simulator):
         for i in range(self._proj_config.num_projectiles):
             s = proj_sizes[i]
             xform = wp.transform(
-                (0.0, 0.0, self._proj_config.hide_z),
+                (
+                    float(i),
+                    float(i),
+                    self._proj_config.hidden_z_for_index(i),
+                ),
                 (0.0, 0.0, 0.0, 1.0),
             )
             body = self.robot.add_body(xform=xform)
@@ -366,7 +384,7 @@ class NewtonSimulator(Simulator):
         self.robot_view = ArticulationView(
             self.model,
             pattern="robot",
-            include_joints=self._newton_dof_names.keys(),
+            include_joints=list(self._newton_dof_names.keys()),
             include_links=self._body_names,
         )
 
@@ -523,12 +541,16 @@ class NewtonSimulator(Simulator):
             current_friction = wp.to_torch(mu_wp)
             current_restitution = wp.to_torch(rest_wp)
 
-            # Get body indices that should be randomized
-            body_indices = self._domain_randomization["friction"]["body_indices"]
-            static_friction = self._domain_randomization["friction"]["static_friction"]
-            restitution = self._domain_randomization["friction"]["restitution"]
-
-            num_buckets = static_friction.shape[0] if static_friction is not None else 0
+            # Get body indices that should be randomized. The bucket tables are
+            # sampled on CPU by the base simulator; move them to the simulation
+            # device so they can be indexed with on-device bucket ids below.
+            friction_dr = move_friction_tables_to_device(
+                self._domain_randomization["friction"], current_friction.device
+            )
+            body_indices = friction_dr["body_indices"]
+            friction_table = get_friction_table(friction_dr)
+            restitution = friction_dr.get("restitution")
+            num_buckets = get_friction_bucket_count(friction_dr)
 
             if num_buckets > 0:
                 # Build body name → local shape indices mapping via ArticulationView
@@ -551,8 +573,8 @@ class NewtonSimulator(Simulator):
                     )
 
                     # Vectorized assignment across all envs at once
-                    if static_friction is not None:
-                        friction_values = static_friction[bucket_ids, idx]
+                    if friction_table is not None:
+                        friction_values = friction_table[bucket_ids, idx]
                         current_friction[:, 0, local_shape_indices] = (
                             friction_values.unsqueeze(1)
                         )
@@ -613,19 +635,15 @@ class NewtonSimulator(Simulator):
             self.solver.notify_model_changed(notify_flags)
 
     def _set_robot_friction_to_terrain(self) -> None:
-        """Set robot shape friction/restitution to terrain values as baseline.
+        """Set robot shape friction to its configured baseline.
 
-        This ensures a consistent friction floor before domain randomization.
-        DR will override with randomized values for specific bodies if configured.
+        Domain randomization overrides the configured friction for selected bodies
+        when enabled. Terrain restitution remains the baseline for compatibility
+        with the existing Newton material setup.
 
         Uses ArticulationView get/set_attribute API (not direct model.assign)
         to ensure Newton's internal solver state stays consistent.
         """
-        if self.terrain is None:
-            return
-
-        terrain_friction = self.terrain.sim_config.static_friction
-        terrain_restitution = self.terrain.sim_config.restitution
 
         # Get robot shape materials via ArticulationView (scoped to robot only)
         mu_wp = self.robot_view.get_attribute("shape_material_mu", self.model)
@@ -635,13 +653,15 @@ class NewtonSimulator(Simulator):
 
         # Modify values via torch (writes through to underlying warp memory)
         mu_torch = wp.to_torch(mu_wp)
-        rest_torch = wp.to_torch(rest_wp)
-        mu_torch[:] = terrain_friction
-        rest_torch[:] = terrain_restitution
+        mu_torch[:] = self.config.default_robot_friction
+        if self.terrain is not None and self.terrain.sim_config is not None:
+            rest_torch = wp.to_torch(rest_wp)
+            rest_torch[:] = self.terrain.sim_config.restitution
 
         # Write back through ArticulationView
         self.robot_view.set_attribute("shape_material_mu", self.model, mu_wp)
-        self.robot_view.set_attribute("shape_material_restitution", self.model, rest_wp)
+        if self.terrain is not None and self.terrain.sim_config is not None:
+            self.robot_view.set_attribute("shape_material_restitution", self.model, rest_wp)
         self.solver.notify_model_changed(SolverNotifyFlags.SHAPE_PROPERTIES)
 
     def _get_sim_body_ordering(self) -> SimBodyOrdering:
@@ -919,6 +939,28 @@ class NewtonSimulator(Simulator):
 
         return contact_binary
 
+    def park_envs(
+        self,
+        env_ids: torch.Tensor,
+        hide_z: float = -50.0,
+    ) -> None:
+        """No-op on Newton: evaluation env-parking is unnecessary and harmful.
+
+        The base implementation teleports inactive envs to ``hide_z`` to keep
+        their AABBs out of PhysX's broadphase pair budget. Newton replicates
+        environments as separate worlds with fixed per-world contact buffers,
+        so parking buys nothing here.
+
+        Worse, a parked robot free-falls with PD control still driving its
+        joints toward policy targets: energy is pumped in with no contact to
+        dissipate it, joint velocities diverge, and the resulting non-finite
+        values persist in solver warm-start memory — permanently poisoning the
+        parked envs even after their kinematic state is restored. Leaving
+        inactive envs simulating in place (exactly as they do during training)
+        is both safe and cheap.
+        """
+        return None
+
     def _get_simulator_bodies_state(
         self, env_ids: Optional[torch.Tensor] = None
     ) -> RobotState:
@@ -1158,6 +1200,15 @@ class NewtonSimulator(Simulator):
 
         Newton uses xyzw quaternions natively — no conversion needed.
         """
+        # Keep hidden projectiles in distinct world-space slots. A throw has
+        # z > hide_z and therefore keeps its requested position.
+        positions = positions.clone()
+        hidden_mask = positions[:, 2] <= self._proj_config.hide_z
+        if hidden_mask.any():
+            hidden_env_offsets = env_ids[hidden_mask].to(positions.dtype)
+            positions[hidden_mask, 0] = hidden_env_offsets
+            positions[hidden_mask, 1] = hidden_env_offsets
+
         joint_q = wp.to_torch(self.state_0.joint_q)
         joint_qd = wp.to_torch(self.state_0.joint_qd)
 

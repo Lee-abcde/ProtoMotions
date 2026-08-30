@@ -6,6 +6,7 @@ import torch
 from typing import Dict, Optional, Tuple
 from easydict import EasyDict
 
+from protomotions.assets import resolve_asset_root
 from protomotions.utils import rotations
 from protomotions.simulator.base_simulator.simulator import Simulator
 from protomotions.simulator.base_simulator.config import (
@@ -117,7 +118,7 @@ class GenesisSimulator(Simulator):
     # ===== Group 2: Environment Setup & Configuration =====
     def _create_envs(self) -> None:
         """Creates the simulation environments and loads robot assets."""
-        asset_root = self.robot_config.asset.asset_root
+        asset_root = resolve_asset_root(self.robot_config.asset.asset_root)
         asset_file = self.robot_config.asset.asset_file_name
 
         asset_path = os.path.join(asset_root, asset_file)
@@ -158,6 +159,7 @@ class GenesisSimulator(Simulator):
         )
 
         self._scene.build(n_envs=self.num_envs)
+        self._robot.set_friction(self.config.default_robot_friction)
 
     def _get_sim_body_ordering(self) -> SimBodyOrdering:
         """Returns the ordering of bodies and DOFs in the simulation."""
