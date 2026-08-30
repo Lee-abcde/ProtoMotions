@@ -303,14 +303,17 @@ class BaseAgent:
             self.just_loaded_checkpoint_should_evaluate = True
 
             if load_env:
-                self._load_environment_checkpoint()
+                self._load_environment_checkpoint(checkpoint.parent)
 
             self.fabric.call("on_load_checkpoint_end")
 
-    def _load_environment_checkpoint(self) -> bool:
-        """Load the saved environment state for the selected motion shard."""
+    def _load_environment_checkpoint(
+        self, checkpoint_dir: Optional[Path] = None
+    ) -> bool:
+        """Load environment state from a checkpoint directory or the current run."""
         task_id = self.env.get_task_id()
-        env_checkpoint = self.root_dir / f"env_{task_id}.ckpt"
+        checkpoint_dir = self.root_dir if checkpoint_dir is None else checkpoint_dir
+        env_checkpoint = checkpoint_dir / f"env_{task_id}.ckpt"
         if not env_checkpoint.exists():
             return False
 

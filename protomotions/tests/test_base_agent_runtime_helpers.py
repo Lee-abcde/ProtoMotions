@@ -628,7 +628,9 @@ def test_base_agent_load_uses_explicit_training_state_and_loads_matching_env_sta
     agent.fabric = fabric
     agent.device = torch.device("cpu")
     agent.env = env
-    agent.root_dir = tmp_path
+    # Warm starts write into a new run directory, but must load the env sidecar
+    # stored next to the source model checkpoint.
+    agent.root_dir = tmp_path / "new-run"
     agent.load_parameters = lambda state, load_training_state: loaded.setdefault(
         "agent",
         (state, load_training_state),
