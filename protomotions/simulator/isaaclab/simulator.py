@@ -61,6 +61,27 @@ from protomotions.simulator.base_simulator.simulator_state import (
 )
 
 
+def _build_sequential_interactive_scene(scene_cfg):
+    """Build an IsaacLab scene while preserving per-environment asset order."""
+    from isaaclab import cloner
+
+    original_clone_cfg = cloner.CloneCfg
+
+    def sequential_clone_cfg(*args, **kwargs):
+        kwargs.setdefault("clone_strategy", cloner.sequential)
+        return original_clone_cfg(*args, **kwargs)
+
+    # IsaacLab 12 defaults heterogeneous cloning to a random strategy and
+    # ignores MultiAssetSpawnerCfg.random_choice. SceneLib requires asset i to
+    # stay paired with motion i, so override that default only while the scene
+    # constructor builds its clone plan.
+    cloner.CloneCfg = sequential_clone_cfg
+    try:
+        return InteractiveScene(scene_cfg)
+    finally:
+        cloner.CloneCfg = original_clone_cfg
+
+
 class IsaacLabSimulator(Simulator):
     config: IsaacLabSimulatorConfig
     _RIGID_BODY_LABEL_COLORS = {
@@ -138,7 +159,7 @@ class IsaacLabSimulator(Simulator):
 
         scene_cfg = self._get_scene_cfg()
 
-        self._scene = InteractiveScene(scene_cfg)
+        self._scene = _build_sequential_interactive_scene(scene_cfg)
         if not self.headless:
             self._setup_keyboard()
         print("[INFO]: Setup complete...")
@@ -1180,15 +1201,24 @@ class IsaacLabSimulator(Simulator):
                     )
 
             color_attributes = []
+            link_paths_by_body = dict(
+                zip(
+                    self._robot.body_names,
+                    self._robot.root_view.link_paths[env_id],
+                )
+            )
             for body_id, body_name in enumerate(body_names):
-                visuals_path = f"{robot_prim_path}/bodies/{body_name}/visuals"
+                body_prim_path = link_paths_by_body[body_name]
                 geom_paths = [
                     prim.GetPath().pathString
-                    for prim in Usd.PrimRange(stage.GetPrimAtPath(visuals_path))
+                    for prim in Usd.PrimRange(stage.GetPrimAtPath(body_prim_path))
                     if prim.IsA(UsdGeom.Gprim)
                 ]
                 if not geom_paths:
-                    raise RuntimeError(f"No geometry found below {visuals_path}")
+                    raise RuntimeError(
+                        f"No geometry found below body {body_name!r} at "
+                        f"{body_prim_path}"
+                    )
 
                 color = self._RIGID_BODY_LABEL_COLORS[
                     int(labels[env_id, body_id])

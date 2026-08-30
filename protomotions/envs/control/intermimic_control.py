@@ -773,12 +773,19 @@ class InterMimicControl(MimicControl):
     def populate_context(self, ctx: EnvContext) -> None:
         super().populate_context(ctx)
 
-        num_envs = self.env.num_envs
-        num_objects = self.env.scene_lib.num_objects_per_scene
         device = self.env.device
-        motion_ids = self.env.motion_manager.motion_ids
-        motion_times = self.env.motion_manager.motion_times
-        env_ids = torch.arange(num_envs, device=device, dtype=torch.long)
+        env_ids = getattr(ctx, "env_ids", None)
+        if env_ids is None:
+            env_ids = torch.arange(
+                self.env.num_envs, device=device, dtype=torch.long
+            )
+        else:
+            env_ids = env_ids.to(device=device, dtype=torch.long)
+
+        num_envs = env_ids.shape[0]
+        num_objects = self.env.scene_lib.num_objects_per_scene
+        motion_ids = self.env.motion_manager.motion_ids[env_ids]
+        motion_times = self.env.motion_manager.motion_times[env_ids]
 
         raw_ref_state = self.env.motion_lib.get_motion_state(motion_ids, motion_times)
         current_offset = (
@@ -860,10 +867,11 @@ class InterMimicControl(MimicControl):
             ),
             future_object_contact_labels=future_object_contact_labels,
             future_body_contact_labels=future_body_contact_labels,
-            previous_object_vel=self.previous_object_vel,
-            previous_object_ang_vel=self.previous_object_ang_vel,
+            previous_object_vel=self.previous_object_vel[env_ids],
+            previous_object_ang_vel=self.previous_object_ang_vel[env_ids],
             contact_loss_exceeded=torch.any(
-                self.contact_loss_counter > self.config.contact_loss_frames,
+                self.contact_loss_counter[env_ids]
+                > self.config.contact_loss_frames,
                 dim=-1,
             ),
         )
