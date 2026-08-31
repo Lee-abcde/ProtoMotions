@@ -330,7 +330,7 @@ class MimicEvaluator(BaseEvaluator):
             return float(min_weight)
         return float(min_weight)
 
-    def _park_inactive_envs(self, active_env_ids: Tensor) -> None:
+    def _park_inactive_envs(self, active_env_ids: Tensor) -> Tensor:
         """Move envs not in ``active_env_ids`` far below the terrain.
 
         With scene-paired motions, ``_build_eval_batches`` returns a single
@@ -343,15 +343,20 @@ class MimicEvaluator(BaseEvaluator):
 
         Parking those envs at z << 0 removes their AABBs from the broadphase
         active region without changing the policy's view of the rollout.
+
+        Returns:
+            Environment IDs that were parked. Evaluation uses this list to
+            keep policy actions from driving parked robots during the rollout.
         """
         if active_env_ids is None or active_env_ids.numel() >= self.num_envs:
-            return
+            return torch.empty(0, dtype=torch.long, device=self.device)
         all_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         all_mask[active_env_ids] = False
         inactive_env_ids = torch.nonzero(all_mask, as_tuple=False).flatten()
         if inactive_env_ids.numel() == 0:
-            return
+            return inactive_env_ids
         self.env.simulator.park_envs(inactive_env_ids)
+        return inactive_env_ids
 
     def evaluate_episode(self, env_ids: torch.Tensor, max_steps: int) -> None:
         """Run a single episode batch, optionally with EMA action smoothing.
@@ -367,7 +372,7 @@ class MimicEvaluator(BaseEvaluator):
         # Park envs that aren't part of this batch so they don't generate
         # PhysX broadphase pairs / contacts during the eval. Pre-eval state is
         # restored later in cleanup_after_evaluation via env.restore_state().
-        self._park_inactive_envs(env_ids)
+        inactive_env_ids = self._park_inactive_envs(env_ids)
 
         obs, _ = self.env.reset(env_ids, **self._get_reset_kwargs())
         self.agent.pre_collect_step(0)
@@ -379,6 +384,15 @@ class MimicEvaluator(BaseEvaluator):
         for step_idx in range(max_steps):
             model_outs = self.agent.model(obs_td)
             actions = self._select_evaluation_actions(model_outs)
+
+            # Parked environments remain part of the vectorized PhysX scene
+            # and advance on every env.step(). Do not let arbitrary policy
+            # outputs actuate robots that have no active evaluation motion.
+            # A zero normalized action maps to the stable default PD pose for
+            # the standard mimic action configurations.
+            if inactive_env_ids.numel() > 0:
+                actions = actions.clone()
+                actions[inactive_env_ids] = 0.0
 
             # Apply EMA smoothing (deployment simulation)
             if ema_alpha is not None:

@@ -791,6 +791,7 @@ class Simulator(RecordingMixin, ABC):
         self,
         env_ids: torch.Tensor,
         hide_z: float = -50.0,
+        object_gap: float = 50.0,
     ) -> None:
         """Move robot and scene objects for ``env_ids`` far below the terrain.
 
@@ -798,17 +799,21 @@ class Simulator(RecordingMixin, ABC):
         evaluated, eliminating their contribution to the PhysX broadphase pair
         budget. Parked bodies sit well below any terrain/object AABB so no
         broadphase pairs are generated, no narrow-phase contacts are computed,
-        and no found/lost pair churn occurs. Velocities are zeroed so the
-        parked bodies stay put.
+        and no found/lost pair churn occurs. Scene objects are separated far
+        below the robot instead of being placed only one metre away: large
+        furniture can span more than one metre, and teleporting overlapping
+        shapes can make PhysX depenetration numerically unstable. Velocities
+        are zeroed so the parked bodies stay put.
 
         Pre-eval state is restored later via ``BaseEnv.restore_state(snapshot)``,
         which calls ``reset_envs`` over all envs with the saved snapshot.
 
         Args:
             env_ids: Environment IDs to park. No-op if empty/None.
-            hide_z: World z-coordinate to teleport robot roots to. Object roots
-                are placed slightly below at ``hide_z - 1.0`` so their AABBs
-                cannot overlap with the parked robot's AABB.
+            hide_z: World z-coordinate to teleport robot roots to.
+            object_gap: Minimum vertical separation between the robot root and
+                the first scene-object root. Additional objects are separated
+                by the same distance from one another.
         """
         from protomotions.simulator.base_simulator.simulator_state import (
             StateConversion,
@@ -851,9 +856,15 @@ class Simulator(RecordingMixin, ABC):
         if self.scene_lib.num_objects_per_scene > 0:
             current_obj = self.get_object_root_state(env_ids)
             obj_root_pos = current_obj.root_pos.clone()
-            obj_root_pos[..., 2] = hide_z - 1.0
-            obj_root_rot = current_obj.root_rot.clone()
             m = self.scene_lib.num_objects_per_scene
+            object_z = hide_z - object_gap * torch.arange(
+                1,
+                m + 1,
+                device=device,
+                dtype=obj_root_pos.dtype,
+            )
+            obj_root_pos[..., 2] = object_z.unsqueeze(0)
+            obj_root_rot = current_obj.root_rot.clone()
             zero_obj_vel = torch.zeros(
                 (n, m, 3), device=device, dtype=torch.float32
             )
