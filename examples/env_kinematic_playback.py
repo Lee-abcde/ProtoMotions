@@ -25,6 +25,14 @@ Usage (specific motion IDs — sequential range starting at 5):
 Usage (specific motion IDs — explicit list, must match --num-envs):
     python examples/env_kinematic_playback.py ... --motion-ids 5,10,15,20 --num-envs 4
 
+Usage (object-aware switching — every motion in the library):
+    python examples/env_kinematic_playback.py ... \
+        --scenes-file scenes.pt --num-envs 6 --motion-ids all
+
+In object-aware switching mode, one environment is created for each object asset
+type. Press F9 and enter any allowed motion ID; playback switches the compatible
+environment to that motion and moves the camera to it.
+
 When --scenes-file is given, matching scenes are automatically loaded alongside the motions.
 """
 
@@ -100,10 +108,11 @@ def create_parser():
         type=str,
         default=None,
         help=(
-            "Which motions to visualize. Three formats: "
-            "(1) 'random' — pick num_envs scenes/motions at random from the file; "
-            "(2) a single start index, e.g. '5', expanding to [5, 5+num_envs); "
-            "(3) an explicit comma-separated list, e.g. '5,10,15,20', whose length "
+            "Which motions to visualize. Four formats: "
+            "(1) 'all' — load every motion and enable object-aware F9 switching; "
+            "(2) 'random' — pick num_envs scenes/motions at random from the file; "
+            "(3) a single start index, e.g. '5', expanding to [5, 5+num_envs); "
+            "(4) an explicit comma-separated list, e.g. '5,10,15,20', whose length "
             "must equal --num-envs. "
             "When --scenes-file is provided the matching scenes are loaded automatically. "
             "Omit this flag to use the default (first num_envs scenes)."
@@ -179,17 +188,22 @@ import torch  # noqa: E402
 log = logging.getLogger(__name__)
 
 
-def _prompt_for_loaded_motion_id(
-    current_id: int, loaded_motion_ids: list[int]
+def _prompt_for_motion_id(
+    current_id: int, selectable_motion_ids: list[int] | range
 ) -> int | None:
-    """Select one of the motion IDs already assigned to an environment."""
-    valid_ids = set(loaded_motion_ids)
-    valid_text = ",".join(str(motion_id) for motion_id in loaded_motion_ids)
+    """Select one of the motion IDs allowed by the playback command."""
+    if isinstance(selectable_motion_ids, range) and selectable_motion_ids.step == 1:
+        valid_text = f"{selectable_motion_ids.start}..{selectable_motion_ids.stop - 1}"
+    elif len(selectable_motion_ids) > 32:
+        preview = ",".join(str(motion_id) for motion_id in selectable_motion_ids[:16])
+        valid_text = f"{preview},... ({len(selectable_motion_ids)} total)"
+    else:
+        valid_text = ",".join(str(motion_id) for motion_id in selectable_motion_ids)
     while True:
         try:
             raw = input(
                 "\nF9 motion selector "
-                f"(current={current_id}, loaded=[{valid_text}]; "
+                f"(current={current_id}, selectable=[{valid_text}]; "
                 "press Enter to cancel): "
             ).strip()
         except (EOFError, KeyboardInterrupt):
@@ -206,12 +220,9 @@ def _prompt_for_loaded_motion_id(
             print(f"Invalid motion ID {raw!r}: enter an integer.")
             continue
 
-        if motion_id in valid_ids:
+        if motion_id in selectable_motion_ids:
             return motion_id
-        print(
-            f"Motion ID {motion_id} is not loaded. Choose one of: "
-            f"{loaded_motion_ids}."
-        )
+        print(f"Motion ID {motion_id} is not selectable. Valid IDs: {valid_text}.")
 
 
 def main():
@@ -237,9 +248,17 @@ def main():
     # Parse --motion-ids: 'random', single int (range), or comma-separated list.
     specific_motion_ids: list = []
     random_motions: bool = False
+    all_motions: bool = False
     if args.motion_ids is not None:
         raw = args.motion_ids.strip()
-        if raw.lower() == "random":
+        if raw.lower() == "all":
+            if args.scenes_file is None:
+                raise ValueError(
+                    "--motion-ids all requires --scenes-file for object-aware "
+                    "switching."
+                )
+            all_motions = True
+        elif raw.lower() == "random":
             random_motions = True
         elif "," in raw:
             specific_motion_ids = [int(x.strip()) for x in raw.split(",")]
@@ -261,7 +280,10 @@ def main():
     print(f"Scenes file: {args.scenes_file}")
     print(f"Device: {device}")
     print(f"Headless: {args.headless}")
-    if random_motions:
+    if all_motions:
+        print("Motion IDs: all")
+        print("Motion selection mode: object-aware F9 switching")
+    elif random_motions:
         print("Motion IDs: random")
     elif specific_motion_ids:
         preview = specific_motion_ids[:8]
@@ -389,9 +411,16 @@ def main():
     # BaseEnv.create_motion_manager() reads those IDs and pins each env
     # to its paired motion automatically.
     # For no-scenes: motion_manager.subset_method drives selection directly.
-    from protomotions.components.scene_lib import SubsetMethod
+    from protomotions.components.scene_lib import ReplicationMethod, SubsetMethod
 
-    if random_motions:
+    if all_motions:
+        scene_lib_config.replicate_method = ReplicationMethod.OBJECT_BALANCED
+        env_config.motion_manager.sample_motions_by_object_type = True
+        print(
+            "Scene replication set to OBJECT_BALANCED; environments will keep "
+            "one object asset type and switch compatible motion/object trajectories."
+        )
+    elif random_motions:
         scene_lib_config.subset_method = SubsetMethod.RANDOM
         print("Scene subset_method set to RANDOM")
     elif specific_motion_ids:
@@ -467,6 +496,22 @@ def main():
     if env.motion_manager is not None:
         print(f"  - Motion manager type: {type(env.motion_manager).__name__}")
 
+    if all_motions:
+        selectable_motion_ids = range(env.motion_lib.num_motions())
+        motion_manager = env.motion_manager
+        compatibility = motion_manager.motion_sampling_mask_per_env
+
+        # Start each object slot on its first compatible motion.
+        initial_motion_ids = motion_manager.motion_ids.clone()
+        for env_id in range(env.num_envs):
+            initial_motion_ids[env_id] = torch.where(compatibility[env_id])[0][0]
+
+        # Pin the current selection so a completed clip loops instead of
+        # changing unexpectedly. F9 updates the pin for the selected slot.
+        motion_manager._fixed_motion_ids_per_env = initial_motion_ids.clone()
+        motion_manager._env_has_fixed_motion[:] = True
+        print(f"Initial object-aware motion assignment: {initial_motion_ids.tolist()}")
+
     # Reset the environment
     print("\n=== Resetting Environment ===")
     env.reset()
@@ -484,7 +529,11 @@ def main():
         motion_selector_keys.register(
             "F9",
             "select_motion",
-            "Focus the camera on an already loaded motion ID",
+            (
+                "Switch to an available motion and focus its compatible environment"
+                if all_motions
+                else "Focus the camera on an already loaded motion ID"
+            ),
         )
 
     # # Print per-env mapping: which motion and scene each env got
@@ -524,7 +573,12 @@ def main():
     print("  L - start/stop recording")
     print("  ; - cancel recording")
     print("  O - toggle camera target")
-    print("  F9 - focus camera on an already loaded motion ID")
+    if all_motions:
+        print(
+            "  F9 - switch to an available motion ID and follow its object environment"
+        )
+    else:
+        print("  F9 - focus camera on an already loaded motion ID")
     print("  Q - close simulator")
 
     actions = torch.zeros(env.num_envs, robot_config.number_of_actions, device=device)
@@ -543,17 +597,49 @@ def main():
                 loaded_motion_ids = env.motion_manager.motion_ids.tolist()
                 current_env_id = int(env.simulator._camera_target["env"])
                 current_motion_id = loaded_motion_ids[current_env_id]
-                selected = _prompt_for_loaded_motion_id(
-                    current_motion_id, loaded_motion_ids
+                prompt_motion_ids = (
+                    selectable_motion_ids if all_motions else loaded_motion_ids
                 )
+                selected = _prompt_for_motion_id(current_motion_id, prompt_motion_ids)
                 if selected is not None:
-                    target_env_id = loaded_motion_ids.index(selected)
+                    if all_motions:
+                        compatible_env_ids = torch.where(
+                            env.motion_manager.motion_sampling_mask_per_env[:, selected]
+                        )[0]
+                        if compatible_env_ids.numel() == 0:
+                            print(
+                                f"No loaded object environment is compatible "
+                                f"with motion {selected}."
+                            )
+                            continue
+                        target_env_id = int(compatible_env_ids[0].item())
+                        target_env_ids = torch.tensor(
+                            [target_env_id], dtype=torch.long, device=device
+                        )
+                        target_motion_ids = torch.tensor(
+                            [selected], dtype=torch.long, device=device
+                        )
+                        env.motion_manager._fixed_motion_ids_per_env[target_env_id] = (
+                            selected
+                        )
+                        env.motion_manager.sample_motions(
+                            target_env_ids, target_motion_ids
+                        )
+                        env.motion_manager.motion_times[target_env_id] = 0.0
+                    else:
+                        target_env_id = loaded_motion_ids.index(selected)
                     env.simulator._camera_target["env"] = target_env_id
                     env.simulator._camera_target["element"] = 0
                     env.simulator.user_interface.active_env_id = target_env_id
-                    print(
-                        f"Camera now follows env {target_env_id}, motion {selected}."
-                    )
+                    if all_motions:
+                        print(
+                            f"Env {target_env_id} now plays motion {selected}; "
+                            "camera switched to it."
+                        )
+                    else:
+                        print(
+                            f"Camera now follows env {target_env_id}, motion {selected}."
+                        )
 
             # Print information every 100 steps
             if step_count % 100 == 0 and env.motion_manager is not None:
