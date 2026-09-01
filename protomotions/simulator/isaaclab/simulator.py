@@ -8,7 +8,7 @@ import warp as wp
 
 import isaaclab.sim as sim_utils
 from isaaclab.sim.utils import bind_visual_material
-from pxr import Gf, Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
 log = logging.getLogger(__name__)
 from isaaclab.scene import InteractiveScene
@@ -80,6 +80,32 @@ def _build_sequential_interactive_scene(scene_cfg):
         return InteractiveScene(scene_cfg)
     finally:
         cloner.CloneCfg = original_clone_cfg
+
+
+def _disable_embedded_robot_ground_colliders(stage: Usd.Stage) -> tuple[str, ...]:
+    """Disable top-level ground planes imported with a robot MJCF.
+
+    ProtoMotions owns the terrain collider. Isaac Sim 6's MJCF converter also
+    imports top-level ``worldbody`` plane geoms into each robot asset, which
+    creates a second ground plane per environment. The duplicate planes can
+    produce large depenetration impulses on scene objects.
+    """
+    disabled_paths = []
+    for prim in stage.Traverse():
+        if prim.GetTypeName() != "Plane" or not prim.HasAPI(
+            UsdPhysics.CollisionAPI
+        ):
+            continue
+        geometry_scope = prim.GetParent()
+        robot_root = geometry_scope.GetParent()
+        if (
+            geometry_scope.GetName() != "Geometry"
+            or robot_root.GetName() != "Robot"
+        ):
+            continue
+        UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Set(False)
+        disabled_paths.append(str(prim.GetPath()))
+    return tuple(disabled_paths)
 
 
 class IsaacLabSimulator(Simulator):
@@ -200,6 +226,14 @@ class IsaacLabSimulator(Simulator):
 
         if self._visualization_markers:
             self._build_markers(self._visualization_markers)
+        disabled_ground_colliders = _disable_embedded_robot_ground_colliders(
+            self._scene.stage
+        )
+        if disabled_ground_colliders:
+            log.info(
+                "Disabled %d ground plane collider(s) embedded in robot assets",
+                len(disabled_ground_colliders),
+            )
         self._sim.reset()
 
     def _get_scene_cfg(self) -> SceneCfg:
@@ -280,6 +314,9 @@ class IsaacLabSimulator(Simulator):
                 # Common properties based on object options
                 rigid_props = sim_utils.RigidBodyPropertiesCfg(
                     kinematic_enabled=object_options.fix_base_link,
+                    max_depenetration_velocity=(
+                        self.config.sim.physx.max_depenetration_velocity
+                    ),
                 )
                 collision_props = sim_utils.CollisionPropertiesCfg(
                     contact_offset=(
