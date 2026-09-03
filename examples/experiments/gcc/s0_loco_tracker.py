@@ -8,19 +8,31 @@ Mimic Environment Configuration
 Full-body motion tracking environment with pose and velocity tracking.
 Uses early termination on tracking error and bootstrapping at episode end.
 """
+import argparse
+
+import torch
+
 from protomotions.robot_configs.base import RobotConfig
 from protomotions.simulator.base_simulator.config import SimulatorConfig
-from protomotions.components.terrains.config import TerrainConfig
+from protomotions.components.terrains.config import TerrainConfig, TerrainSimConfig
 from protomotions.envs.base_env.config import EnvConfig
 from protomotions.agents.ppo.config import PPOAgentConfig
 from protomotions.components.scene_lib import SceneLibConfig
 from protomotions.components.motion_lib import MotionLibConfig
-import argparse
+
+
+FOOT_CONTACT_BODY_NAMES = ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
 
 
 def terrain_config(args: argparse.Namespace):
-    """Build terrain configuration."""
-    return TerrainConfig()
+    """Build the same ground-contact profile used by InterMimic."""
+    return TerrainConfig(
+        sim_config=TerrainSimConfig(
+            static_friction=0.9,
+            dynamic_friction=0.9,
+            restitution=0.1,
+        )
+    )
 
 
 def scene_lib_config(args: argparse.Namespace):
@@ -57,7 +69,14 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     }
 
     observation_components = {
-        "max_coords_obs": max_coords_obs_factory(),
+        # Keep this shared proprioceptive input identical to InterMimic.  The
+        # locomotion teacher has no object observations; those remain an
+        # InterMimic-only conditioning branch.
+        "max_coords_obs": max_coords_obs_factory(
+            local_obs=True,
+            root_height_obs=True,
+            observe_contacts=True,
+        ),
         "previous_actions": previous_actions_factory(history_steps=1),
         "mimic_target_poses": mimic_target_poses_max_coords_factory(with_velocities=True),
     }
@@ -66,6 +85,11 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         "tracking_error": tracking_error_term_factory(threshold=0.5),
     }
 
+    body_names = robot_cfg.kinematic_info.body_names
+    foot_contact_body_ids = torch.tensor(
+        [body_names.index(name) for name in FOOT_CONTACT_BODY_NAMES],
+        dtype=torch.long,
+    )
     reward_components = {
         "action_smoothness": action_smoothness_factory(weight=-0.02),
         **mimic_tracking_rewards_factory(
@@ -82,14 +106,17 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         ),
         "pow_rew": pow_rew_factory(weight=-1e-5, min_value=-0.5),
         "contact_match_rew": contact_match_rew_factory(
-            weight=-0.1, zero_during_grace_period=True
+            weight=-0.1,
+            zero_during_grace_period=True,
+            contact_body_ids=foot_contact_body_ids,
         ),
     }
 
     return EnvConfig(
+        ref_respawn_offset=0.0,
         ref_contact_smooth_window=7,
         max_episode_length=1000,
-        num_state_history_steps=2,
+        num_state_history_steps=1,
         control_components=control_components,
         observation_components=observation_components,
         termination_components=termination_components,
@@ -189,10 +216,29 @@ def agent_config(
 def configure_robot_and_simulator(
     robot_cfg: RobotConfig, simulator_cfg: SimulatorConfig, args: argparse.Namespace
 ):
-    """Configure robot to add contact sensors for foot contact tracking."""
-    robot_cfg.update_fields(
-        contact_bodies=["all_left_foot_bodies", "all_right_foot_bodies"]
-    )
+    """Apply the shared Stage-0/InterMimic robot and physics contract."""
+    from protomotions.robot_configs.smplx import SMPLXRobotConfig
+
+    if not isinstance(robot_cfg, SMPLXRobotConfig):
+        raise ValueError("Stage-0 locomotion tracking requires --robot-name smplx")
+    if simulator_cfg._target_ != (
+        "protomotions.simulator.isaaclab.simulator.IsaacLabSimulator"
+    ):
+        raise ValueError(
+            "Stage-0 locomotion tracking requires --simulator isaaclab to "
+            "match the InterMimic physics and contact contract"
+        )
+
+    robot_cfg.update_fields(contact_bodies="all")
+    simulator_cfg.sim.fps = 240
+    simulator_cfg.sim.decimation = 8
+    simulator_cfg.binary_contact_threshold = 0.1
+    simulator_cfg.binary_contact_mode = "componentwise"
+    physx_cfg = getattr(getattr(simulator_cfg, "sim", None), "physx", None)
+    if physx_cfg is not None:
+        physx_cfg.num_position_iterations = 8
+        physx_cfg.num_velocity_iterations = 1
+        physx_cfg.max_depenetration_velocity = 10.0
 
 
 def apply_inference_overrides(

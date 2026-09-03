@@ -1121,29 +1121,38 @@ def pow_rew_factory(
 def contact_match_rew_factory(
     weight: float = -0.1,
     zero_during_grace_period: bool = True,
+    contact_body_ids: Optional[Tensor] = None,
 ) -> MdpComponent:
     """Factory for contact matching reward.
 
     Args:
         weight: Reward weight (typically negative).
         zero_during_grace_period: If True, zero reward during grace period.
+        contact_body_ids: Optional fixed subset of body indices to compare. If
+            omitted, use ``EnvContext.contact_body_ids`` at runtime.
 
     Returns:
         MdpComponent configured for contact matching.
     """
     from protomotions.envs.rewards import compute_contact_match_rew
 
+    dynamic_vars = {
+        "sim_contacts": EnvContext.current.rigid_body_contacts,
+        "ref_contacts": EnvContext.mimic.ref_state.rigid_body_contacts,
+    }
+    static_params = {
+        "weight": weight,
+        "zero_during_grace_period": zero_during_grace_period,
+    }
+    if contact_body_ids is None:
+        dynamic_vars["contact_body_ids"] = EnvContext.contact_body_ids
+    else:
+        static_params["contact_body_ids"] = contact_body_ids
+
     return MdpComponent(
         compute_func=compute_contact_match_rew,
-        dynamic_vars={
-            "sim_contacts": EnvContext.current.rigid_body_contacts,
-            "ref_contacts": EnvContext.mimic.ref_state.rigid_body_contacts,
-            "contact_body_ids": EnvContext.contact_body_ids,
-        },
-        static_params={
-            "weight": weight,
-            "zero_during_grace_period": zero_during_grace_period,
-        },
+        dynamic_vars=dynamic_vars,
+        static_params=static_params,
     )
 
 
