@@ -82,7 +82,7 @@ def _build_sequential_interactive_scene(scene_cfg):
         cloner.CloneCfg = original_clone_cfg
 
 
-def _disable_embedded_robot_ground_colliders(stage: Usd.Stage) -> tuple[str, ...]:
+def _disable_embedded_robot_ground_colliders(stage: Usd.Stage) -> Tuple[str, ...]:
     """Disable top-level ground planes imported with a robot MJCF.
 
     ProtoMotions owns the terrain collider. Isaac Sim 6's MJCF converter also
