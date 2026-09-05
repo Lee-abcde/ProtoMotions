@@ -21,6 +21,7 @@ newton_source/*
 data/amass/*.pkl
 data/amassx
 data/omomo_correct_v2
+data/omomo_correct_v2_contact_retarget_arms_v3
 .claude/*
 !.claude/commands/
 .cursor/
