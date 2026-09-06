@@ -395,12 +395,6 @@ def agent_config(
         "intermimic_target_obs",
         "previous_actions",
     ]
-    def teacher_layers():
-        return [
-            MLPLayerConfig(units=1024, activation="relu"),
-            MLPLayerConfig(units=1024, activation="relu"),
-            MLPLayerConfig(units=512, activation="relu"),
-        ]
 
     actor_config = PPOActorConfig(
         num_out=robot_config.kinematic_info.num_dofs,
@@ -414,7 +408,10 @@ def agent_config(
             norm_clamp_value=5,
             out_keys=["actor_trunk_out"],
             num_out=robot_config.number_of_actions,
-            layers=teacher_layers(),
+            layers=[
+                MLPLayerConfig(units=1024, activation="relu")
+                for _ in range(6)
+            ],
         ),
     )
     critic_config = MLPWithConcatConfig(
@@ -423,7 +420,10 @@ def agent_config(
         normalize_obs=True,
         norm_clamp_value=5,
         num_out=1,
-        layers=teacher_layers(),
+        layers=[
+            MLPLayerConfig(units=1024, activation="relu")
+            for _ in range(4)
+        ],
     )
 
     return PPOAgentConfig(
