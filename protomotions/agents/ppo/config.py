@@ -46,8 +46,9 @@ class PPOActorConfig:
     num_out: int = field(
         default=None, metadata={"help": "Number of actions. Set from robot config."}
     )
-    actor_logstd: float = field(
-        default=-2.9, metadata={"help": "Initial log std for action distribution."}
+    actor_logstd: float | List[float] = field(
+        default=-2.9,
+        metadata={"help": "Initial log std: scalar or one value per action DOF."},
     )
     learnable_std: bool = field(
         default=False,

@@ -42,8 +42,18 @@ class PPOActor(ProtoMotionsTensorDictModule):
     def __init__(self, config: PPOActorConfig):
         super().__init__()
         self.config = config
+        logstd = torch.as_tensor(self.config.actor_logstd, dtype=torch.float32)
+        if logstd.ndim == 0:
+            logstd = logstd.expand(self.config.num_out)
+        elif logstd.shape != (self.config.num_out,):
+            raise ValueError(
+                "actor_logstd must be a scalar or a vector of length "
+                f"{self.config.num_out}, got shape {tuple(logstd.shape)}"
+            )
+        if not torch.isfinite(logstd).all():
+            raise ValueError("actor_logstd must contain only finite values")
         self.logstd = nn.Parameter(
-            torch.ones(self.config.num_out) * self.config.actor_logstd,
+            logstd.clone(),
             requires_grad=self.config.learnable_std,
         )
         MuClass = get_class(self.config.mu_model._target_)

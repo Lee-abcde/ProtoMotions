@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""InterMimic teacher tracker for one packaged OMOMO subject."""
+"""E1 InterMimic ablation: original S0 rewards with finger exploration std 0.10."""
 
 from __future__ import annotations
 
 import argparse
+import math
 
 import torch
 
@@ -168,8 +169,7 @@ def _intermimic_body_groups(robot_cfg: RobotConfig):
     non_finger_body_ids = _body_ids(
         robot_cfg, [name for name in body_names if name not in finger_names]
     )
-    # Unreliable reference finger rotations should not constrain grasp learning.
-    rotation_body_ids = non_finger_body_ids.clone()
+    rotation_body_ids = torch.arange(len(body_names), dtype=torch.long)
     ankle_toe_body_ids = _body_ids(
         robot_cfg, ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
     )
@@ -403,9 +403,16 @@ def agent_config(
             MLPLayerConfig(units=512, activation="relu"),
         ]
 
+    # E1 changes only finger sampling noise; retain S0 body noise and rewards.
+    actor_logstd = [-2.9] * robot_config.kinematic_info.num_dofs
+    for side in ("L", "R"):
+        finger_dof_ids, _ = _finger_dof_groups(robot_config, side)
+        for dof_id in finger_dof_ids.flatten().tolist():
+            actor_logstd[dof_id] = math.log(0.10)
+
     actor_config = PPOActorConfig(
         num_out=robot_config.kinematic_info.num_dofs,
-        actor_logstd=-2.9,
+        actor_logstd=actor_logstd,
         learnable_std=False,
         in_keys=input_keys,
         mu_key="actor_trunk_out",
