@@ -168,7 +168,8 @@ def _intermimic_body_groups(robot_cfg: RobotConfig):
     non_finger_body_ids = _body_ids(
         robot_cfg, [name for name in body_names if name not in finger_names]
     )
-    rotation_body_ids = torch.arange(len(body_names), dtype=torch.long)
+    # Unreliable reference finger rotations should not constrain grasp learning.
+    rotation_body_ids = non_finger_body_ids.clone()
     ankle_toe_body_ids = _body_ids(
         robot_cfg, ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
     )
