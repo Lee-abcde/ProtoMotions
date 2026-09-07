@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Dict, List, Optional, TYPE_CHECKING, Tuple
 
 import torch
@@ -38,8 +39,23 @@ class InterMimicControlConfig(MimicControlConfig):
     physical_buffer_update_probability: float = 0.005
     physical_buffer_decay: float = 1e-5
     show_object_contact_body_colors: bool = False
+    grip_opposition_enabled: bool = False
+    grip_minimum_force: float = 0.5
+    grip_target_force: float = 5.0
+    grip_hold_duration: float = 0.2
 
     def __post_init__(self):
+        if not (
+            math.isfinite(self.grip_minimum_force)
+            and math.isfinite(self.grip_target_force)
+            and 0 <= self.grip_minimum_force < self.grip_target_force
+            and math.isfinite(self.grip_hold_duration)
+            and self.grip_hold_duration > 0
+        ):
+            raise ValueError(
+                "Grip requires finite 0 <= minimum < target force "
+                "and positive hold duration"
+            )
         if self.future_steps is None:
             self.future_steps = [1, 16]
         if self.physical_buffer_size < 1:
@@ -222,6 +238,29 @@ class InterMimicControl(MimicControl):
         self.contact_loss_counter = torch.zeros(
             env.num_envs, 2, dtype=torch.long, device=env.device
         )
+        if getattr(config, "grip_opposition_enabled", False):
+            self._grip_body_ids = torch.tensor(
+                [
+                    [
+                        [body_names.index(f"{side}_{finger}{segment}")
+                         for segment in (1, 2, 3)]
+                        for finger in ("Thumb", "Index", "Middle", "Ring", "Pinky")
+                    ]
+                    for side in ("L", "R")
+                ],
+                device=env.device,
+                dtype=torch.long,
+            )
+            self._grip_hold_time = torch.zeros(
+                env.num_envs, 2, num_objects, device=env.device
+            )
+            self._grip_score = torch.zeros(env.num_envs, 2, device=env.device)
+            self._grip_required = torch.zeros(
+                env.num_envs, 2, dtype=torch.bool, device=env.device
+            )
+            self._grip_motion_ids = torch.full(
+                (env.num_envs,), -1, dtype=torch.long, device=env.device
+            )
 
         self._physical_state_buffer: Optional[_PhysicalStateBuffer] = None
         self._episode_physical_states: Optional[Tensor] = None
@@ -290,6 +329,8 @@ class InterMimicControl(MimicControl):
         )
 
     def reset(self, env_ids: Tensor):
+        if hasattr(self, "_grip_hold_time"):
+            self._reset_grip(env_ids)
         self.contact_loss_counter[env_ids] = 0
         self._reset_physical_episode(env_ids)
         self._reset_physical_state_history(env_ids)
@@ -316,11 +357,17 @@ class InterMimicControl(MimicControl):
                     self._last_physical_reset_mask.clone()
                 ),
             }
+            if hasattr(self, "_grip_hold_time"):
+                self._evaluation_runtime_state["grip"] = {
+                    name: getattr(self, name).clone() for name in self._grip_state_names()
+                }
             return
 
         if self._evaluation_runtime_state is None:
             return
         state = self._evaluation_runtime_state
+        for name, value in state.get("grip", {}).items():
+            getattr(self, name).copy_(value)
         self.contact_loss_counter.copy_(state["contact_loss_counter"])
         self.current_object_vel.copy_(state["current_object_vel"])
         self.current_object_ang_vel.copy_(state["current_object_ang_vel"])
@@ -370,7 +417,67 @@ class InterMimicControl(MimicControl):
                     torch.zeros_like(self.contact_loss_counter[:, hand_idx]),
                 )
 
+        if hasattr(self, "_grip_hold_time"):
+            self._update_grip(robot_state, labels)
         self._record_physical_states(robot_state, object_state)
+
+    @staticmethod
+    def _grip_state_names() -> tuple[str, ...]:
+        return ("_grip_hold_time", "_grip_score", "_grip_required", "_grip_motion_ids")
+
+    def _reset_grip(self, env_ids: Tensor) -> None:
+        for name in self._grip_state_names():
+            getattr(self, name)[env_ids] = -1 if name == "_grip_motion_ids" else 0
+
+    def _update_grip(self, robot_state, labels: Optional[Tensor]) -> None:
+        from protomotions.envs.rewards.grip import (
+            finger_opposition_scores,
+            persistent_grip_score,
+        )
+
+        motion_ids = self.env.motion_manager.motion_ids
+        changed = motion_ids != self._grip_motion_ids
+        self._reset_grip(changed)
+        self._grip_motion_ids.copy_(motion_ids)
+        valid = self.env.scene_lib.get_per_object_valid_mask()
+        self._grip_required.zero_()
+        if labels is not None:
+            hand_ids = (self.left_hand_body_ids, self.right_hand_body_ids)
+            for hand, ids in enumerate(hand_ids):
+                self._grip_required[:, hand] = (
+                    (labels[:, ids] > 0).any(-1) & valid.any(-1)
+                )
+        if robot_state is None:
+            robot_state = self.env.simulator.get_robot_state()
+        forces = robot_state.rigid_body_object_contact_forces
+        if forces is None:
+            raise RuntimeError("Opposition grip requires object-filtered contact forces")
+        instant, participation, opposition = finger_opposition_scores(
+            forces, self._grip_body_ids, valid,
+            self.config.grip_minimum_force, self.config.grip_target_force,
+        )
+        timers, scores = persistent_grip_score(
+            instant, self._grip_hold_time, self._grip_required,
+            self.env.dt, self.config.grip_hold_duration,
+        )
+        self._grip_hold_time.copy_(timers)
+        # The extra zero slot also supports an empty object dimension.
+        def max_object(value: Tensor) -> Tensor:
+            zero = value.new_zeros(*value.shape[:2], 1)
+            return torch.cat((value, zero), dim=-1).amax(-1)
+
+        self._grip_score.copy_(max_object(scores))
+        for hand, side in enumerate(("left", "right")):
+            for name, value in (
+                ("participation", participation), ("opposition", opposition),
+                ("hold_time", timers), ("score", scores),
+            ):
+                self.env.extras[f"grip/{side}_{name}"] = (
+                    max_object(value)[:, hand].clone()
+                )
+            self.env.extras[f"grip/{side}_required"] = (
+                self._grip_required[:, hand].float().clone()
+            )
 
     def before_render(self) -> None:
         """Color the robot white and object-contacting bodies red."""
@@ -873,6 +980,13 @@ class InterMimicControl(MimicControl):
                 self.contact_loss_counter[env_ids]
                 > self.config.contact_loss_frames,
                 dim=-1,
+            ),
+            grip_score=(
+                self._grip_score[env_ids] if hasattr(self, "_grip_score") else None
+            ),
+            grip_required=(
+                self._grip_required[env_ids]
+                if hasattr(self, "_grip_required") else None
             ),
         )
 

@@ -2167,6 +2167,22 @@ def intermimic_contact_reward_factory(
     )
 
 
+def intermimic_opposition_grip_reward_factory(grip_weight: float = 0.2) -> MdpComponent:
+    """Use the opposition scores maintained by the InterMimic controller."""
+    from protomotions.envs.rewards.grip import compute_opposition_grip_reward
+
+    if not 0.0 <= grip_weight <= 1.0:
+        raise ValueError("grip_weight must be in [0, 1]")
+    return MdpComponent(
+        compute_func=compute_opposition_grip_reward,
+        dynamic_vars={
+            "grip_score": EnvContext.intermimic.grip_score,
+            "grip_required": EnvContext.intermimic.grip_required,
+        },
+        static_params={"grip_weight": grip_weight, "multiplicative": True},
+    )
+
+
 def intermimic_grip_reward_factory(
     left_hand_body_ids: Tensor,
     right_hand_body_ids: Tensor,

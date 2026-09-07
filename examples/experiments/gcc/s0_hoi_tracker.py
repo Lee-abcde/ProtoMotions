@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""E1 InterMimic ablation: original S0 rewards with finger exploration std 0.10."""
+"""R1 InterMimic ablation: S0 with persistent multi-finger opposition grip."""
 
 from __future__ import annotations
 
 import argparse
-import math
 
 import torch
 
@@ -190,7 +189,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     from protomotions.envs.component_factories import (
         intermimic_contact_loss_term_factory,
         intermimic_contact_reward_factory,
-        intermimic_grip_reward_factory,
+        intermimic_opposition_grip_reward_factory,
         intermimic_human_error_term_factory,
         intermimic_human_reward_factory,
         intermimic_interaction_error_term_factory,
@@ -236,14 +235,6 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         RIGHT_FINGERTIP_LOCAL_OFFSETS + [RIGHT_PALM_LOCAL_OFFSET],
         dtype=torch.float,
     )
-    left_grip_fingertip_body_ids = _body_ids(robot_cfg, LEFT_FINGERTIP_NAMES)
-    right_grip_fingertip_body_ids = _body_ids(robot_cfg, RIGHT_FINGERTIP_NAMES)
-    left_finger_dof_ids, left_finger_effort_limits = _finger_dof_groups(
-        robot_cfg, "L"
-    )
-    right_finger_dof_ids, right_finger_effort_limits = _finger_dof_groups(
-        robot_cfg, "R"
-    )
 
     return EnvConfig(
         ref_respawn_offset=0.0,
@@ -253,6 +244,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         num_state_history_steps=1,
         control_components={
             "intermimic": InterMimicControlConfig(
+                grip_opposition_enabled=True,
                 bootstrap_on_episode_end=True,
                 reset_on_motion_end=True,
                 future_steps=[1, 16],
@@ -317,17 +309,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 negative_weight=3.0,
                 contact_energy_weight=1e-9,
             ),
-            "intermimic_grip": intermimic_grip_reward_factory(
-                left_hand_body_ids=left_hand_body_ids,
-                right_hand_body_ids=right_hand_body_ids,
-                left_fingertip_body_ids=left_grip_fingertip_body_ids,
-                right_fingertip_body_ids=right_grip_fingertip_body_ids,
-                left_finger_dof_ids=left_finger_dof_ids,
-                right_finger_dof_ids=right_finger_dof_ids,
-                left_finger_effort_limits=left_finger_effort_limits,
-                right_finger_effort_limits=right_finger_effort_limits,
-                target_force=5.0,
-                target_effort_ratio=0.3,
+            "intermimic_grip": intermimic_opposition_grip_reward_factory(
                 grip_weight=0.2,
             ),
         },
@@ -403,16 +385,9 @@ def agent_config(
             MLPLayerConfig(units=512, activation="relu"),
         ]
 
-    # E1 changes only finger sampling noise; retain S0 body noise and rewards.
-    actor_logstd = [-2.9] * robot_config.kinematic_info.num_dofs
-    for side in ("L", "R"):
-        finger_dof_ids, _ = _finger_dof_groups(robot_config, side)
-        for dof_id in finger_dof_ids.flatten().tolist():
-            actor_logstd[dof_id] = math.log(0.10)
-
     actor_config = PPOActorConfig(
         num_out=robot_config.kinematic_info.num_dofs,
-        actor_logstd=actor_logstd,
+        actor_logstd=-2.9,
         learnable_std=False,
         in_keys=input_keys,
         mu_key="actor_trunk_out",

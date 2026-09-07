@@ -472,6 +472,8 @@ class InterMimicContext:
     previous_object_vel: Tensor = FieldPath()
     previous_object_ang_vel: Tensor = FieldPath()
     contact_loss_exceeded: Tensor = FieldPath()
+    grip_score: Tensor = FieldPath()
+    grip_required: Tensor = FieldPath()
 
     def __init__(
         self,
@@ -489,6 +491,8 @@ class InterMimicContext:
         previous_object_vel: Tensor,
         previous_object_ang_vel: Tensor,
         contact_loss_exceeded: Tensor,
+        grip_score: Optional[Tensor] = None,
+        grip_required: Optional[Tensor] = None,
     ):
         self.ref_object_pos = ref_object_pos
         self.ref_object_rot = ref_object_rot
@@ -504,6 +508,8 @@ class InterMimicContext:
         self.previous_object_vel = previous_object_vel
         self.previous_object_ang_vel = previous_object_ang_vel
         self.contact_loss_exceeded = contact_loss_exceeded
+        self.grip_score = grip_score
+        self.grip_required = grip_required
 
 
 class MaskedMimicContext:

@@ -73,6 +73,7 @@ from protomotions.envs.rewards.regularization import (
     contact_mismatch_sum,
     impact_force_penalty,
 )
+from protomotions.envs.rewards.grip import compute_opposition_grip_reward
 from protomotions.envs.rewards.intermimic import (
     compute_intermimic_human_reward,
     compute_intermimic_object_reward,
@@ -135,5 +136,6 @@ __all__ = [
     "compute_intermimic_interaction_reward",
     "compute_intermimic_contact_reward",
     "compute_intermimic_grip_reward",
+    "compute_opposition_grip_reward",
     "compute_intermimic_fingertip_bearing_reward",
 ]
