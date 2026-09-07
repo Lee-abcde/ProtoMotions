@@ -495,9 +495,10 @@ export WANDB_DIR=/workspace/ProtoMotions/results/wandb
 export WANDB_CACHE_DIR=/workspace/ProtoMotions/results/wandb_cache
 export WANDB_CONFIG_DIR=/workspace/ProtoMotions/results/wandb_config
 export TMPDIR=/tmp
+export PROTOMOTIONS_COLLISION_CACHE_DIR=/workspace/ProtoMotions/results/collision_cache
 export WANDB__EXECUTABLE={python_bin}
 
-mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_CONFIG_DIR" "$TMPDIR"
+mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_CONFIG_DIR" "$TMPDIR" "$PROTOMOTIONS_COLLISION_CACHE_DIR"
 cd /workspace/ProtoMotions
 
 which python

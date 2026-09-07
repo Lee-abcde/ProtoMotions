@@ -5,13 +5,16 @@
 
 Applying collision APIs at runtime (per-clone, per-mesh) is O(num_envs × meshes)
 and dominates co-training startup.  This module writes collision properties once
-into a sibling USD file so subsequent runs load them directly.
+into a writable cache so read-only datasets can be used without modification.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -76,9 +79,9 @@ def ensure_baked_collision_usd(
 ) -> Path:
     """Return path to a USD with collision APIs pre-baked.
 
-    If the baked file already exists, returns immediately.  Otherwise opens the
-    original USD, applies collision APIs to every Mesh prim, and writes an
-    atomic sibling file (PID-suffixed temp → ``os.rename``).
+    Reuse legacy sibling caches when no cache directory is configured. New
+    files go to PROTOMOTIONS_COLLISION_CACHE_DIR, or a per-user temporary cache.
+    Export flattens the stage, retaining resolved external asset paths.
     """
     baked = build_baked_collision_path(
         original_path,
@@ -88,15 +91,31 @@ def ensure_baked_collision_usd(
         voxel_resolution,
         shrink_wrap,
     )
-    if baked.exists():
+    cache_dir = os.environ.get("PROTOMOTIONS_COLLISION_CACHE_DIR")
+    if not cache_dir and baked.exists():
         log.debug("Baked collision USD already exists: %s", baked)
         return baked
+
+    source_path = Path(original_path).expanduser().resolve()
+    source_stat = source_path.stat()
+    # Disambiguate same-named assets and invalidate when the source changes.
+    fingerprint = hashlib.sha256(
+        f"{source_path}:{source_stat.st_size}:{source_stat.st_mtime_ns}".encode()
+    ).hexdigest()
+    cache_root = (
+        Path(cache_dir).expanduser().resolve()
+        if cache_dir
+        else Path(tempfile.gettempdir()) / f"protomotions_collision_cache_{os.getuid()}"
+    )
+    baked = cache_root / fingerprint / baked.name
+    if baked.exists():
+        return baked
+    baked.parent.mkdir(parents=True, exist_ok=True)
 
     from pxr import Usd, UsdPhysics, PhysxSchema
 
     log.info("Baking collision '%s' into %s ...", approximation, baked.name)
 
-    source_path = Path(original_path).expanduser().resolve()
     supported = (".usd", ".usda", ".usdc")
     if source_path.suffix.lower() not in supported:
         raise ValueError(
@@ -129,9 +148,16 @@ def ensure_baked_collision_usd(
             if hull_vertex_limit is not None:
                 ch_api.GetHullVertexLimitAttr().Set(hull_vertex_limit)
 
-    # Atomic write: export to PID-suffixed temp, then rename
-    tmp_path = baked.with_suffix(f".tmp{os.getpid()}{baked.suffix}")
-    stage.Export(str(tmp_path))
-    os.rename(str(tmp_path), str(baked))
+    # UUIDs avoid collisions even when different nodes/containers share a PID.
+    # Readers only ever see complete files after the atomic rename.
+    tmp_path = baked.with_suffix(
+        f".tmp{os.getpid()}_{uuid.uuid4().hex}{baked.suffix}"
+    )
+    try:
+        if not stage.Export(str(tmp_path)):
+            raise RuntimeError(f"Failed to export collision cache: {tmp_path}")
+        os.rename(str(tmp_path), str(baked))
+    finally:
+        tmp_path.unlink(missing_ok=True)
     log.info("Baked collision USD written: %s", baked)
     return baked
