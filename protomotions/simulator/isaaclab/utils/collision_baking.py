@@ -32,20 +32,23 @@ def build_baked_collision_path(
     max_convex_hulls: Optional[int] = None,
     hull_vertex_limit: Optional[int] = None,
     voxel_resolution: Optional[int] = None,
+    shrink_wrap: Optional[bool] = None,
 ) -> Path:
     """Build the path for a baked collision USD file.
 
     Naming convention:
-        {stem}.collision_{abbrev}[_h{hulls}][_v{vertices}][_r{resolution}]{ext}
+        {stem}.collision_{abbrev}[_h{hulls}][_v{vertices}][_r{resolution}][_sw{0|1}].usd
 
     Examples:
         armchair.usda + convexDecomposition h=32 v=64 r=100000
-            → armchair.collision_cd_h32_v64_r100000.usda
+            → armchair.collision_cd_h32_v64_r100000.usd
         chair.usd + convexHull v=64
             → chair.collision_ch_v64.usd
         table.usda + boundingCube
             → table.collision_bc.usda
     """
+    if shrink_wrap is not None and approximation != "convexDecomposition":
+        raise ValueError("shrink_wrap requires convexDecomposition")
     p = Path(original_path).expanduser().resolve()
     abbrev = _APPROX_ABBREV.get(approximation, approximation)
     suffix_parts = [f"collision_{abbrev}"]
@@ -55,6 +58,8 @@ def build_baked_collision_path(
         suffix_parts.append(f"v{hull_vertex_limit}")
     if voxel_resolution is not None:
         suffix_parts.append(f"r{voxel_resolution}")
+    if shrink_wrap is not None:
+        suffix_parts.append(f"sw{int(shrink_wrap)}")
     tag = "_".join(suffix_parts)
     # Always use .usd extension — the baked file is valid USD regardless of
     # the original format (obj, usda, urdf, etc.).
@@ -67,6 +72,7 @@ def ensure_baked_collision_usd(
     max_convex_hulls: Optional[int] = None,
     hull_vertex_limit: Optional[int] = None,
     voxel_resolution: Optional[int] = None,
+    shrink_wrap: Optional[bool] = None,
 ) -> Path:
     """Return path to a USD with collision APIs pre-baked.
 
@@ -80,6 +86,7 @@ def ensure_baked_collision_usd(
         max_convex_hulls,
         hull_vertex_limit,
         voxel_resolution,
+        shrink_wrap,
     )
     if baked.exists():
         log.debug("Baked collision USD already exists: %s", baked)
@@ -115,6 +122,8 @@ def ensure_baked_collision_usd(
                 cd_api.GetHullVertexLimitAttr().Set(hull_vertex_limit)
             if voxel_resolution is not None:
                 cd_api.GetVoxelResolutionAttr().Set(voxel_resolution)
+            if shrink_wrap is not None:
+                cd_api.CreateShrinkWrapAttr(shrink_wrap)
         elif approximation == "convexHull":
             ch_api = PhysxSchema.PhysxConvexHullCollisionAPI.Apply(prim)
             if hull_vertex_limit is not None:

@@ -342,6 +342,14 @@ class IsaacLabSimulator(Simulator):
 
                     # Pre-bake collision approximation into the USD asset
                     approx = self.scene_lib.config.mesh_collision_approximation
+                    shrink_wrap = getattr(
+                        self.scene_lib.config, "mesh_collision_shrink_wrap", None
+                    )
+                    if shrink_wrap is not None and approx != "convexDecomposition":
+                        raise ValueError(
+                            "mesh_collision_shrink_wrap requires "
+                            "mesh_collision_approximation='convexDecomposition'"
+                        )
                     if approx is not None:
                         cache_key = str(asset_path)
                         if cache_key not in self._baked_path_cache:
@@ -352,6 +360,7 @@ class IsaacLabSimulator(Simulator):
                                     max_convex_hulls=self.scene_lib.config.mesh_collision_max_convex_hulls,
                                     hull_vertex_limit=self.scene_lib.config.mesh_collision_hull_vertex_limit,
                                     voxel_resolution=self.scene_lib.config.mesh_collision_voxel_resolution,
+                                    shrink_wrap=shrink_wrap,
                                 )
                             )
                         asset_path = self._baked_path_cache[cache_key]

@@ -1184,6 +1184,16 @@ class SceneLibConfig:
             "help": "Voxel resolution for convexDecomposition. Typical: 100000-400000.",
         },
     )
+    mesh_collision_shrink_wrap: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Project convex hull vertices toward the source mesh surface. "
+                "Requires mesh_collision_approximation='convexDecomposition'. "
+                "None preserves the USD setting."
+            ),
+        },
+    )
     scene_indices: Optional[List[int]] = field(
         default=None,
         metadata={
