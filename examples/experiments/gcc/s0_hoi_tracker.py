@@ -99,7 +99,9 @@ def scene_lib_config(args: argparse.Namespace) -> SceneLibConfig:
         scene_file=args.scenes_file,
         mesh_collision_approximation="convexDecomposition",
         mesh_collision_max_convex_hulls=64,
-        mesh_collision_shrink_wrap=True,
+        mesh_collision_hull_vertex_limit=64,
+        mesh_collision_voxel_resolution=300000,
+        mesh_collision_shrink_wrap=False,
         # Reallocate env capacity toward difficult object types whenever the
         # simulator is reconstructed from a curriculum checkpoint.
         replicate_method=ReplicationMethod.OBJECT_CURRICULUM,
