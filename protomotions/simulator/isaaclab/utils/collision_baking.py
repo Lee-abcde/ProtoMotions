@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import tempfile
 import uuid
@@ -29,6 +30,20 @@ _APPROX_ABBREV = {
 }
 
 
+def resolve_mesh_shrink_wrap(
+    asset_path: str | Path,
+    shrink_wrap: Optional[bool],
+    excluded_names: list[str],
+) -> Optional[bool]:
+    """Force shrink wrap off for excluded asset filename stems."""
+    if not isinstance(excluded_names, list) or any(
+        not isinstance(name, str) or not name for name in excluded_names
+    ):
+        raise ValueError("mesh_collision_shrink_wrap_exclude must be a list of names")
+    name = Path(asset_path).stem.split(".collision_", 1)[0]
+    return False if name in excluded_names else shrink_wrap
+
+
 def build_baked_collision_path(
     original_path: str | Path,
     approximation: str,
@@ -36,11 +51,12 @@ def build_baked_collision_path(
     hull_vertex_limit: Optional[int] = None,
     voxel_resolution: Optional[int] = None,
     shrink_wrap: Optional[bool] = None,
+    error_percentage: Optional[float] = None,
 ) -> Path:
     """Build the path for a baked collision USD file.
 
     Naming convention:
-        {stem}.collision_{abbrev}[_h{hulls}][_v{vertices}][_r{resolution}][_sw{0|1}].usd
+        {stem}.collision_{abbrev}[_h{hulls}][_v{vertices}][_r{resolution}][_sw{0|1}][_e{error}].usd
 
     Examples:
         armchair.usda + convexDecomposition h=32 v=64 r=100000
@@ -52,6 +68,11 @@ def build_baked_collision_path(
     """
     if shrink_wrap is not None and approximation != "convexDecomposition":
         raise ValueError("shrink_wrap requires convexDecomposition")
+    if error_percentage is not None:
+        if approximation != "convexDecomposition":
+            raise ValueError("error_percentage requires convexDecomposition")
+        if not math.isfinite(error_percentage) or error_percentage < 0:
+            raise ValueError("error_percentage must be finite and nonnegative")
     p = Path(original_path).expanduser().resolve()
     abbrev = _APPROX_ABBREV.get(approximation, approximation)
     suffix_parts = [f"collision_{abbrev}"]
@@ -63,6 +84,8 @@ def build_baked_collision_path(
         suffix_parts.append(f"r{voxel_resolution}")
     if shrink_wrap is not None:
         suffix_parts.append(f"sw{int(shrink_wrap)}")
+    if error_percentage is not None:
+        suffix_parts.append(f"e{float(error_percentage)}")
     tag = "_".join(suffix_parts)
     # Always use .usd extension — the baked file is valid USD regardless of
     # the original format (obj, usda, urdf, etc.).
@@ -76,6 +99,7 @@ def ensure_baked_collision_usd(
     hull_vertex_limit: Optional[int] = None,
     voxel_resolution: Optional[int] = None,
     shrink_wrap: Optional[bool] = None,
+    error_percentage: Optional[float] = None,
 ) -> Path:
     """Return path to a USD with collision APIs pre-baked.
 
@@ -90,6 +114,7 @@ def ensure_baked_collision_usd(
         hull_vertex_limit,
         voxel_resolution,
         shrink_wrap,
+        error_percentage,
     )
     cache_dir = os.environ.get("PROTOMOTIONS_COLLISION_CACHE_DIR")
     if not cache_dir and baked.exists():
@@ -143,6 +168,8 @@ def ensure_baked_collision_usd(
                 cd_api.GetVoxelResolutionAttr().Set(voxel_resolution)
             if shrink_wrap is not None:
                 cd_api.CreateShrinkWrapAttr(shrink_wrap)
+            if error_percentage is not None:
+                cd_api.CreateErrorPercentageAttr(float(error_percentage))
         elif approximation == "convexHull":
             ch_api = PhysxSchema.PhysxConvexHullCollisionAPI.Apply(prim)
             if hull_vertex_limit is not None:

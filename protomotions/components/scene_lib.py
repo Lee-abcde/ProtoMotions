@@ -1184,6 +1184,18 @@ class SceneLibConfig:
             "help": "Voxel resolution for convexDecomposition. Typical: 100000-400000.",
         },
     )
+    mesh_collision_shrink_wrap_exclude: List[str] = field(
+        default_factory=list,
+        metadata={
+            "help": "Asset filename stems for which shrink wrap is forced off in IsaacLab (e.g. ['plasticbox']).",
+        },
+    )
+    mesh_collision_error_percentage: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "Error percentage for convexDecomposition. None preserves the USD setting.",
+        },
+    )
     mesh_collision_shrink_wrap: Optional[bool] = field(
         default=None,
         metadata={

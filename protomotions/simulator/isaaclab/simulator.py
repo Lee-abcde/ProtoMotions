@@ -39,6 +39,7 @@ from protomotions.simulator.isaaclab.config import (
 )
 from protomotions.simulator.isaaclab.utils.collision_baking import (
     ensure_baked_collision_usd,
+    resolve_mesh_shrink_wrap,
 )
 from protomotions.simulator.isaaclab.utils.materials import set_material_friction
 from protomotions.simulator.base_simulator.simulator import Simulator
@@ -275,6 +276,31 @@ class IsaacLabSimulator(Simulator):
 
         self._baked_path_cache: Dict[str, Path] = {}
 
+        # Log actual environment assignments, not the shorter spawn-template list.
+        collision_assignments = {}
+        excluded_names = getattr(
+            self.scene_lib.config, "mesh_collision_shrink_wrap_exclude", []
+        )
+        for env_id, scene in enumerate(self.scene_lib.scenes):
+            for obj_idx, obj in enumerate(scene.objects):
+                if isinstance(obj, MeshSceneObject):
+                    collision_assignments.setdefault(
+                        (obj_idx, obj.object_path), []
+                    ).append(env_id)
+        for (obj_idx, source_path), env_ids in collision_assignments.items():
+            effective_shrink_wrap = resolve_mesh_shrink_wrap(
+                source_path,
+                getattr(self.scene_lib.config, "mesh_collision_shrink_wrap", None),
+                excluded_names,
+            )
+            log.info(
+                "[collision-map] Object_%d source=%s shrink_wrap=%s env_ids=%s",
+                obj_idx,
+                source_path,
+                effective_shrink_wrap,
+                env_ids,
+            )
+
         # Spawn objects at origin (actual positions set via reset_envs later)
         initial_obj_pos = torch.zeros(
             (self.num_envs, self.scene_lib.num_objects_per_scene, 7),
@@ -342,9 +368,19 @@ class IsaacLabSimulator(Simulator):
 
                     # Pre-bake collision approximation into the USD asset
                     approx = self.scene_lib.config.mesh_collision_approximation
-                    shrink_wrap = getattr(
-                        self.scene_lib.config, "mesh_collision_shrink_wrap", None
+                    shrink_wrap = resolve_mesh_shrink_wrap(
+                        asset_path,
+                        getattr(self.scene_lib.config, "mesh_collision_shrink_wrap", None),
+                        excluded_names,
                     )
+                    error_percentage = getattr(
+                        self.scene_lib.config, "mesh_collision_error_percentage", None
+                    )
+                    if error_percentage is not None and approx != "convexDecomposition":
+                        raise ValueError(
+                            "mesh_collision_error_percentage requires "
+                            "mesh_collision_approximation='convexDecomposition'"
+                        )
                     if shrink_wrap is not None and approx != "convexDecomposition":
                         raise ValueError(
                             "mesh_collision_shrink_wrap requires "
@@ -361,6 +397,7 @@ class IsaacLabSimulator(Simulator):
                                     hull_vertex_limit=self.scene_lib.config.mesh_collision_hull_vertex_limit,
                                     voxel_resolution=self.scene_lib.config.mesh_collision_voxel_resolution,
                                     shrink_wrap=shrink_wrap,
+                                    error_percentage=error_percentage,
                                 )
                             )
                         asset_path = self._baked_path_cache[cache_key]
