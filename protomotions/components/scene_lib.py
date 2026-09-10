@@ -11,6 +11,7 @@ motion-controlled objects, and complex multi-object scenes.
 """
 
 import logging
+import math
 import random
 import copy
 from concurrent.futures import ProcessPoolExecutor
@@ -1156,6 +1157,17 @@ class SceneLibConfig:
             "help": "IsaacLab rest offset applied to spawned scene objects."
         },
     )
+    object_density_overrides: "dict[str, float] | None" = field(
+        default=None,
+        metadata={
+            "help": (
+                "Fixed mesh densities in kg/m^3, keyed by asset filename stem "
+                "(e.g. {'clothesstand': 803.31, 'tripod': 1499.79}). "
+                "Replaces density and clears explicit mass before replication. "
+                "Unmatched objects retain their stored options."
+            )
+        },
+    )
     mesh_collision_approximation: Optional[str] = field(
         default=None,
         metadata={
@@ -1438,6 +1450,7 @@ class SceneLib:
                 )
 
         # Process pointclouds and instance tracking BEFORE deepcopy
+        scenes = self._apply_object_density_overrides(scenes)
         if self.config.pointcloud_samples_per_object is not None:
             self._compute_pointclouds_parallel(
                 scenes, self.config.pointcloud_samples_per_object
@@ -1450,6 +1463,47 @@ class SceneLib:
         self._original_scenes = copy.deepcopy(scenes)
 
         self._create_scenes(scenes, scene_weights)
+
+    def _apply_object_density_overrides(self, scenes: "list[Scene]") -> "list[Scene]":
+        """Apply fixed mesh densities without changing caller-owned objects."""
+        overrides = self.config.object_density_overrides
+        if overrides is None:
+            return scenes
+        if not isinstance(overrides, dict):
+            raise TypeError("object_density_overrides must be a name-to-density dict")
+        for name, density in overrides.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("object_density_overrides requires nonempty names")
+            if (
+                isinstance(density, bool)
+                or not isinstance(density, (int, float))
+                or not math.isfinite(density)
+                or density <= 0
+            ):
+                raise ValueError(f"Density for '{name}' must be finite and positive")
+
+        result = []
+        matched_names = set()
+        for scene in scenes:
+            updated_scene = copy.copy(scene)
+            updated_scene.objects = []
+            for obj in scene.objects:
+                if isinstance(obj, MeshSceneObject):
+                    name = os.path.splitext(os.path.basename(obj.object_path))[0]
+                    name = name.split(".collision_", 1)[0]
+                    if name in overrides:
+                        obj = copy.copy(obj)
+                        obj.options = obj.options.with_asset_property_overrides(
+                            {"density": float(overrides[name])}
+                        )
+                        matched_names.add(name)
+                updated_scene.objects.append(obj)
+            result.append(updated_scene)
+        for name in sorted(matched_names):
+            logger.info(
+                "Object density override: %s = %s kg/m^3", name, overrides[name]
+            )
+        return result
 
     def _create_empty(self):
         """Create an empty scene library with no scenes (num_objects_per_scene=0)."""

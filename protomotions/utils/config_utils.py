@@ -227,7 +227,7 @@ def apply_config_overrides(
                 target = getattr(target, field)
 
         final_field = field_path[-1]
-        allowed_field_types = [int, float, bool, str, list, tuple, type(None)]
+        allowed_field_types = [int, float, bool, str, list, tuple, dict, type(None)]
 
         if isinstance(target, dict):
             if final_field not in target:
