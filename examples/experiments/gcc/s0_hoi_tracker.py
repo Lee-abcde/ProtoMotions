@@ -265,6 +265,23 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     )
     left_grip_fingertip_body_ids = _body_ids(robot_cfg, LEFT_FINGERTIP_NAMES)
     right_grip_fingertip_body_ids = _body_ids(robot_cfg, RIGHT_FINGERTIP_NAMES)
+    aliases = robot_cfg.common_naming_to_robot_body_names
+    left_finger_body_ids = _body_ids(
+        robot_cfg,
+        [
+            name
+            for name in aliases["all_left_hand_bodies"]
+            if name not in KEY_BODY_NAMES
+        ],
+    )
+    right_finger_body_ids = _body_ids(
+        robot_cfg,
+        [
+            name
+            for name in aliases["all_right_hand_bodies"]
+            if name not in KEY_BODY_NAMES
+        ],
+    )
     left_finger_dof_ids, left_finger_effort_limits = _finger_dof_groups(
         robot_cfg, "L"
     )
@@ -317,6 +334,11 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 rotation_weight=2.5,
                 energy_weight=2e-5,
                 distance_weight_scale=5.0,
+                left_finger_body_ids=left_finger_body_ids,
+                right_finger_body_ids=right_finger_body_ids,
+                left_hand_body_ids=left_hand_body_ids,
+                right_hand_body_ids=right_hand_body_ids,
+                mask_finger_rotation_when_contact=True,
                 distance_weighted_position=True,
             ),
             "intermimic_object": intermimic_object_reward_factory(

@@ -2004,25 +2004,48 @@ def intermimic_human_reward_factory(
     right_finger_parent_body_ids: Optional[Tensor] = None,
     finger_rotation_weight: float = 0.0,
     distance_weighted_position: bool = True,
+    left_hand_body_ids: Optional[Tensor] = None,
+    right_hand_body_ids: Optional[Tensor] = None,
+    mask_finger_rotation_when_contact: bool = False,
 ) -> MdpComponent:
     from protomotions.envs.rewards import compute_intermimic_human_reward
 
+    if mask_finger_rotation_when_contact and any(
+        body_ids is None
+        for body_ids in (
+            left_finger_body_ids,
+            right_finger_body_ids,
+            left_hand_body_ids,
+            right_hand_body_ids,
+        )
+    ):
+        raise ValueError(
+            "Contact-conditioned finger rotation masking requires left/right "
+            "hand and finger body IDs"
+        )
+
+    dynamic_vars = {
+        "body_pos": EnvContext.current.rigid_body_pos,
+        "body_rot": EnvContext.current.rigid_body_rot,
+        "dof_vel": EnvContext.current.dof_vel,
+        "historical_dof_vel": EnvContext.historical.dof_vel,
+        "ref_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
+        "ref_body_rot": EnvContext.mimic.ref_state.rigid_body_rot,
+        "ref_object_pos": EnvContext.intermimic.ref_object_pos,
+        "ref_object_rot": EnvContext.intermimic.ref_object_rot,
+        "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
+        "object_valid_mask": EnvContext.scene.object_valid_mask,
+        "progress_buf": EnvContext.progress_buf,
+        "dt": EnvContext.dt,
+    }
+    if mask_finger_rotation_when_contact:
+        dynamic_vars["ref_body_contact_labels"] = (
+            EnvContext.mimic.ref_state.rigid_body_contact_labels
+        )
+
     return MdpComponent(
         compute_func=compute_intermimic_human_reward,
-        dynamic_vars={
-            "body_pos": EnvContext.current.rigid_body_pos,
-            "body_rot": EnvContext.current.rigid_body_rot,
-            "dof_vel": EnvContext.current.dof_vel,
-            "historical_dof_vel": EnvContext.historical.dof_vel,
-            "ref_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
-            "ref_body_rot": EnvContext.mimic.ref_state.rigid_body_rot,
-            "ref_object_pos": EnvContext.intermimic.ref_object_pos,
-            "ref_object_rot": EnvContext.intermimic.ref_object_rot,
-            "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
-            "object_valid_mask": EnvContext.scene.object_valid_mask,
-            "progress_buf": EnvContext.progress_buf,
-            "dt": EnvContext.dt,
-        },
+        dynamic_vars=dynamic_vars,
         static_params={
             "key_body_ids": key_body_ids,
             "rotation_body_ids": rotation_body_ids,
@@ -2031,12 +2054,17 @@ def intermimic_human_reward_factory(
             "left_finger_parent_body_ids": left_finger_parent_body_ids,
             "right_finger_body_ids": right_finger_body_ids,
             "right_finger_parent_body_ids": right_finger_parent_body_ids,
+            "left_hand_body_ids": left_hand_body_ids,
+            "right_hand_body_ids": right_hand_body_ids,
             "position_weight": position_weight,
             "rotation_weight": rotation_weight,
             "energy_weight": energy_weight,
             "distance_weight_scale": distance_weight_scale,
             "finger_rotation_weight": finger_rotation_weight,
             "distance_weighted_position": distance_weighted_position,
+            "mask_finger_rotation_when_contact": (
+                mask_finger_rotation_when_contact
+            ),
             "multiplicative": True,
         },
     )

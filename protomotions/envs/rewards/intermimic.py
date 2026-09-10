@@ -43,6 +43,10 @@ def compute_intermimic_human_reward(
     right_finger_parent_body_ids: Tensor | None = None,
     finger_rotation_weight: float = 0.0,
     distance_weighted_position: bool = True,
+    ref_body_contact_labels: Tensor | None = None,
+    left_hand_body_ids: Tensor | None = None,
+    right_hand_body_ids: Tensor | None = None,
+    mask_finger_rotation_when_contact: bool = False,
 ) -> Tensor:
     """Human pose tracking with optional object-distance position weighting."""
     reference_distances = nearest_object_surface_distances(
@@ -73,6 +77,39 @@ def compute_intermimic_human_reward(
         True,
     )
     rotation_distance_weights = 1.0 - proximity_weights[:, rotation_body_ids]
+    if mask_finger_rotation_when_contact:
+        if (
+            ref_body_contact_labels is None
+            or left_hand_body_ids is None
+            or right_hand_body_ids is None
+            or left_finger_body_ids is None
+            or right_finger_body_ids is None
+        ):
+            raise ValueError(
+                "Contact-conditioned finger rotation masking requires contact "
+                "labels and left/right hand and finger body IDs"
+            )
+
+        left_contact_required = torch.any(
+            ref_body_contact_labels[:, left_hand_body_ids] > 0, dim=-1
+        )
+        right_contact_required = torch.any(
+            ref_body_contact_labels[:, right_hand_body_ids] > 0, dim=-1
+        )
+        left_finger_rotations = torch.any(
+            rotation_body_ids[:, None] == left_finger_body_ids[None, :], dim=-1
+        )
+        right_finger_rotations = torch.any(
+            rotation_body_ids[:, None] == right_finger_body_ids[None, :], dim=-1
+        )
+        masked_rotations = (
+            left_contact_required[:, None] & left_finger_rotations[None, :]
+        ) | (
+            right_contact_required[:, None] & right_finger_rotations[None, :]
+        )
+        rotation_distance_weights = rotation_distance_weights.masked_fill(
+            masked_rotations, 0.0
+        )
     rotation_cost = (
         rotation_error * rotation_distance_weights
     ).mean(dim=-1)
