@@ -188,6 +188,7 @@ def normalized_pd_asymmetric_fixed_gains_action(
     damping: Tensor,
     action_transform: ActionTransform = "tanh",
     clamp_value: float = 1.0,
+    action_tanh_gain: float | Tensor = 1.0,
 ) -> Dict[str, Tensor]:
     """Map each action direction to its own per-DOF PD target range.
 
@@ -195,9 +196,13 @@ def normalized_pd_asymmetric_fixed_gains_action(
     lower limit, while positive actions interpolate toward the upper limit.
     This preserves ``action == 0`` as the default pose without generating
     targets outside asymmetric joint limits.
+
+    ``action_tanh_gain`` may be a scalar or one value per DOF. Values above
+    one let selected joints use more of their PD range while the raw policy
+    action remains inside PPO's soft bounds.
     """
     if action_transform == "tanh":
-        action = torch.tanh(action)
+        action = torch.tanh(action * action_tanh_gain)
     elif action_transform == "clamp":
         action = torch.clamp(action, -clamp_value, clamp_value)
 
@@ -390,6 +395,7 @@ def make_asymmetric_pd_action_config(
     action_transform: ActionTransform = "tanh",
     clamp_value: float = 1.0,
     action_scale: float = 1.0,
+    action_tanh_gain: float | Tensor = 1.0,
 ) -> Dict[str, Any]:
     """Create zero-centered, asymmetric, per-DOF normalized PD control."""
     offset, negative_scale, positive_scale = build_pd_action_asymmetric_scales(
@@ -419,6 +425,7 @@ def make_asymmetric_pd_action_config(
         "damping": damping,
         "action_transform": action_transform,
         "clamp_value": clamp_value,
+        "action_tanh_gain": action_tanh_gain,
     }
 
 
