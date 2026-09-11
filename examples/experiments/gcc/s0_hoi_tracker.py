@@ -338,7 +338,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 right_finger_body_ids=right_finger_body_ids,
                 left_hand_body_ids=left_hand_body_ids,
                 right_hand_body_ids=right_hand_body_ids,
-                mask_finger_rotation_when_contact=True,
+                mask_finger_rotation_when_contact=False,
                 distance_weighted_position=True,
             ),
             "intermimic_object": intermimic_object_reward_factory(
