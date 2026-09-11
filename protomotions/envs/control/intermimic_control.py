@@ -547,7 +547,11 @@ class InterMimicControl(MimicControl):
             # The first post-action state has no preceding simulated state
             # from which to assess future survival.
             & (step_ids > 0)
-            & (step_ids < recorded.unsqueeze(1))
+            # Recording runs before termination checks. The final recorded
+            # state can therefore be the failed/terminal state itself, and
+            # has no subsequent transition demonstrating survival. In
+            # particular, short clips can give it a survival score of 1.
+            & (step_ids < recorded.unsqueeze(1) - 1)
             & (
                 scores
                 > self.config.physical_buffer_min_success_fraction
