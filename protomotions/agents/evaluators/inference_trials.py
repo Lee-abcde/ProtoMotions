@@ -139,6 +139,25 @@ def _parallel_evaluation_compatibility(evaluator: Any) -> torch.Tensor:
     return compatibility
 
 
+def _mask_parallel_trial_actions(
+    actions: torch.Tensor,
+    inactive_env_ids: torch.Tensor,
+    env_ids: torch.Tensor,
+    active: torch.Tensor,
+) -> torch.Tensor:
+    """Zero actions for environments that are not active in this wave."""
+    stopped_env_ids = env_ids[~active]
+    if inactive_env_ids.numel() == 0 and stopped_env_ids.numel() == 0:
+        return actions
+
+    actions = actions.clone()
+    if inactive_env_ids.numel() > 0:
+        actions[inactive_env_ids] = 0.0
+    if stopped_env_ids.numel() > 0:
+        actions[stopped_env_ids] = 0.0
+    return actions
+
+
 def _parallel_trial_result(
     motion_id: int,
     total_steps: int,
@@ -229,7 +248,7 @@ def run_parallel_mimic_trials(
                 frame_limits=frame_limits,
             )
             evaluator._on_episode_start(env_ids)
-            evaluator._park_inactive_envs(env_ids)
+            inactive_env_ids = evaluator._park_inactive_envs(env_ids)
             obs, _ = evaluator.env.reset(
                 env_ids,
                 sample_flat=True,
@@ -274,6 +293,17 @@ def run_parallel_mimic_trials(
                         ema_alpha * actions
                         + (1.0 - ema_alpha) * previous_actions
                     )
+
+                # Every environment still advances in the vectorized simulator.
+                # Keep parked and completed trials from being actuated;
+                # otherwise state leaks across waves when environments are reused.
+                actions = _mask_parallel_trial_actions(
+                    actions,
+                    inactive_env_ids,
+                    env_ids,
+                    active,
+                )
+                if ema_alpha is not None:
                     previous_actions = actions.clone()
 
                 obs, _, _, _, _ = evaluator.env.step(actions)
