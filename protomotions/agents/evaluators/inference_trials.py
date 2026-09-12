@@ -103,6 +103,31 @@ def build_parallel_trial_batches(
     return batches
 
 
+def build_standard_trial_batches(
+    evaluator: Any,
+    trials_per_motion: int,
+) -> List[Dict[str, torch.Tensor]]:
+    """Repeat the evaluator's native motion-to-environment batches."""
+    if trials_per_motion < 1:
+        raise ValueError("trials_per_motion must be at least 1")
+
+    native_batches = evaluator._build_eval_batches()
+    batches = []
+    for trial_index in range(trials_per_motion):
+        for env_ids, motion_ids in native_batches:
+            batches.append(
+                {
+                    "env_ids": env_ids.clone(),
+                    "motion_ids": motion_ids.clone(),
+                    "trial_indices": torch.full_like(
+                        motion_ids,
+                        trial_index,
+                    ),
+                }
+            )
+    return batches
+
+
 def _parallel_evaluation_compatibility(evaluator: Any) -> torch.Tensor:
     """Build the motion compatibility matrix for inference trial scheduling."""
 
@@ -158,6 +183,82 @@ def _mask_parallel_trial_actions(
     return actions
 
 
+def _quaternion_distance(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+) -> torch.Tensor:
+    """Return a sign-invariant Euclidean quaternion distance."""
+    return torch.minimum(
+        torch.linalg.vector_norm(actual - expected, dim=-1),
+        torch.linalg.vector_norm(actual + expected, dim=-1),
+    )
+
+
+def _parallel_reset_diagnostics(
+    evaluator: Any,
+    env_ids: torch.Tensor,
+    motion_ids: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    """Measure reset-state errors for every trial in a wave."""
+    manager = evaluator.motion_manager
+    assigned_motion_ids = manager.motion_ids[env_ids]
+    if not torch.equal(assigned_motion_ids, motion_ids):
+        mismatched = torch.where(assigned_motion_ids != motion_ids)[0][:16]
+        raise RuntimeError(
+            "Parallel reset changed scheduled motion IDs at batch indices "
+            f"{mismatched.tolist()}"
+        )
+
+    motion_times = manager.motion_times[env_ids]
+    reference = evaluator.motion_lib.get_motion_state(motion_ids, motion_times)
+    simulator = evaluator.env.simulator
+    root_state = simulator.get_root_state(env_ids)
+    dof_state = simulator.get_dof_state(env_ids)
+    respawn_offset = evaluator.env.respawn_root_offset[env_ids]
+
+    diagnostics = {
+        "motion_time_abs": motion_times.abs(),
+        "robot_root_pos_error": torch.linalg.vector_norm(
+            root_state.root_pos - (reference.root_pos + respawn_offset),
+            dim=-1,
+        ),
+        "robot_root_rot_error": _quaternion_distance(
+            root_state.root_rot,
+            reference.root_rot,
+        ),
+        "robot_dof_pos_error": (dof_state.dof_pos - reference.dof_pos)
+        .abs()
+        .amax(dim=-1),
+    }
+
+    if evaluator.env.scene_lib.num_objects_per_scene > 0:
+        expected_object = evaluator.env.scene_lib.get_scene_pose(
+            env_ids,
+            motion_times,
+            respawn_offset=evaluator.env.config.ref_object_respawn_offset,
+            motion_ids=motion_ids,
+        )
+        expected_object.root_pos += respawn_offset.unsqueeze(1)
+        actual_object = simulator.get_object_root_state(env_ids)
+        diagnostics["object_root_pos_error"] = torch.linalg.vector_norm(
+            actual_object.root_pos - expected_object.root_pos,
+            dim=-1,
+        ).amax(dim=-1)
+        diagnostics["object_root_rot_error"] = _quaternion_distance(
+            actual_object.root_rot,
+            expected_object.root_rot,
+        ).amax(dim=-1)
+
+    nonfinite = {
+        name: torch.where(~torch.isfinite(values))[0][:16].tolist()
+        for name, values in diagnostics.items()
+        if not torch.isfinite(values).all()
+    }
+    if nonfinite:
+        raise RuntimeError(f"Non-finite parallel reset diagnostics: {nonfinite}")
+    return diagnostics
+
+
 def _parallel_trial_result(
     motion_id: int,
     total_steps: int,
@@ -167,6 +268,9 @@ def _parallel_trial_result(
     component_counts: Dict[str, torch.Tensor],
     batch_index: int,
     failure_components: set[str],
+    wave_index: int,
+    env_id: int,
+    reset_diagnostics: Dict[str, torch.Tensor] | None,
 ) -> Dict[str, Any]:
     component_means = {}
     for name, sums in component_sums.items():
@@ -178,8 +282,11 @@ def _parallel_trial_result(
         )
     return {
         "motion_id": motion_id,
+        "wave_index": wave_index,
+        "env_id": env_id,
         "evaluated": total_steps > 0,
         "success": total_steps > 0 and not failed,
+        "first_failure_step": execution_steps if failed else None,
         "execution_steps": execution_steps,
         "total_steps": total_steps,
         "execution_fraction": (
@@ -187,6 +294,14 @@ def _parallel_trial_result(
         ),
         "component_means": component_means,
         "failure_components": sorted(failure_components),
+        "reset_diagnostics": (
+            {
+                name: float(values[batch_index].item())
+                for name, values in reset_diagnostics.items()
+            }
+            if reset_diagnostics is not None
+            else None
+        ),
     }
 
 
@@ -195,19 +310,47 @@ def run_parallel_mimic_trials(
     evaluator: Any,
     trials_per_motion: int,
     seed: int = 0,
+    batch_mode: str = "random",
+    park_completed: bool = True,
+    verify_reset_state: bool = False,
 ) -> List[Dict[str, Any]]:
     """Evaluate repeated Mimic trials concurrently across compatible envs."""
-
-    compatibility = _parallel_evaluation_compatibility(evaluator)
-    batches = build_parallel_trial_batches(
-        compatibility,
-        trials_per_motion,
-        seed,
+    if batch_mode == "random":
+        compatibility = _parallel_evaluation_compatibility(evaluator)
+        batches = build_parallel_trial_batches(
+            compatibility,
+            trials_per_motion,
+            seed,
+        )
+    elif batch_mode == "standard":
+        batches = build_standard_trial_batches(evaluator, trials_per_motion)
+    else:
+        raise ValueError(
+            "batch_mode must be either 'random' or 'standard', got "
+            f"{batch_mode!r}"
+        )
+    num_library_motions = int(evaluator.motion_lib.num_motions())
+    scheduled_motion_ids = sorted(
+        {
+            int(motion_id)
+            for batch in batches
+            for motion_id in batch["motion_ids"].detach().cpu().tolist()
+        }
     )
-    num_motions = int(evaluator.motion_lib.num_motions())
-    trial_records: List[List[Dict[str, Any] | None]] = [
-        [None] * trials_per_motion for _ in range(num_motions)
+    invalid_motion_ids = [
+        motion_id
+        for motion_id in scheduled_motion_ids
+        if motion_id < 0 or motion_id >= num_library_motions
     ]
+    if invalid_motion_ids:
+        raise ValueError(
+            "Evaluation batches contain motion IDs outside the motion library: "
+            f"{invalid_motion_ids[:16]}"
+        )
+    trial_records: Dict[int, List[Dict[str, Any] | None]] = {
+        motion_id: [None] * trials_per_motion
+        for motion_id in scheduled_motion_ids
+    }
 
     config = evaluator.config
     collect_trajectory_metrics = config.collect_trajectory_metrics
@@ -227,7 +370,7 @@ def run_parallel_mimic_trials(
         motion_frame_limits = (
             evaluator.motion_lib.get_motion_length(None) / evaluator.env.dt
         ).floor().long().clamp(max=config.max_eval_steps)
-        total_trials = num_motions * trials_per_motion
+        total_trials = sum(len(batch["motion_ids"]) for batch in batches)
         completed_trials = 0
 
         for wave_index, batch in enumerate(batches, start=1):
@@ -254,6 +397,21 @@ def run_parallel_mimic_trials(
                 sample_flat=True,
                 disable_motion_resample=True,
             )
+            reset_diagnostics = None
+            if verify_reset_state:
+                reset_diagnostics = _parallel_reset_diagnostics(
+                    evaluator,
+                    env_ids,
+                    motion_ids,
+                )
+                maxima = ", ".join(
+                    f"{name}={values.max().item():.6g}"
+                    for name, values in reset_diagnostics.items()
+                )
+                print(
+                    f"[parallel-eval] wave {wave_index} reset: {maxima}",
+                    flush=True,
+                )
             evaluator.agent.pre_collect_step(0)
             obs = evaluator.agent.add_agent_info_to_obs(obs)
             obs_td = evaluator.agent.obs_dict_to_tensordict(obs)
@@ -297,11 +455,14 @@ def run_parallel_mimic_trials(
                 # Every environment still advances in the vectorized simulator.
                 # Keep parked and completed trials from being actuated;
                 # otherwise state leaks across waves when environments are reused.
+                action_active = (
+                    active if park_completed else torch.ones_like(active)
+                )
                 actions = _mask_parallel_trial_actions(
                     actions,
                     inactive_env_ids,
                     env_ids,
-                    active,
+                    action_active,
                 )
                 if ema_alpha is not None:
                     previous_actions = actions.clone()
@@ -339,7 +500,7 @@ def run_parallel_mimic_trials(
                 failed |= newly_failed
 
                 finished = active & (frame_limits <= step_index + 1)
-                if finished.any():
+                if park_completed and finished.any():
                     evaluator.env.simulator.park_envs(env_ids[finished])
 
             for batch_index in range(batch_size):
@@ -354,13 +515,36 @@ def run_parallel_mimic_trials(
                     component_counts=component_counts,
                     batch_index=batch_index,
                     failure_components=failure_components[batch_index],
+                    wave_index=wave_index,
+                    env_id=int(env_ids[batch_index].item()),
+                    reset_diagnostics=reset_diagnostics,
                 )
+                if trial_records[motion_id][trial_index] is not None:
+                    raise RuntimeError(
+                        "Parallel evaluation scheduled duplicate trial "
+                        f"({motion_id}, {trial_index})"
+                    )
                 trial_records[motion_id][trial_index] = record
+            wave_evaluated = sum(
+                int(int(frame_limits[index].item()) > 0)
+                for index in range(batch_size)
+            )
+            wave_successes = sum(
+                int(not bool(failed[index].item()))
+                for index in range(batch_size)
+                if int(frame_limits[index].item()) > 0
+            )
+            print(
+                f"[parallel-eval] wave {wave_index} success: "
+                f"{wave_successes}/{wave_evaluated} "
+                f"({wave_successes / max(wave_evaluated, 1):.2%})",
+                flush=True,
+            )
             completed_trials += batch_size
 
         missing_records = [
             (motion_id, trial_index)
-            for motion_id, records in enumerate(trial_records)
+            for motion_id, records in trial_records.items()
             for trial_index, record in enumerate(records)
             if record is None
         ]
@@ -374,7 +558,7 @@ def run_parallel_mimic_trials(
             {
                 "motions": [
                     trial_records[motion_id][trial_index]
-                    for motion_id in range(num_motions)
+                    for motion_id in scheduled_motion_ids
                 ]
             }
             for trial_index in range(trials_per_motion)
@@ -396,10 +580,31 @@ def aggregate_best_trials(
     if not trial_results:
         return {"num_trials": 0, "num_motions": 0, "motions": []}
 
-    num_motions = len(trial_results[0]["motions"])
-    if len(motion_names) != num_motions:
+    scheduled_motion_ids = [
+        int(record["motion_id"])
+        for record in trial_results[0]["motions"]
+    ]
+    if len(set(scheduled_motion_ids)) != len(scheduled_motion_ids):
+        raise ValueError("Trial results contain duplicate motion IDs")
+    for trial_index, trial_result in enumerate(trial_results[1:], start=2):
+        trial_motion_ids = [
+            int(record["motion_id"])
+            for record in trial_result["motions"]
+        ]
+        if trial_motion_ids != scheduled_motion_ids:
+            raise ValueError(
+                "Trial results do not contain the same scheduled motions in "
+                f"trial {trial_index}"
+            )
+    invalid_motion_ids = [
+        motion_id
+        for motion_id in scheduled_motion_ids
+        if motion_id < 0 or motion_id >= len(motion_names)
+    ]
+    if invalid_motion_ids:
         raise ValueError(
-            f"Expected {num_motions} motion names, got {len(motion_names)}"
+            "Missing names for scheduled motion IDs "
+            f"{invalid_motion_ids[:16]}"
         )
 
     def finite_mean(values: List[float]) -> float:
@@ -416,10 +621,10 @@ def aggregate_best_trials(
     evaluated_trials = 0
     cumulative_successes = [0] * len(trial_results)
 
-    for motion_id in range(num_motions):
+    for result_index, motion_id in enumerate(scheduled_motion_ids):
         candidates = []
         for trial_index, trial_result in enumerate(trial_results, start=1):
-            candidate = dict(trial_result["motions"][motion_id])
+            candidate = dict(trial_result["motions"][result_index])
             candidate["trial_index"] = trial_index
             candidates.append(candidate)
             if candidate["evaluated"]:

@@ -282,6 +282,30 @@ def create_parser():
         help="Seed used to vary compatible motion-to-environment assignments.",
     )
     parser.add_argument(
+        "--parallel-batch-mode",
+        choices=("random", "standard"),
+        default="random",
+        help=(
+            "Batch scheduler for repeated Mimic trials. 'standard' repeats the "
+            "native training-evaluation batches."
+        ),
+    )
+    parser.add_argument(
+        "--parallel-park-completed",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Park motions after their reference frames end. Disable this to "
+            "match standard evaluation rollout behavior."
+        ),
+    )
+    parser.add_argument(
+        "--parallel-verify-reset-state",
+        action="store_true",
+        default=False,
+        help="Record per-trial robot/object reset-state errors in the output JSON.",
+    )
+    parser.add_argument(
         "--posterior-anchor-rotation-mode",
         type=str,
         default=None,
@@ -598,6 +622,15 @@ def _print_best_trial_summary(summary: dict, output_path: Path) -> None:
     print(f"PRIVATE-STYLE BEST-OF-{summary['num_trials']} RESULTS")
     print("=" * 60)
     print(f"  Motions Evaluated: {summary['num_motions']}")
+    options = summary.get("evaluation_options")
+    if options is not None:
+        print(
+            "  Evaluation Options: "
+            f"batch_mode={options['batch_mode']}, "
+            f"park_completed={options['park_completed']}, "
+            f"seed={options['seed']}, "
+            f"verify_reset_state={options['verify_reset_state']}"
+        )
     print(f"  Per-Trial Success Rate: {summary['per_trial_success_rate']:.6f}")
     print(f"  Average Trial Human Error: {summary['average_trial_human_error']:.6f}")
     print(f"  Average Trial Object Error: {summary['average_trial_object_error']:.6f}")
@@ -1635,6 +1668,15 @@ def main():
         raise ValueError(
             "--best-trial-output requires --parallel-trials-per-motion."
         )
+    if args.parallel_trials_per_motion is None and (
+        args.parallel_batch_mode != "random"
+        or not args.parallel_park_completed
+        or args.parallel_verify_reset_state
+    ):
+        raise ValueError(
+            "Parallel evaluation options require "
+            "--parallel-trials-per-motion."
+        )
 
     if args.random_text_single_video and not args.random_text_videos:
         raise ValueError("--random-text-single-video requires --random-text-videos.")
@@ -2088,11 +2130,20 @@ def main():
                     agent.evaluator,
                     args.parallel_trials_per_motion,
                     args.parallel_trial_seed,
+                    batch_mode=args.parallel_batch_mode,
+                    park_completed=args.parallel_park_completed,
+                    verify_reset_state=args.parallel_verify_reset_state,
                 )
                 summary = aggregate_best_trials(
                     trial_results,
                     _motion_names_for_evaluation(agent.evaluator.motion_lib),
                 )
+                summary["evaluation_options"] = {
+                    "batch_mode": args.parallel_batch_mode,
+                    "park_completed": args.parallel_park_completed,
+                    "seed": args.parallel_trial_seed,
+                    "verify_reset_state": args.parallel_verify_reset_state,
+                }
                 output_path = (
                     Path(args.best_trial_output).expanduser()
                     if args.best_trial_output is not None
