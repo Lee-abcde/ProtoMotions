@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 
 import torch
 
@@ -60,6 +61,7 @@ RIGHT_FINGERTIP_NAMES = [
     "R_Pinky3",
 ]
 FINGER_NAMES = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
+FINGER_ACTION_TANH_GAIN = 2.0
 # Distal capsule endpoints in each fingertip body's local frame.
 LEFT_FINGERTIP_LOCAL_OFFSETS = [
     [0.0140, 0.0180, -0.0025],
@@ -153,6 +155,25 @@ def _finger_dof_groups(
         torch.tensor(finger_dof_ids, dtype=torch.long),
         torch.tensor(finger_effort_limits, dtype=torch.float),
     )
+
+
+def _grip_action_tanh_gain(robot_cfg: RobotConfig) -> torch.Tensor:
+    """Use more of the joint range for the DOFs that close the fingers."""
+    gain = torch.ones(robot_cfg.kinematic_info.num_dofs, dtype=torch.float)
+    for dof_id, dof_name in enumerate(robot_cfg.kinematic_info.dof_names):
+        is_four_finger_flexion = dof_name.endswith("_x") and any(
+            dof_name.startswith(f"{side}_{finger}")
+            for side in ("L", "R")
+            for finger in ("Index", "Middle", "Ring", "Pinky")
+        )
+        is_thumb_flexion = dof_name.endswith("_y") and any(
+            dof_name.startswith(f"{side}_Thumb") for side in ("L", "R")
+        )
+        if is_four_finger_flexion or is_thumb_flexion:
+            gain[dof_id] = FINGER_ACTION_TANH_GAIN
+    if int((gain != 1.0).sum()) != 30:
+        raise ValueError("Expected 30 SMPL-X grip DOFs for finger tanh gain")
+    return gain
 
 
 def _intermimic_body_groups(robot_cfg: RobotConfig):
@@ -357,7 +378,10 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             ),
             "required_hand_contact": intermimic_contact_loss_term_factory(),
         },
-        action_config=make_asymmetric_pd_action_config(robot_cfg),
+        action_config=make_asymmetric_pd_action_config(
+            robot_cfg,
+            action_tanh_gain=_grip_action_tanh_gain(robot_cfg),
+        ),
         motion_manager=MimicMotionManagerConfig(
             # Hybrid initialization: 10% from frame zero; PSI samples the
             # remaining starts from full-horizon, difficult frames.
@@ -403,9 +427,15 @@ def agent_config(
         "previous_actions",
     ]
 
+    actor_logstd = [-2.9] * robot_config.kinematic_info.num_dofs
+    for side in ("L", "R"):
+        finger_dof_ids, _ = _finger_dof_groups(robot_config, side)
+        for dof_id in finger_dof_ids.flatten().tolist():
+            actor_logstd[dof_id] = math.log(0.10)
+
     actor_config = PPOActorConfig(
         num_out=robot_config.kinematic_info.num_dofs,
-        actor_logstd=-2.9,
+        actor_logstd=actor_logstd,
         learnable_std=False,
         in_keys=input_keys,
         mu_key="actor_trunk_out",
