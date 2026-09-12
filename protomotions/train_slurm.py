@@ -209,6 +209,21 @@ def create_parser():
         default=300,
         help="Seconds before a distributed collective operation times out",
     )
+    parser.add_argument(
+        "--ujitso-cache-dir",
+        type=str,
+        default=None,
+        help=(
+            "Base directory for Isaac Sim UJITSO cache. Euler Isaac Lab jobs "
+            "default to /tmp/protomotions_ujitso."
+        ),
+    )
+    parser.add_argument(
+        "--ujitso-cache-budget-mb",
+        type=int,
+        default=None,
+        help="UJITSO disk cache budget in MB. Euler Isaac Lab jobs default to 1024.",
+    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--overrides", nargs="*", default=[], help="Config overrides (key=value)")
 
@@ -362,6 +377,18 @@ def build_train_agent_command(args):
             cmd += ["--slurm-autoresume-after", args.slurm_autoresume_after]
     if args.checkpoint:
         cmd += ["--checkpoint", args.checkpoint]
+    if args.simulator == "isaaclab":
+        ujitso_cache_dir = args.ujitso_cache_dir
+        ujitso_cache_budget_mb = args.ujitso_cache_budget_mb
+        if args.cluster == "euler":
+            if ujitso_cache_dir is None:
+                ujitso_cache_dir = "/tmp/protomotions_ujitso"
+            if ujitso_cache_budget_mb is None:
+                ujitso_cache_budget_mb = 1024
+        if ujitso_cache_dir is not None:
+            cmd += ["--ujitso-cache-dir", ujitso_cache_dir]
+        if ujitso_cache_budget_mb is not None:
+            cmd += ["--ujitso-cache-budget-mb", ujitso_cache_budget_mb]
     if args.overrides:
         cmd += ["--overrides", *args.overrides]
 
@@ -429,6 +456,16 @@ def build_job_command(args, exp_folder, python_path):
         job_cmd += f"--use-wandb --wandb-project={args.wandb_project} "
     if args.checkpoint:
         job_cmd += f"--checkpoint={args.checkpoint} "
+    if args.simulator == "isaaclab":
+        if args.ujitso_cache_dir is not None:
+            job_cmd += (
+                f"--ujitso-cache-dir={shlex.quote(args.ujitso_cache_dir)} "
+            )
+        if args.ujitso_cache_budget_mb is not None:
+            job_cmd += (
+                "--ujitso-cache-budget-mb="
+                f"{args.ujitso_cache_budget_mb} "
+            )
     if args.overrides:
         job_cmd += f"--overrides {' '.join(args.overrides)} "
 

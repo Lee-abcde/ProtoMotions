@@ -215,6 +215,21 @@ def create_parser():
         help="Path to checkpoint file to resume from",
     )
     parser.add_argument(
+        "--ujitso-cache-dir",
+        type=str,
+        default=None,
+        help=(
+            "Base directory for the Isaac Sim UJITSO DerivedDataCache. "
+            "Distributed runs create a separate job/rank subdirectory."
+        ),
+    )
+    parser.add_argument(
+        "--ujitso-cache-budget-mb",
+        type=int,
+        default=None,
+        help="Isaac Sim UJITSO large-chunk disk cache budget in MB.",
+    )
+    parser.add_argument(
         "--use-wandb",
         action="store_true",
         default=False,
@@ -849,6 +864,32 @@ def main():
     simulator_extra_params = {}
     if args.simulator == "isaaclab":
         app_launcher_flags = {"headless": args.headless, "device": str(fabric.device)}
+        kit_args = []
+        ujitso_cache_dir = getattr(args, "ujitso_cache_dir", None)
+        if ujitso_cache_dir is not None:
+            cache_path = Path(ujitso_cache_dir).expanduser()
+            if fabric.world_size > 1:
+                job_id = os.environ.get("SLURM_JOB_ID", "local")
+                cache_path = (
+                    cache_path / f"job_{job_id}" / f"rank_{fabric.global_rank}"
+                )
+            cache_path.mkdir(parents=True, exist_ok=True)
+            if any(character.isspace() for character in str(cache_path)):
+                raise ValueError("--ujitso-cache-dir must not contain whitespace")
+            kit_args.append(
+                f"--/UJITSO/datastore/localCachePath={cache_path.resolve()}"
+            )
+
+        ujitso_cache_budget_mb = getattr(args, "ujitso_cache_budget_mb", None)
+        if ujitso_cache_budget_mb is not None:
+            if ujitso_cache_budget_mb <= 0:
+                raise ValueError("--ujitso-cache-budget-mb must be greater than zero")
+            kit_args.append(
+                "--/UJITSO/datastore/localDataStore/largeChunkDiskBudgetMB="
+                f"{ujitso_cache_budget_mb}"
+            )
+        if kit_args:
+            app_launcher_flags["kit_args"] = " ".join(kit_args)
         if not args.headless:
             app_launcher_flags["visualizer"] = ["kit"]
         if fabric.world_size > 1:
