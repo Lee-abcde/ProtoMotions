@@ -67,20 +67,48 @@ def nearest_object_surface_vectors(
     object_rot: Tensor,
     neutral_pointclouds: Tensor,
     object_valid_mask: Tensor,
+    point_chunk_size: int = 128,
 ) -> Tensor:
-    """Compute body-to-nearest-valid-object-surface vectors in world space."""
+    """Compute nearest object-surface vectors without a full body-point grid."""
     points, valid = flatten_object_pointclouds(
         object_pos, object_rot, neutral_pointclouds, object_valid_mask
     )
+    if point_chunk_size < 1:
+        raise ValueError("point_chunk_size must be positive")
+
+    best_squared = None
+    best_vectors = None
     # InterMimic encodes nearest-surface geometry as body - surface point.
-    vectors = body_pos.unsqueeze(2) - points.unsqueeze(1)
-    distances = vectors.norm(dim=-1).masked_fill(
-        ~valid.unsqueeze(1), float("inf")
-    )
-    nearest = distances.argmin(dim=-1)
-    return vectors.gather(
-        2, nearest.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)
-    ).squeeze(2)
+    # Chunking avoids the multi-GiB [batch, bodies, points, 3] temporary used
+    # by full OMOMO evaluation with 2048 envs and 1024 points per object.
+    for start in range(0, points.shape[1], point_chunk_size):
+        end = min(start + point_chunk_size, points.shape[1])
+        vectors = body_pos.unsqueeze(2) - points[:, None, start:end]
+        squared = vectors.square().sum(dim=-1).masked_fill(
+            ~valid[:, None, start:end], float("inf")
+        )
+        chunk_squared, chunk_nearest = squared.min(dim=-1)
+        chunk_vectors = vectors.gather(
+            2,
+            chunk_nearest.unsqueeze(-1)
+            .unsqueeze(-1)
+            .expand(-1, -1, 1, 3),
+        ).squeeze(2)
+
+        if best_squared is None:
+            best_squared = chunk_squared
+            best_vectors = chunk_vectors
+            continue
+
+        improved = chunk_squared < best_squared
+        best_squared = torch.minimum(best_squared, chunk_squared)
+        best_vectors = torch.where(
+            improved.unsqueeze(-1), chunk_vectors, best_vectors
+        )
+
+    if best_vectors is None:
+        raise ValueError("At least one object surface point is required")
+    return best_vectors
 
 
 def nearest_object_surface_distances(
