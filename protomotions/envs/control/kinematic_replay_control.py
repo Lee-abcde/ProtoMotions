@@ -124,6 +124,20 @@ class KinematicReplayControl(ControlComponent):
         
         # Set robot state directly
         self.env.simulator.reset_envs(ref_reset_state, ref_object_state, env_ids)
+
+        # Support surfaces are separate kinematic actors rather than scene
+        # objects. Keep them in sync here as well as during BaseEnv resets so
+        # interactive motion switches (for example, F9 in kinematic playback)
+        # immediately show or hide the tabletop for the selected motion.
+        reset_support_surfaces = getattr(
+            self.env.simulator, "reset_support_surfaces", None
+        )
+        if reset_support_surfaces is not None:
+            reset_support_surfaces(
+                env_ids,
+                self.env.motion_manager.motion_ids[env_ids],
+                offset,
+            )
         
         # Prevent double reset
         self.env.progress_buf[env_ids] = 0
