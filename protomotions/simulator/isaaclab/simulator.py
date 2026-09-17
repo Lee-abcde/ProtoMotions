@@ -83,6 +83,29 @@ def _build_sequential_interactive_scene(scene_cfg):
         cloner.CloneCfg = original_clone_cfg
 
 
+def _author_object_start_poses(
+    stage: Usd.Stage,
+    env_prim_paths: List[str],
+    world_poses: torch.Tensor,
+) -> None:
+    """Place objects at their scene poses before PhysX parses the stage."""
+    poses = world_poses.detach().cpu().tolist()
+    for env_path, env_poses in zip(env_prim_paths, poses):
+        origin = stage.GetPrimAtPath(env_path).GetAttribute("xformOp:translate").Get()
+        for object_index, (x, y, z, qx, qy, qz, qw) in enumerate(env_poses):
+            prim = stage.GetPrimAtPath(f"{env_path}/Object_{object_index}")
+            translate = prim.GetAttribute("xformOp:translate")
+            orient = prim.GetAttribute("xformOp:orient")
+            translate.Set(
+                type(translate.Get())(
+                    x - origin[0],
+                    y - origin[1],
+                    z - origin[2],
+                )
+            )
+            orient.Set(type(orient.Get())(qw, qx, qy, qz))
+
+
 def _disable_embedded_robot_ground_colliders(stage: Usd.Stage) -> Tuple[str, ...]:
     """Disable top-level ground planes imported with a robot MJCF.
 
@@ -119,6 +142,7 @@ class IsaacLabSimulator(Simulator):
     }
     # Object contact filters are ordered as ground, support surface, objects.
     _SUPPORT_SURFACE_OBJECT_CONTACT_FILTER_INDEX = 1
+    _OBJECT_RESET_STAGING_HEIGHT = 10.0
 
     # =====================================================
     # Group 1: Initialization & Configuration
@@ -187,6 +211,12 @@ class IsaacLabSimulator(Simulator):
         scene_cfg = self._get_scene_cfg()
 
         self._scene = _build_sequential_interactive_scene(scene_cfg)
+        if self.scene_lib.num_scenes() > 0:
+            _author_object_start_poses(
+                self._scene.stage,
+                self._scene.env_prim_paths,
+                self._initial_scene_pos,
+            )
         if not self.headless:
             self._setup_keyboard()
         print("[INFO]: Setup complete...")
@@ -301,14 +331,24 @@ class IsaacLabSimulator(Simulator):
                 env_ids,
             )
 
-        # Spawn objects at origin (actual positions set via reset_envs later)
+        # Creating objects at their scene poses avoids a large first-reset teleport.
+        scene_positions = self.scene_lib.get_scene_positions(
+            self.terrain,
+            self.device,
+        )
         initial_obj_pos = torch.zeros(
             (self.num_envs, self.scene_lib.num_objects_per_scene, 7),
             device=self.device,
             dtype=torch.float,
         )
-        # Set identity quaternions (xyzw format for IsaacLab 3)
-        initial_obj_pos[..., 6] = 1.0  # w=1 for identity quaternion
+        for env_id, scene in enumerate(self.scene_lib.scenes):
+            for object_index, obj in enumerate(scene.objects):
+                initial_obj_pos[env_id, object_index, :3] = (
+                    obj.translation[0].to(self.device) + scene_positions[env_id]
+                )
+                initial_obj_pos[env_id, object_index, 3:7] = obj.rotation[0].to(
+                    self.device
+                )
 
         # Build object configurations for IsaacLab
         objects_cfgs = []
@@ -761,10 +801,17 @@ class IsaacLabSimulator(Simulator):
         exact reference state) after this method returns, so rendering here
         would display the pre-restoration physics state.
         """
-        for _ in range(self.decimation):
+        resettle_pending = getattr(self, "_object_reset_pending", False)
+        for substep_index in range(self.decimation):
             self._apply_control()
+            if resettle_pending and substep_index == 0:
+                self._write_staged_object_reset(staged=True)
             self._scene.write_data_to_sim()
             self._sim.step(render=False)
+            if resettle_pending and substep_index == 0:
+                self._write_staged_object_reset(staged=False)
+                self._object_reset_mask.zero_()
+                self._object_reset_pending = False
             self._scene.update(dt=self._sim.get_physics_dt())
 
     def _apply_simulator_pd_targets(self, pd_targets: torch.Tensor) -> None:
@@ -815,10 +862,49 @@ class IsaacLabSimulator(Simulator):
                 ],
                 dim=-1,
             ).reshape(len(env_ids), self.scene_lib.num_objects_per_scene, 13)
+            self._stage_object_resets(env_ids, init_object_root_state)
             for object_idx in range(len(self._object)):
                 self._object[object_idx].write_root_state_to_sim(
                     init_object_root_state[:, object_idx], env_ids
                 )
+
+    def _stage_object_resets(
+        self,
+        env_ids: torch.Tensor,
+        reset_state: torch.Tensor,
+    ) -> None:
+        """Schedule reset objects for a collision-free reset substep."""
+        if not hasattr(self, "_object_reset_mask"):
+            num_objects = len(self._object)
+            self._object_reset_mask = torch.zeros(
+                (self.num_envs, num_objects),
+                dtype=torch.bool,
+                device=self.device,
+            )
+            self._object_reset_state = torch.zeros(
+                (self.num_envs, num_objects, 13),
+                dtype=torch.float,
+                device=self.device,
+            )
+
+        self._object_reset_mask[env_ids] = True
+        self._object_reset_state[env_ids] = reset_state
+        self._object_reset_pending = True
+
+    def _write_staged_object_reset(self, staged: bool) -> None:
+        """Move reset objects above the scene or restore their target state."""
+        for object_index, obj in enumerate(self._object):
+            env_ids = torch.nonzero(
+                self._object_reset_mask[:, object_index],
+                as_tuple=False,
+            ).flatten()
+            if env_ids.numel() == 0:
+                continue
+            state = self._object_reset_state[env_ids, object_index].clone()
+            if staged:
+                state[:, 2] += self._OBJECT_RESET_STAGING_HEIGHT
+                state[:, 7:] = 0.0
+            obj.write_root_state_to_sim(state, env_ids)
 
     def reset_support_surfaces(
         self,
