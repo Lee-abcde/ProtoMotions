@@ -85,14 +85,24 @@ def detect_support_surfaces(
     terminal_window_seconds: float = 0.5,
     min_terminal_bottom_height: float = 0.08,
     max_initial_bottom_height: float = 0.03,
+    max_endpoint_height_delta: float = 0.03,
+    max_initial_speed: float = 0.05,
+    max_initial_bottom_range: float = 0.03,
     max_terminal_speed: float = 0.05,
     max_terminal_contact_fraction: float = 0.05,
     max_terminal_bottom_range: float = 0.03,
-    margin: float = 0.1,
+    margin: float = 0.05,
+    max_tabletop_size: float = 0.5,
     thickness: float = 0.04,
     hidden_z: float = -10.0,
 ) -> tuple[dict | None, list[dict]]:
-    """Detect placement clips and build one shared kinematic-tabletop spec."""
+    """Detect elevated support endpoints and build a shared tabletop spec.
+
+    A clip needs support when an endpoint object pose is elevated and stable.
+    The support is placed at the terminal endpoint for ground-to-table and
+    same-table-return clips, or at the initial endpoint for table-to-ground
+    clips.
+    """
     candidates = []
     for scene_idx, scene in enumerate(scenes):
         if len(scene.objects) != 1:
@@ -106,6 +116,10 @@ def detect_support_surfaces(
             max(2, int(round(float(obj.fps) * terminal_window_seconds))),
         )
         terminal_slice = slice(obj.translation.shape[0] - window, None)
+        initial_slice = slice(0, window)
+        initial_speed = (
+            obj.linear_velocity[initial_slice].norm(dim=-1).median().item()
+        )
         terminal_speed = (
             obj.linear_velocity[terminal_slice].norm(dim=-1).median().item()
         )
@@ -115,6 +129,16 @@ def detect_support_surfaces(
 
         vertices = _object_vertices(obj)
         initial_bottom = _world_vertices(obj, vertices, 0)[:, 2].min().item()
+        initial_bottoms = torch.tensor(
+            [
+                _world_vertices(obj, vertices, frame)[:, 2].min().item()
+                for frame in range(window)
+            ]
+        )
+        initial_bottom_median = initial_bottoms.median().item()
+        initial_bottom_range = (
+            initial_bottoms.max() - initial_bottoms.min()
+        ).item()
         terminal_bottoms = torch.tensor(
             [
                 _world_vertices(obj, vertices, frame)[:, 2].min().item()
@@ -129,21 +153,65 @@ def detect_support_surfaces(
             terminal_bottoms.max() - terminal_bottoms.min()
         ).item()
 
-        needs_support = (
-            initial_bottom <= max_initial_bottom_height
-            and terminal_bottom >= min_terminal_bottom_height
-            and terminal_speed <= max_terminal_speed
-            and terminal_contact_fraction <= max_terminal_contact_fraction
+        terminal_is_stable = (
+            terminal_speed <= max_terminal_speed
             and terminal_bottom_range <= max_terminal_bottom_range
         )
-        if not needs_support:
+        terminal_is_elevated = terminal_bottom >= min_terminal_bottom_height
+        initial_is_stable_and_elevated = (
+            initial_bottom_median >= min_terminal_bottom_height
+            and initial_speed <= max_initial_speed
+            and initial_bottom_range <= max_initial_bottom_range
+        )
+        placed_from_ground = (
+            initial_bottom <= max_initial_bottom_height
+            and terminal_contact_fraction <= max_terminal_contact_fraction
+        )
+        starts_on_same_support = (
+            initial_is_stable_and_elevated
+            and abs(terminal_bottom - initial_bottom_median)
+            <= max_endpoint_height_delta
+        )
+        ends_stable_on_ground = (
+            terminal_is_stable
+            and terminal_bottom <= max_initial_bottom_height
+        )
+
+        if terminal_is_stable and terminal_is_elevated and placed_from_ground:
+            detection_rule = "placed_from_ground"
+            support_frame = -1
+            support_top_height = terminal_bottom
+            center_between_endpoints = False
+        elif terminal_is_stable and terminal_is_elevated and starts_on_same_support:
+            detection_rule = "starts_on_same_support"
+            support_frame = -1
+            support_top_height = terminal_bottom
+            center_between_endpoints = True
+        elif initial_is_stable_and_elevated and ends_stable_on_ground:
+            detection_rule = "starts_elevated_ends_grounded"
+            support_frame = 0
+            support_top_height = initial_bottom_median
+            center_between_endpoints = False
+        else:
             continue
 
-        final_vertices = _world_vertices(obj, vertices, -1)
-        xy_min = final_vertices[:, :2].amin(dim=0)
-        xy_max = final_vertices[:, :2].amax(dim=0)
-        footprint = xy_max - xy_min
+        support_vertices = _world_vertices(obj, vertices, support_frame)
+        xy_min = support_vertices[:, :2].amin(dim=0)
+        xy_max = support_vertices[:, :2].amax(dim=0)
         center_xy = (xy_min + xy_max) * 0.5
+        if center_between_endpoints:
+            initial_vertices = _world_vertices(obj, vertices, 0)
+            initial_xy_min = initial_vertices[:, :2].amin(dim=0)
+            initial_xy_max = initial_vertices[:, :2].amax(dim=0)
+            initial_center_xy = (initial_xy_min + initial_xy_max) * 0.5
+            center_xy = (initial_center_xy + center_xy) * 0.5
+            combined_min = torch.minimum(initial_xy_min, xy_min)
+            combined_max = torch.maximum(initial_xy_max, xy_max)
+            footprint = 2.0 * torch.maximum(
+                center_xy - combined_min, combined_max - center_xy
+            )
+        else:
+            footprint = xy_max - xy_min
         candidates.append(
             {
                 "motion_id": int(scene.humanoid_motion_id),
@@ -151,12 +219,13 @@ def detect_support_surfaces(
                 "position": (
                     float(center_xy[0]),
                     float(center_xy[1]),
-                    terminal_bottom - thickness / 2.0,
+                    support_top_height - thickness / 2.0,
                 ),
-                "top_height": terminal_bottom,
+                "top_height": support_top_height,
                 "footprint": (float(footprint[0]), float(footprint[1])),
                 "terminal_speed": terminal_speed,
                 "terminal_contact_fraction": terminal_contact_fraction,
+                "detection_rule": detection_rule,
             }
         )
 
@@ -168,6 +237,8 @@ def detect_support_surfaces(
     # Stable, easy-to-read dimensions and a modest minimum tabletop footprint.
     width = max(0.4, math.ceil((width - 1e-6) / 0.05) * 0.05)
     depth = max(0.4, math.ceil((depth - 1e-6) / 0.05) * 0.05)
+    width = min(width, max_tabletop_size)
+    depth = min(depth, max_tabletop_size)
     metadata = {
         "schema_version": SUPPORT_SURFACE_SCHEMA_VERSION,
         "size": (width, depth, thickness),
