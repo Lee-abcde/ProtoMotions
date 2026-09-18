@@ -2084,6 +2084,15 @@ class BaseEnv:
         if "odom_start_heading_inv" in snapshot:
             self.odom_start_heading_inv.copy_(snapshot["odom_start_heading_inv"])
         self._current_noisy_obs = snapshot.get("_current_noisy_obs")
+
+        # The observation buffer still describes whatever the borrower left in
+        # the simulator. Rebuild it for every environment: partial resets only
+        # refresh the environments they reset, so anything else would hand the
+        # policy an observation of a state that no longer exists.
+        self._current_context = self._build_global_context(
+            self.simulator.get_robot_state()
+        )
+        self.compute_observations(context=self._current_context)
         self._current_context = None
 
         # IsaacGym needs an extra step after state restore to sync internal state
