@@ -1,14 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=joint_pvq
 #SBATCH --nodes=1
-#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
 #SBATCH --gpus=rtx_4090:8
 #SBATCH --cpus-per-task=8
 #SBATCH --mem-per-cpu=4G
 #SBATCH --tmp=80G
 #SBATCH --time=24:00:00
-#SBATCH --output=joint_pvq_%j.log
-#SBATCH --error=joint_pvq_%j.log
+# Absolute so the log lands next to the run outputs; the directory must exist.
+#SBATCH --output=/cluster/scratch/lijingy/joint_pvq_results/joint_pvq_%j.log
+#SBATCH --error=/cluster/scratch/lijingy/joint_pvq_results/joint_pvq_%j.log
 
 set -euo pipefail
 
@@ -119,6 +120,5 @@ apptainer exec "${container_args[@]}" "$CONTAINER" bash -lc \
   'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_multi_source_distill --distillation-sources examples/experiments/gcc/s1_joint_pvq_sources_euler.yaml --check-config-only --world-size 8'
 
 echo "Starting eight-rank training in $RUN_DIR"
-srun --kill-on-bad-exit=1 --wait=60 --ntasks=8 \
-  --gpus-per-task=rtx_4090:1 --gpu-bind=single:1 \
+srun --kill-on-bad-exit=1 --wait=60 \
   apptainer exec "${container_args[@]}" "$CONTAINER" bash -lc "$inner_script"
