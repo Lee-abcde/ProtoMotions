@@ -59,6 +59,18 @@ def parser():
     p.add_argument("--gradient-clip", type=float, default=50.0)
     p.add_argument("--save-every", type=int, default=100)
     p.add_argument("--eval-every", type=int, default=100)
+    p.add_argument(
+        "--use-wandb",
+        action="store_true",
+        default=False,
+        help="Enable Weights & Biases logging from rank zero",
+    )
+    p.add_argument(
+        "--wandb-project",
+        type=str,
+        default="physical_animation",
+        help="Weights & Biases project name",
+    )
     p.add_argument("--revive-every", type=int, default=100)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--timeout-minutes", type=int, default=120)
@@ -229,6 +241,50 @@ def save_checkpoint(
     os.replace(temporary, path)
 
 
+class WandbRun:
+    """Rank-zero Weights & Biases logging; a run id file keeps resumes in one run."""
+
+    def __init__(self, args, output_dir):
+        import wandb
+
+        output_dir = Path(output_dir)
+        id_file = output_dir / "wandb_id.txt"
+        run_id = id_file.read_text().strip() if id_file.is_file() else wandb.util.generate_id()
+        self.run = wandb.init(
+            project=args.wandb_project,
+            name=output_dir.name,
+            dir=str(output_dir),
+            id=run_id,
+            resume="allow",
+            config={k: v for k, v in vars(args).items() if k != "wandb_project"},
+        )
+        id_file.write_text(run_id)
+
+    @staticmethod
+    def _flatten(prefix, value, out):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                WandbRun._flatten(f"{prefix}/{key}", item, out)
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                WandbRun._flatten(f"{prefix}/{index}", item, out)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[prefix] = value
+        return out
+
+    def log_training(self, report):
+        metrics = self._flatten("train", {k: v for k, v in report.items()
+                                          if k not in ("iteration", "ranks")}, {})
+        self.run.log(metrics, step=report["iteration"])
+
+    def log_evaluation(self, report):
+        metrics = self._flatten(f"eval_{report['policy']}", report["summary"], {})
+        self.run.log(metrics, step=report["iteration"])
+
+    def finish(self):
+        self.run.finish()
+
+
 def write_report(path, report, append=False):
     """Write on rank zero through collective_call so I/O errors reach all ranks."""
     if dist.get_rank() != 0:
@@ -358,6 +414,7 @@ def run(args):
         lambda: prepare_output_directory(args) if rank == 0 else Path(args.output_dir)
     )
     torch.manual_seed(args.seed + rank)
+    wandb_run = WandbRun(args, output_dir) if args.use_wandb and rank == 0 else None
     random.seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     # All teachers are checked before constructing a simulator or taking actions.
@@ -511,6 +568,8 @@ def run(args):
                         json.dumps({"evaluation": report["summary"], "policy": label}),
                         flush=True,
                     )
+                    if wandb_run is not None:
+                        wandb_run.log_evaluation(report)
             # Evaluation restores simulator state; refresh context rather than reuse stale tensors.
             return env.get_obs()
 
@@ -649,6 +708,8 @@ def run(args):
                     ).tolist(),
                 }
                 print(json.dumps(report), flush=True)
+                if wandb_run is not None:
+                    wandb_run.log_training(report)
             collective_call(
                 lambda report=report: write_report(
                     output_dir / "metrics.jsonl", report, append=True
@@ -685,6 +746,8 @@ def run(args):
                     )
                 )
     finally:
+        if wandb_run is not None:
+            wandb_run.finish()
         launcher.app.close()
 
 

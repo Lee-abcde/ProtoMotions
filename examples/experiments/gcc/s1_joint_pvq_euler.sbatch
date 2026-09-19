@@ -27,7 +27,13 @@ ROLLOUT_STEPS="${ROLLOUT_STEPS:-32}"
 ITERATIONS="${ITERATIONS:-10000}"
 # Full student evaluation (all AMASS-X shards and every OMOMO subject); 0 disables it.
 EVAL_EVERY="${EVAL_EVERY:-1000}"
+# Weights & Biases: USE_WANDB=1 enables it. Online like train_slurm.py, with
+# credentials from ~/.netrc on the cluster; set WANDB_MODE=offline to defer upload.
+USE_WANDB="${USE_WANDB:-0}"
+WANDB_PROJECT="${WANDB_PROJECT:-physical_animation}"
+WANDB_MODE="${WANDB_MODE:-online}"
 export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS ITERATIONS EVAL_EVERY
+export USE_WANDB WANDB_PROJECT WANDB_MODE
 
 for path in "$CONTAINER" "$PROTOMOTIONS_DIR" "$DATA_DIR" "$HOI_TEACHER_DIR" "$LOCO_TEACHER_DIR"; do
   if [[ ! -e "$path" ]]; then
@@ -82,6 +88,15 @@ if [[ -f "/workspace/output/$RUN_NAME/last.ckpt" ]]; then
   resume_args=(--resume "/workspace/output/$RUN_NAME/last.ckpt")
 fi
 
+wandb_args=()
+if [[ "$USE_WANDB" == "1" ]]; then
+  export WANDB_DIR="/workspace/output/$RUN_NAME"
+  export WANDB_CACHE_DIR="/workspace/output/wandb_cache"
+  export WANDB_CONFIG_DIR="/workspace/output/wandb_config"
+  mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_CONFIG_DIR"
+  wandb_args=(--use-wandb --wandb-project "$WANDB_PROJECT")
+fi
+
 python -u -m protomotions.train_multi_source_distill \
   --distillation-sources examples/experiments/gcc/s1_joint_pvq_sources_euler.yaml \
   --output-dir "/workspace/output/$RUN_NAME" \
@@ -94,6 +109,7 @@ python -u -m protomotions.train_multi_source_distill \
   --ujitso-cache-dir /tmp/protomotions_ujitso \
   --ujitso-cache-budget-mb 1024 \
   --timeout-minutes 180 \
+  "${wandb_args[@]}" \
   "${resume_args[@]}"
 INNER
 )
