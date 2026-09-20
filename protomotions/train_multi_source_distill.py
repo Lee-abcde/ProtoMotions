@@ -11,12 +11,16 @@ runs without GPUs or IsaacLab using --check-config-only --world-size 5.
 from __future__ import annotations
 
 import argparse
+import atexit
+import faulthandler
 import json
 import os
 import random
 import re
 import socket
 import subprocess
+import sys
+import traceback
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
@@ -74,6 +78,10 @@ def parser():
     p.add_argument("--revive-every", type=int, default=100)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--timeout-minutes", type=int, default=120)
+    p.add_argument(
+        "--kit-log-dir",
+        help="Directory for per-rank Kit logs; keeps them after the job exits",
+    )
     p.add_argument(
         "--ujitso-cache-dir",
         help="Per-rank Isaac Sim kernel-cache root; recommended on node-local storage",
@@ -459,18 +467,27 @@ def run(args):
     launcher = collective_call(
         lambda: launch_isaaclab(
             device,
-            # DDP is initialized above. Keeping AppLauncher rank-local also
-            # preserves the CPU/thread limits assigned by Slurm per task.
-            distributed=False,
+            # Two Kit instances on one node need AppLauncher's multi-GPU setup
+            # (per-rank physics/active GPU and thread limits), the same way
+            # train_agent.py launches it; without it the second instance dies
+            # silently while building its scene.
+            distributed=world_size > 1,
             ujitso_cache_dir=args.ujitso_cache_dir,
             ujitso_cache_budget_mb=args.ujitso_cache_budget_mb,
+            kit_log_dir=args.kit_log_dir,
         )
     )
+    print(f"[rank {rank}] Kit is up", flush=True)
     try:
         env, obs, assigned, source_ids, local_ids, _cfg = collective_call(
             lambda: build_environment(
                 manifest, configs, rank, world_size, args.num_envs, device, launcher.app
             )
+        )
+        print(
+            f"[rank {rank}] environment ready: "
+            f"{[manifest.sources[i].id for i in assigned]}",
+            flush=True,
         )
         task = manifest.sources[assigned[0]].task
         router = collective_call(
@@ -788,6 +805,13 @@ def run(args):
                         else None
                     )
                 )
+    except BaseException:
+        # SimulationApp.close() in the finally below ends the process with
+        # os._exit(0), which would discard this traceback and the exit status.
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        raise
     finally:
         if wandb_run is not None:
             wandb_run.finish()
@@ -805,6 +829,8 @@ def preflight(args, world_size):
 
 
 def main():
+    # A native crash inside Kit or PhysX otherwise leaves no Python-side trace.
+    faulthandler.enable()
     args = parser().parse_args()
     if args.resume and args.warm_start:
         raise ValueError("Choose resume or warm-start, not both")
@@ -828,6 +854,13 @@ def main():
     ):
         if getattr(args, name) < 1:
             raise ValueError(f"{name} must be positive")
+    # Kit can end the process through SystemExit, which prints nothing at all.
+    atexit.register(
+        lambda: print(
+            f"[rank {os.environ.get('RANK', '0')}] interpreter shutting down",
+            flush=True,
+        )
+    )
     if args.check_config_only:
         manifest, configs = preflight(args, args.world_size)
         print(

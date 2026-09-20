@@ -66,9 +66,12 @@ export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 export TORCH_NCCL_DUMP_ON_TIMEOUT=1
 export TORCH_NCCL_DESYNC_DEBUG=1
 
+# --writable-tmpfs is a 64 MB in-memory layer on Euler, and Kit fills it while
+# converting the robot MJCF (OSError: No space left on device). A node-local
+# overlay directory has the whole local disk instead, and each rank needs its
+# own: two overlay mounts cannot share one work directory.
 container_args=(
   --nv
-  --writable-tmpfs
   --bind "$PROTOMOTIONS_DIR:/workspace/ProtoMotions:rw"
   --bind "$DATA_DIR:/workspace/protomotion_data:ro"
   --bind "$HOI_TEACHER_DIR:/workspace/hoi_teachers:ro"
@@ -88,6 +91,9 @@ export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
 export TMPDIR=/tmp
 export MPLCONFIGDIR="/tmp/matplotlib_rank_${SLURM_PROCID}"
 export PROTOMOTIONS_COLLISION_CACHE_DIR=/workspace/output/collision_cache
+# Startup milestones and Kit verbosity, for diagnosing a silent early exit.
+export PROTOMOTIONS_DEBUG_STAGES="${PROTOMOTIONS_DEBUG_STAGES:-1}"
+export PROTOMOTIONS_KIT_LOG_LEVEL="${PROTOMOTIONS_KIT_LOG_LEVEL:-warning}"
 mkdir -p "$MPLCONFIGDIR" "$PROTOMOTIONS_COLLISION_CACHE_DIR"
 cd /workspace/ProtoMotions
 
@@ -105,6 +111,9 @@ if [[ "$USE_WANDB" == "1" ]]; then
   wandb_args=(--use-wandb --wandb-project "$WANDB_PROJECT")
 fi
 
+# Report the real exit status: a signal (128+n) is otherwise indistinguishable
+# from a clean exit once srun and apptainer have passed it along.
+set +e
 python -u -m protomotions.train_multi_source_distill \
   --distillation-sources "$SOURCES" \
   --output-dir "/workspace/output/$RUN_NAME" \
@@ -114,18 +123,37 @@ python -u -m protomotions.train_multi_source_distill \
   --iterations "$ITERATIONS" \
   --save-every 50 \
   --eval-every "$EVAL_EVERY" \
+  --kit-log-dir "/workspace/output/$RUN_NAME/kit_logs" \
   --ujitso-cache-dir /tmp/protomotions_ujitso \
   --ujitso-cache-budget-mb 1024 \
   --timeout-minutes 180 \
   "${wandb_args[@]}" \
   "${resume_args[@]}"
+status=$?
+set -e
+echo "[rank ${SLURM_PROCID:-?}] training process exited with status $status" >&2
+exit $status
 INNER
 )
 
 echo "Euler preflight: code, data, checkpoints, action contract, and rank assignment"
-apptainer exec "${container_args[@]}" "$CONTAINER" bash -lc \
+mkdir -p "$NODE_TMP_ROOT/overlay_preflight/upper" "$NODE_TMP_ROOT/overlay_preflight/work"
+apptainer exec --overlay "$NODE_TMP_ROOT/overlay_preflight" "${container_args[@]}" "$CONTAINER" bash -lc \
   'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_multi_source_distill --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS"'
 
 echo "Starting $PREFLIGHT_RANKS-rank training in $RUN_DIR"
-srun --kill-on-bad-exit=1 --wait=60 \
-  apptainer exec "${container_args[@]}" "$CONTAINER" bash -lc "$inner_script"
+# Each task computes its own overlay, so SLURM_PROCID must expand inside srun.
+CONTAINER_ARGS="${container_args[*]}"
+export CONTAINER_ARGS CONTAINER NODE_TMP_ROOT
+export INNER_SCRIPT="$inner_script"
+LAUNCHER="$NODE_TMP_ROOT/launch_rank.sh"
+cat > "$LAUNCHER" <<'LAUNCH'
+#!/bin/bash
+set -euo pipefail
+overlay="$NODE_TMP_ROOT/overlay_rank${SLURM_PROCID}"
+mkdir -p "$overlay/upper" "$overlay/work"
+exec apptainer exec --overlay "$overlay" $CONTAINER_ARGS "$CONTAINER" bash -lc "$INNER_SCRIPT"
+LAUNCH
+chmod +x "$LAUNCHER"
+
+srun --kill-on-bad-exit=1 --wait=60 "$LAUNCHER"

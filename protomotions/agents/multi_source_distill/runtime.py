@@ -28,6 +28,7 @@ def launch_isaaclab(
     distributed=False,
     ujitso_cache_dir=None,
     ujitso_cache_budget_mb=1024,
+    kit_log_dir=None,
 ):
     """Start Kit without uploading process-memory crash dumps."""
     from isaaclab.app import AppLauncher
@@ -44,6 +45,19 @@ def launch_isaaclab(
         "--/crashreporter/skipOldDumpUpload=true",
         "--/crashreporter/url=",
     ]
+    if kit_log_dir is not None:
+        # Kit logs to node-local storage by default, which a finished Slurm job
+        # takes with it; keep a per-rank copy next to the run outputs.
+        logs = Path(kit_log_dir).expanduser()
+        logs.mkdir(parents=True, exist_ok=True)
+        rank = int(os.environ.get("RANK", "0"))
+        kit_args.extend(
+            (
+                f"--/log/file={(logs / f'kit_rank{rank}.log').resolve()}",
+                f"--/log/level={os.environ.get('PROTOMOTIONS_KIT_LOG_LEVEL', 'warning')}",
+                "--/log/flushStandardStreamOutput=true",
+            )
+        )
     if ujitso_cache_dir is not None:
         root = Path(ujitso_cache_dir).expanduser()
         if any(character.isspace() for character in str(root)):
@@ -61,13 +75,25 @@ def launch_isaaclab(
                 ),
             )
         )
-    return AppLauncher(
+    launcher = AppLauncher(
         headless=True,
         device=str(device),
         distributed=distributed,
         enable_crashreporter=False,
         kit_args=" ".join(kit_args),
     )
+    # AppLauncher installs SIGSEGV/SIGABRT handlers that call SimulationApp.close(),
+    # which ends the process with status 0 and no traceback, so a native crash in
+    # Kit or PhysX looks exactly like a clean shutdown. Re-arm faulthandler on top
+    # so a crash prints where it happened and exits with the real signal status.
+    import faulthandler
+    import signal
+
+    # enable() re-takes SIGSEGV/SIGABRT/SIGFPE/SIGBUS/SIGILL; SIGTERM only chains,
+    # so Kit still shuts down cleanly when Slurm asks the job to stop.
+    faulthandler.enable(all_threads=True)
+    faulthandler.register(signal.SIGTERM, all_threads=True, chain=True)
+    return launcher
 
 
 def build_environment(

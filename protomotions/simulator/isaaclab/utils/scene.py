@@ -13,6 +13,14 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.terrains.terrain_importer_cfg import TerrainImporterCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from protomotions.simulator.isaaclab.utils.usd_utils import TrimeshTerrainImporter
+
+
+def _stage_marker(message: str) -> None:
+    """Mirror the simulator's PROTOMOTIONS_DEBUG_STAGES milestones."""
+    import os
+
+    if os.environ.get("PROTOMOTIONS_DEBUG_STAGES"):
+        print(f"[stage rank {os.environ.get('RANK', '0')}] {message}", flush=True)
 from protomotions.simulator.isaaclab.utils.actuator_groups import (
     build_isaaclab_joint_name_map,
     resolve_actuator_specs_for_control_type,
@@ -54,6 +62,7 @@ class SceneCfg(InteractiveSceneCfg):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        _stage_marker("scene cfg: start")
 
         activate_contact_sensors = robot_config.contact_bodies is not None
 
@@ -206,6 +215,7 @@ class SceneCfg(InteractiveSceneCfg):
 
         # Derive USD from the robot MJCF via IsaacLab 3 MjcfConverter.
         robot_usd_path = convert_robot_mjcf_to_usd(robot_config.asset)
+        _stage_marker("scene cfg: robot usd ready")
         contact_body_names = (
             robot_config.contact_bodies if activate_contact_sensors else []
         )
@@ -213,6 +223,7 @@ class SceneCfg(InteractiveSceneCfg):
             robot_usd_path,
             contact_body_names,
         )
+        _stage_marker("scene cfg: robot prim paths resolved")
 
         # articulation
         self.robot = ArticulationCfg(
@@ -300,3 +311,4 @@ class SceneCfg(InteractiveSceneCfg):
             )
         else:
             self.terrain = None
+        _stage_marker("scene cfg: done")

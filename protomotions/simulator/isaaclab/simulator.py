@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 
 import torch
 import warp as wp
@@ -60,6 +61,17 @@ from protomotions.simulator.base_simulator.simulator_state import (
     ObjectState,
     ResetState,
 )
+
+
+def _stage_marker(message: str) -> None:
+    """Print a startup milestone when PROTOMOTIONS_DEBUG_STAGES is set.
+
+    Kit can end the process without a traceback, so these markers are the only
+    way to tell which construction step a silent exit happened in.
+    """
+    if os.environ.get("PROTOMOTIONS_DEBUG_STAGES"):
+        rank = os.environ.get("RANK", "0")
+        print(f"[stage rank {rank}] {message}", flush=True)
 
 
 def _build_sequential_interactive_scene(scene_cfg):
@@ -209,8 +221,10 @@ class IsaacLabSimulator(Simulator):
         self._resolve_proj_config()
 
         scene_cfg = self._get_scene_cfg()
+        _stage_marker("scene config built")
 
         self._scene = _build_sequential_interactive_scene(scene_cfg)
+        _stage_marker("interactive scene built")
         if self.scene_lib.num_scenes() > 0:
             _author_object_start_poses(
                 self._scene.stage,
@@ -219,6 +233,7 @@ class IsaacLabSimulator(Simulator):
             )
         if not self.headless:
             self._setup_keyboard()
+        _stage_marker("object start poses authored")
         print("[INFO]: Setup complete...")
 
     def _create_simulation(self) -> None:
@@ -277,6 +292,10 @@ class IsaacLabSimulator(Simulator):
         scene_cfgs = None
         if self.scene_lib.num_scenes() > 0:
             scene_cfgs, self._initial_scene_pos = self._preprocess_object_playground()
+            _stage_marker(
+                f"object playground built: {len(scene_cfgs)} object slot(s), "
+                f"{sum(len(c) for c in scene_cfgs)} spawn config(s)"
+            )
 
         scene_cfg = SceneCfg(
             config=self.config,
