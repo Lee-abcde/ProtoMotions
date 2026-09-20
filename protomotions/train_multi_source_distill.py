@@ -242,7 +242,12 @@ def save_checkpoint(
 
 
 class WandbRun:
-    """Rank-zero Weights & Biases logging; a run id file keeps resumes in one run."""
+    """Rank-zero Weights & Biases logging; a run id file keeps resumes in one run.
+
+    Logging is best effort, as in train_agent.py: a broken or unreachable W&B
+    must not take the training down, and rank zero must not stall while the
+    other ranks wait in a collective.
+    """
 
     def __init__(self, args, output_dir):
         import wandb
@@ -260,6 +265,17 @@ class WandbRun:
         )
         id_file.write_text(run_id)
 
+    @classmethod
+    def start(cls, args, output_dir, rank):
+        """Build the rank-zero run, or None when disabled or unavailable."""
+        if not args.use_wandb or rank != 0:
+            return None
+        try:
+            return cls(args, output_dir)
+        except Exception as error:  # noqa: BLE001 - logging is never fatal
+            print(f"Weights & Biases disabled for this run: {error}", flush=True)
+            return None
+
     @staticmethod
     def _flatten(prefix, value, out):
         if isinstance(value, dict):
@@ -272,17 +288,33 @@ class WandbRun:
             out[prefix] = value
         return out
 
+    def _log(self, metrics, iteration):
+        try:
+            self.run.log(metrics, step=iteration)
+        except Exception as error:  # noqa: BLE001 - logging is never fatal
+            print(f"Weights & Biases log failed at {iteration}: {error}", flush=True)
+
     def log_training(self, report):
-        metrics = self._flatten("train", {k: v for k, v in report.items()
-                                          if k not in ("iteration", "ranks")}, {})
-        self.run.log(metrics, step=report["iteration"])
+        self._log(
+            self._flatten(
+                "train",
+                {k: v for k, v in report.items() if k not in ("iteration", "ranks")},
+                {},
+            ),
+            report["iteration"],
+        )
 
     def log_evaluation(self, report):
-        metrics = self._flatten(f"eval_{report['policy']}", report["summary"], {})
-        self.run.log(metrics, step=report["iteration"])
+        self._log(
+            self._flatten(f"eval_{report['policy']}", report["summary"], {}),
+            report["iteration"],
+        )
 
     def finish(self):
-        self.run.finish()
+        try:
+            self.run.finish()
+        except Exception as error:  # noqa: BLE001 - logging is never fatal
+            print(f"Weights & Biases finish failed: {error}", flush=True)
 
 
 def write_report(path, report, append=False):
@@ -384,7 +416,13 @@ def prepare_output_directory(args):
             )
         # Like train_agent.py: a run that died before its first checkpoint left
         # nothing to resume, so start fresh over its partial outputs.
-        stale = [output / "run_config.json", output / "metrics.jsonl"]
+        # wandb_id.txt included: resuming the old run would drop the new
+        # run's early steps, which W&B discards as non-monotonic.
+        stale = [
+            output / "run_config.json",
+            output / "metrics.jsonl",
+            output / "wandb_id.txt",
+        ]
         stale += output.glob("eval_*.json")
         for path in stale:
             path.unlink(missing_ok=True)
@@ -414,7 +452,7 @@ def run(args):
         lambda: prepare_output_directory(args) if rank == 0 else Path(args.output_dir)
     )
     torch.manual_seed(args.seed + rank)
-    wandb_run = WandbRun(args, output_dir) if args.use_wandb and rank == 0 else None
+    wandb_run = None
     random.seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     # All teachers are checked before constructing a simulator or taking actions.
@@ -527,6 +565,11 @@ def run(args):
                 if rank == 0
                 else None
             )
+        )
+        # After AppLauncher, so the W&B service never races Kit's startup, and
+        # through collective_call so a rank-zero failure stops every rank.
+        wandb_run = collective_call(
+            lambda: WandbRun.start(args, output_dir, rank)
         )
         target_weights = torch.tensor(manifest.target_weights(), device=device)
 
