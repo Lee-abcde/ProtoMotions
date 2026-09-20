@@ -257,13 +257,18 @@ class WandbRun:
     other ranks wait in a collective.
     """
 
-    def __init__(self, args, output_dir):
+    def __init__(self, args, output_dir, mode=None):
         import wandb
 
         output_dir = Path(output_dir)
         id_file = output_dir / "wandb_id.txt"
         run_id = id_file.read_text().strip() if id_file.is_file() else wandb.util.generate_id()
+        if mode is not None:
+            # wandb caches the settings of the first init, so the retry has to
+            # ask for offline explicitly rather than through the environment.
+            wandb.teardown()
         self.run = wandb.init(
+            mode=mode,
             project=args.wandb_project,
             name=output_dir.name,
             dir=str(output_dir),
@@ -275,14 +280,41 @@ class WandbRun:
 
     @classmethod
     def start(cls, args, output_dir, rank):
-        """Build the rank-zero run, or None when disabled or unavailable."""
+        """Build the rank-zero run, or None when disabled or unavailable.
+
+        An online run needs credentials from the cluster home directory, which
+        this process does not always get to read; an offline run needs nothing
+        and can be uploaded later with "wandb sync", so it is the fallback
+        rather than losing the metrics.
+        """
         if not args.use_wandb or rank != 0:
             return None
         try:
             return cls(args, output_dir)
-        except Exception as error:  # noqa: BLE001 - logging is never fatal
-            print(f"Weights & Biases disabled for this run: {error}", flush=True)
-            return None
+        except Exception as online_error:  # noqa: BLE001 - logging is never fatal
+            netrc = Path("~/.netrc").expanduser()
+            try:
+                netrc.stat()
+                reason = "readable"
+            except OSError as stat_error:
+                reason = f"{type(stat_error).__name__}: {stat_error}"
+            print(
+                f"Weights & Biases online failed: {online_error}\n"
+                f"  HOME={os.environ.get('HOME')} netrc={reason}",
+                flush=True,
+            )
+            try:
+                run = cls(args, output_dir, mode="offline")
+                print(
+                    "Weights & Biases running offline; upload later with "
+                    f"wandb sync {Path(output_dir) / 'wandb'}/offline-run-*",
+                    flush=True,
+                )
+                return run
+            except Exception as error:  # noqa: BLE001 - logging is never fatal
+                print(f"Weights & Biases disabled for this run: {error}", flush=True)
+                traceback.print_exc()
+                return None
 
     @staticmethod
     def _flatten(prefix, value, out):
@@ -460,7 +492,7 @@ def run(args):
         lambda: prepare_output_directory(args) if rank == 0 else Path(args.output_dir)
     )
     torch.manual_seed(args.seed + rank)
-    wandb_run = None
+    wandb_run = collective_call(lambda: WandbRun.start(args, output_dir, rank))
     random.seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     # All teachers are checked before constructing a simulator or taking actions.
@@ -582,11 +614,6 @@ def run(args):
                 if rank == 0
                 else None
             )
-        )
-        # After AppLauncher, so the W&B service never races Kit's startup, and
-        # through collective_call so a rank-zero failure stops every rank.
-        wandb_run = collective_call(
-            lambda: WandbRun.start(args, output_dir, rank)
         )
         target_weights = torch.tensor(manifest.target_weights(), device=device)
 

@@ -72,6 +72,10 @@ export TORCH_NCCL_DESYNC_DEBUG=1
 # own: two overlay mounts cannot share one work directory.
 container_args=(
   --nv
+  # Apptainer mounts the working directory, not the home directory, so a job
+  # submitted from inside the repo cannot read ~/.netrc and W&B has no
+  # credentials. Bind home explicitly.
+  --bind "$HOME:$HOME"
   --bind "$PROTOMOTIONS_DIR:/workspace/ProtoMotions:rw"
   --bind "$DATA_DIR:/workspace/protomotion_data:ro"
   --bind "$HOI_TEACHER_DIR:/workspace/hoi_teachers:ro"
@@ -107,6 +111,9 @@ if [[ "$USE_WANDB" == "1" ]]; then
   export WANDB_DIR="/workspace/output/$RUN_NAME"
   export WANDB_CACHE_DIR="/workspace/output/wandb_cache"
   export WANDB_CONFIG_DIR="/workspace/output/wandb_config"
+  # train_slurm.py does the same: wandb spawns its service with this
+  # interpreter, and sys.executable is not usable once Kit is running.
+  export WANDB__EXECUTABLE="$(dirname "$CONTAINER_ENV")/python"
   mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_CONFIG_DIR"
   wandb_args=(--use-wandb --wandb-project "$WANDB_PROJECT")
 fi
