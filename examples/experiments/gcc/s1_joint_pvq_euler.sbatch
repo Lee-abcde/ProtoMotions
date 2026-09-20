@@ -38,8 +38,10 @@ WANDB_MODE="${WANDB_MODE:-online}"
 export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS ITERATIONS EVAL_EVERY
 export USE_WANDB WANDB_PROJECT WANDB_MODE
 # Follows sbatch --ntasks-per-node overrides, so a smaller smoke run needs no edit.
-WORLD_SIZE="${SLURM_NTASKS:-8}"
-export WORLD_SIZE
+# Deliberately not the name torch uses for its own rank count: exporting that one
+# makes the training ranks expect a torchrun launch and demand RANK/LOCAL_RANK.
+PREFLIGHT_RANKS="${SLURM_NTASKS:-8}"
+export PREFLIGHT_RANKS
 
 for path in "$CONTAINER" "$PROTOMOTIONS_DIR" "$DATA_DIR" "$HOI_TEACHER_DIR" "$LOCO_TEACHER_DIR"; do
   if [[ ! -e "$path" ]]; then
@@ -122,8 +124,8 @@ INNER
 
 echo "Euler preflight: code, data, checkpoints, action contract, and rank assignment"
 apptainer exec "${container_args[@]}" "$CONTAINER" bash -lc \
-  'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_multi_source_distill --distillation-sources "$SOURCES" --check-config-only --world-size "$WORLD_SIZE"'
+  'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_multi_source_distill --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS"'
 
-echo "Starting $WORLD_SIZE-rank training in $RUN_DIR"
+echo "Starting $PREFLIGHT_RANKS-rank training in $RUN_DIR"
 srun --kill-on-bad-exit=1 --wait=60 \
   apptainer exec "${container_args[@]}" "$CONTAINER" bash -lc "$inner_script"
