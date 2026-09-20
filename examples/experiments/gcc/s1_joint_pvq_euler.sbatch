@@ -21,6 +21,8 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/cluster/scratch/lijingy/joint_pvq_results}"
 HOI_TEACHER_DIR="${HOI_TEACHER_DIR:-/cluster/scratch/lijingy/HOI_smplx}"
 LOCO_TEACHER_DIR="${LOCO_TEACHER_DIR:-/cluster/scratch/lijingy/smplx_results}"
 RUN_NAME="${RUN_NAME:-joint_pvq_v1}"
+SOURCES="${SOURCES:-examples/experiments/gcc/s1_joint_pvq_sources_euler.yaml}"
+export SOURCES
 CONTAINER_ENV="${CONTAINER_ENV:-/opt/IsaacLab_new/.venv/bin/activate}"
 NUM_ENVS="${NUM_ENVS:-2048}"
 BATCH_SIZE="${BATCH_SIZE:-4096}"
@@ -102,7 +104,7 @@ if [[ "$USE_WANDB" == "1" ]]; then
 fi
 
 python -u -m protomotions.train_multi_source_distill \
-  --distillation-sources examples/experiments/gcc/s1_joint_pvq_sources_euler.yaml \
+  --distillation-sources "$SOURCES" \
   --output-dir "/workspace/output/$RUN_NAME" \
   --num-envs "$NUM_ENVS" \
   --batch-size "$BATCH_SIZE" \
@@ -120,7 +122,7 @@ INNER
 
 echo "Euler preflight: code, data, checkpoints, action contract, and rank assignment"
 apptainer exec "${container_args[@]}" "$CONTAINER" bash -lc \
-  'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_multi_source_distill --distillation-sources examples/experiments/gcc/s1_joint_pvq_sources_euler.yaml --check-config-only --world-size "$WORLD_SIZE"'
+  'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_multi_source_distill --distillation-sources "$SOURCES" --check-config-only --world-size "$WORLD_SIZE"'
 
 echo "Starting $WORLD_SIZE-rank training in $RUN_DIR"
 srun --kill-on-bad-exit=1 --wait=60 \

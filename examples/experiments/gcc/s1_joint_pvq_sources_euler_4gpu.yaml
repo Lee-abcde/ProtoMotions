@@ -1,0 +1,104 @@
+# 4-GPU validation variant of s1_joint_pvq_sources_euler.yaml: 2 locomotion ranks
+# (AMASS-X shards 0 and 1, i.e. half the dataset) and 2 HOI ranks.
+# Paths are inside the Apptainer mounts from s1_joint_pvq_euler.sbatch.
+# OMOMO: 15 subjects (sub11 and sub14 excluded), each with its own v8_29 tracker.
+# HOI sources are assigned round-robin to the HOI ranks in the order listed.
+locomotion_num_ranks: 2
+hoi_weight: 0.5
+sources:
+  - id: amassx
+    task: locomotion
+    motion_file: /workspace/protomotion_data/amassx_shards/amassx_slurmrank.pt
+    motion_file_shard_indices: [0, 1]
+    teacher_checkpoint: /workspace/loco_teachers/gcc_s0_loco_tracker_amassx_v1/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub1
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub1.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub1.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub1_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub2
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub2.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub2.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub2_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub3
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub3.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub3.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub3_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub4
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub4.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub4.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub4_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub5
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub5.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub5.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub5_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub6
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub6.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub6.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub6_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub7
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub7.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub7.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub7_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub8
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub8.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub8.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub8_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub9
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub9.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub9.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub9_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub10
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub10.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub10.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub10_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub12
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub12.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub12.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub12_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub13
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub13.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub13.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub13_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub15
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub15.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub15.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub15_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub16
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub16.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub16.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub16_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub17
+    task: hoi
+    motion_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub17.pt
+    scenes_file: /workspace/protomotion_data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub17.pt
+    teacher_checkpoint: /workspace/hoi_teachers/intermimic_sub17_v3data_v8_29_euler/score_based.ckpt
+    weight: 1.0
