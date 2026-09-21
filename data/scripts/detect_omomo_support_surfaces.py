@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import math
 import os
 from pathlib import Path
@@ -95,15 +96,17 @@ def detect_support_surfaces(
     max_tabletop_size: float = 0.5,
     thickness: float = 0.04,
     hidden_z: float = -10.0,
+    terminal_support_height_tolerance: float = 0.035,
+    initial_support_height_tolerance: float = 0.01,
 ) -> tuple[dict | None, list[dict]]:
-    """Detect elevated support endpoints and build a shared tabletop spec.
+    """Detect supported endpoint poses and build a shared tabletop spec.
 
-    A clip needs support when an endpoint object pose is elevated and stable.
-    The support is placed at the terminal endpoint for ground-to-table and
-    same-table-return clips, or at the initial endpoint for table-to-ground
-    clips.
+    Strict endpoint rules first establish reliable support heights for each
+    object. A second pass recovers clips whose human contact or immediate
+    pickup prevents the strict stability/contact rules from succeeding, but
+    whose endpoint height matches a reliable height for the same object.
     """
-    candidates = []
+    records = []
     for scene_idx, scene in enumerate(scenes):
         if len(scene.objects) != 1:
             continue
@@ -177,24 +180,39 @@ def detect_support_surfaces(
             and terminal_bottom <= max_initial_bottom_height
         )
 
-        if terminal_is_stable and terminal_is_elevated and placed_from_ground:
-            detection_rule = "placed_from_ground"
-            support_frame = -1
-            support_top_height = terminal_bottom
-            center_between_endpoints = False
-        elif terminal_is_stable and terminal_is_elevated and starts_on_same_support:
-            detection_rule = "starts_on_same_support"
-            support_frame = -1
-            support_top_height = terminal_bottom
-            center_between_endpoints = True
-        elif initial_is_stable_and_elevated and ends_stable_on_ground:
-            detection_rule = "starts_elevated_ends_grounded"
-            support_frame = 0
-            support_top_height = initial_bottom_median
-            center_between_endpoints = False
-        else:
-            continue
+        records.append(
+            {
+                "motion_id": int(scene.humanoid_motion_id),
+                "scene_index": scene_idx,
+                "obj": obj,
+                "vertices": vertices,
+                "initial_bottom": initial_bottom,
+                "initial_bottom_median": initial_bottom_median,
+                "terminal_bottom": terminal_bottom,
+                "terminal_speed": terminal_speed,
+                "terminal_contact_fraction": terminal_contact_fraction,
+                "terminal_is_stable": terminal_is_stable,
+                "terminal_is_elevated": terminal_is_elevated,
+                "initial_is_stable_and_elevated": initial_is_stable_and_elevated,
+                "placed_from_ground": placed_from_ground,
+                "starts_on_same_support": starts_on_same_support,
+                "ends_stable_on_ground": ends_stable_on_ground,
+            }
+        )
 
+    candidates = []
+    selected_motion_ids = set()
+    support_heights_by_object = defaultdict(list)
+
+    def add_candidate(
+        record: dict,
+        detection_rule: str,
+        support_frame: int,
+        support_top_height: float,
+        center_between_endpoints: bool,
+    ) -> None:
+        obj = record["obj"]
+        vertices = record["vertices"]
         support_vertices = _world_vertices(obj, vertices, support_frame)
         xy_min = support_vertices[:, :2].amin(dim=0)
         xy_max = support_vertices[:, :2].amax(dim=0)
@@ -214,8 +232,8 @@ def detect_support_surfaces(
             footprint = xy_max - xy_min
         candidates.append(
             {
-                "motion_id": int(scene.humanoid_motion_id),
-                "scene_index": scene_idx,
+                "motion_id": record["motion_id"],
+                "scene_index": record["scene_index"],
                 "position": (
                     float(center_xy[0]),
                     float(center_xy[1]),
@@ -223,14 +241,115 @@ def detect_support_surfaces(
                 ),
                 "top_height": support_top_height,
                 "footprint": (float(footprint[0]), float(footprint[1])),
-                "terminal_speed": terminal_speed,
-                "terminal_contact_fraction": terminal_contact_fraction,
+                "terminal_speed": record["terminal_speed"],
+                "terminal_contact_fraction": record[
+                    "terminal_contact_fraction"
+                ],
                 "detection_rule": detection_rule,
             }
         )
+        selected_motion_ids.add(record["motion_id"])
+        support_heights_by_object[obj.object_identifier].append(
+            support_top_height
+        )
+
+    # First pass: preserve the strict endpoint rules and use their results as
+    # reliable support-height references for each object in this subject.
+    for record in records:
+        if (
+            record["terminal_is_stable"]
+            and record["terminal_is_elevated"]
+            and record["placed_from_ground"]
+        ):
+            add_candidate(
+                record,
+                "placed_from_ground",
+                -1,
+                record["terminal_bottom"],
+                False,
+            )
+        elif (
+            record["terminal_is_stable"]
+            and record["terminal_is_elevated"]
+            and record["starts_on_same_support"]
+        ):
+            add_candidate(
+                record,
+                "starts_on_same_support",
+                -1,
+                record["terminal_bottom"],
+                True,
+            )
+        elif (
+            record["initial_is_stable_and_elevated"]
+            and record["ends_stable_on_ground"]
+        ):
+            add_candidate(
+                record,
+                "starts_elevated_ends_grounded",
+                0,
+                record["initial_bottom_median"],
+                False,
+            )
+
+    reliable_support_heights = {
+        object_id: tuple(heights)
+        for object_id, heights in support_heights_by_object.items()
+    }
+
+    # Second pass: recover table endpoints hidden by persistent hand contact
+    # or by an object being picked up immediately after the first frame. Match
+    # only against the frozen strict-pass heights so recovery cannot drift by
+    # chaining several near-threshold candidates.
+    for record in records:
+        if record["motion_id"] in selected_motion_ids:
+            continue
+        known_heights = reliable_support_heights.get(
+            record["obj"].object_identifier, ()
+        )
+        if not known_heights:
+            continue
+
+        matches_terminal_height = any(
+            abs(record["terminal_bottom"] - height)
+            <= terminal_support_height_tolerance
+            for height in known_heights
+        )
+        matches_initial_height = any(
+            abs(record["initial_bottom"] - height)
+            <= initial_support_height_tolerance
+            for height in known_heights
+        )
+        if (
+            record["terminal_is_stable"]
+            and record["terminal_is_elevated"]
+            and record["initial_bottom"] <= max_initial_bottom_height
+            and matches_terminal_height
+        ):
+            add_candidate(
+                record,
+                "matches_known_terminal_support",
+                -1,
+                record["terminal_bottom"],
+                False,
+            )
+        elif (
+            record["initial_bottom"] >= min_terminal_bottom_height
+            and record["ends_stable_on_ground"]
+            and matches_initial_height
+        ):
+            add_candidate(
+                record,
+                "matches_known_initial_support",
+                0,
+                record["initial_bottom"],
+                False,
+            )
 
     if not candidates:
         return None, []
+
+    candidates.sort(key=lambda candidate: candidate["scene_index"])
 
     width = max(candidate["footprint"][0] for candidate in candidates) + 2.0 * margin
     depth = max(candidate["footprint"][1] for candidate in candidates) + 2.0 * margin
