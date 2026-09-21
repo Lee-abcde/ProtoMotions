@@ -30,7 +30,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from data.scripts.omomo_object_repair import repair_object_jumps
+from data.scripts.omomo_object_repair import (
+    repair_floating_motion,
+    repair_object_jumps,
+)
 from protomotions.components.pose_lib import (
     KinematicInfo,
     compute_angular_velocity,
@@ -609,6 +612,17 @@ def run_conversion(args: argparse.Namespace) -> dict:
         motion, obj_pos, obj_rot, metrics = convert_source_tensor(
             source, kinematic_info, args.fps
         )
+        source, floating_repair_metrics = repair_floating_motion(
+            source, motion.rigid_body_pos
+        )
+        object_repair_metrics.update(floating_repair_metrics)
+        if floating_repair_metrics["floating_motion_repaired"]:
+            print(
+                f"Floating motion repair {record.clip_name}: {floating_repair_metrics}"
+            )
+            motion, obj_pos, obj_rot, metrics = convert_source_tensor(
+                source, kinematic_info, args.fps
+            )
         retarget_metrics = {}
         if args.contact_aware_retarget:
             from data.scripts.omomo_contact_retarget import (

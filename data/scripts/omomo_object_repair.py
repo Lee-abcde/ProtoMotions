@@ -9,6 +9,9 @@ import math
 
 import torch
 
+FLOATING_SOURCE_MIN_JOINT_HEIGHT_M = 0.10
+SMPLX_GROUND_JOINT_HEIGHT_M = 0.017
+
 
 def repair_object_jumps(data: torch.Tensor, fps: float) -> tuple[torch.Tensor, dict]:
     """Repair object pose columns only; leave source and contact labels unchanged.
@@ -101,4 +104,42 @@ def repair_object_jumps(data: torch.Tensor, fps: float) -> tuple[torch.Tensor, d
         "object_jump_repaired_frames": int(bad.sum()),
         "object_jump_repairs": changes,
         "object_jump_unresolved_edges": remaining,
+    }
+
+
+def repair_floating_motion(
+    data: torch.Tensor,
+    rigid_body_pos: torch.Tensor,
+    detection_height_m: float = FLOATING_SOURCE_MIN_JOINT_HEIGHT_M,
+    target_height_m: float = SMPLX_GROUND_JOINT_HEIGHT_M,
+) -> tuple[torch.Tensor, dict]:
+    """Ground a persistently floating scene without putting feet below ground.
+
+    Source joint positions detect a global vertical offset. The correction is
+    measured in the converted SMPL-X state, whose 17 mm minimum-joint clearance
+    matches the foot collision geometry convention used by AMASS conversion.
+    Human root, source body positions, and object positions receive the same
+    translation so their relative poses remain unchanged.
+    """
+
+    source_body_pos = data[:, 162:318].reshape(-1, 52, 3)
+    source_min_height = source_body_pos[..., 2].min()
+    converted_min_height = rigid_body_pos[..., 2].min()
+    detected = bool(source_min_height > detection_height_m)
+    vertical_offset = float(target_height_m - converted_min_height) if detected else 0.0
+
+    repaired = data
+    if detected:
+        repaired = data.clone()
+        repaired[:, 2] += vertical_offset
+        repaired[:, 162:318].reshape(-1, 52, 3)[..., 2] += vertical_offset
+        repaired[:, 320] += vertical_offset
+
+    return repaired, {
+        "floating_motion_repair_version": 1,
+        "floating_motion_repaired": detected,
+        "floating_source_min_joint_height_m": float(source_min_height),
+        "floating_converted_min_joint_height_before_m": float(converted_min_height),
+        "floating_target_min_joint_height_m": float(target_height_m),
+        "floating_vertical_offset_m": vertical_offset,
     }
