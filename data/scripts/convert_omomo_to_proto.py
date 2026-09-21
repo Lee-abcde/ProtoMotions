@@ -9,6 +9,8 @@ dictionaries.  This converter decodes their SMPL-X body/object poses, retargets
 the body rotations onto ProtoMotions' fixed SMPL-X MJCF through FK, writes
 standard individual ``.motion`` clips, and writes one flat manifest. Dataset
 splitting and packaging are deliberately left to downstream workflows.
+Short, displaced object-pose dropouts are automatically repaired before
+retargeting; repaired frames and unresolved jumps are recorded in the manifest.
 """
 
 from __future__ import annotations
@@ -24,11 +26,11 @@ from pathlib import Path
 
 import torch
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from data.scripts.omomo_object_repair import repair_object_jumps
 from protomotions.components.pose_lib import (
     KinematicInfo,
     compute_angular_velocity,
@@ -39,7 +41,6 @@ from protomotions.components.pose_lib import (
     fk_from_transforms_with_velocities,
 )
 from protomotions.utils.rotations import matrix_to_quaternion, quaternion_to_matrix
-
 
 SOURCE_WIDTH = 591
 FPS = 30.0
@@ -56,6 +57,7 @@ OBJECT_ROT = slice(321, 325)
 OBJECT_CONTACT = slice(330, 331)
 BODY_CONTACT = slice(331, 383)
 BODY_ROT = slice(383, 591)
+
 
 @dataclass(frozen=True)
 class ClipRecord:
@@ -79,13 +81,16 @@ class ConvertedClip:
     body_position_rmse_m: float
     root_rotation_max_error_rad: float
     retarget_metrics: dict = field(default_factory=dict)
+    object_repair_metrics: dict = field(default_factory=dict)
 
 
 def normalize_quaternions(quaternions: torch.Tensor) -> torch.Tensor:
     """Normalize XYZW quaternions and make signs temporally continuous."""
 
     if quaternions.shape[-1] != 4:
-        raise ValueError(f"Expected quaternion last dimension 4, got {quaternions.shape}")
+        raise ValueError(
+            f"Expected quaternion last dimension 4, got {quaternions.shape}"
+        )
     norms = torch.linalg.vector_norm(quaternions, dim=-1, keepdim=True)
     if torch.any(norms < 1e-8):
         raise ValueError("Encountered a zero-length quaternion")
@@ -212,9 +217,10 @@ def validate_source_tensor(data: torch.Tensor, source: Path | str = "<tensor>") 
         allowed = torch.tensor(
             allowed_values, dtype=rounded.dtype, device=rounded.device
         )
-        if not torch.allclose(values, rounded, atol=1e-5) or not torch.isin(
-            rounded, allowed
-        ).all():
+        if (
+            not torch.allclose(values, rounded, atol=1e-5)
+            or not torch.isin(rounded, allowed).all()
+        ):
             raise ValueError(
                 f"{source}: {label} labels must contain only {list(allowed_values)}"
             )
@@ -233,7 +239,9 @@ def parse_clip_path(path: Path, known_objects: set[str]) -> ClipRecord:
         raise ValueError(
             f"Unknown object '{object_name}' in {path.name}; known={sorted(known_objects)}"
         )
-    return ClipRecord(path=path, clip_name=path.stem, subject=subject, object_name=object_name)
+    return ClipRecord(
+        path=path, clip_name=path.stem, subject=subject, object_name=object_name
+    )
 
 
 def discover_object_meshes(object_root: Path) -> dict[str, Path]:
@@ -245,14 +253,19 @@ def discover_object_meshes(object_root: Path) -> dict[str, Path]:
         if mesh.is_file():
             meshes[directory.name] = mesh
     if not meshes:
-        raise FileNotFoundError(f"No <object>/<object>.obj meshes found in {object_root}")
+        raise FileNotFoundError(
+            f"No <object>/<object>.obj meshes found in {object_root}"
+        )
     return meshes
 
 
 def discover_clips(motion_root: Path, known_objects: set[str]) -> list[ClipRecord]:
     if not motion_root.is_dir():
         raise FileNotFoundError(f"Motion root does not exist: {motion_root}")
-    clips = [parse_clip_path(path, known_objects) for path in sorted(motion_root.glob("*.pt"))]
+    clips = [
+        parse_clip_path(path, known_objects)
+        for path in sorted(motion_root.glob("*.pt"))
+    ]
     if not clips:
         raise FileNotFoundError(f"No .pt clips found in {motion_root}")
     seen_names: set[str] = set()
@@ -335,10 +348,15 @@ def convert_source_tensor(
 
     object_translation = data[:, OBJECT_POS].clone()
     object_rotation = normalize_quaternions(data[:, OBJECT_ROT].clone())
-    return motion, object_translation, object_rotation, {
-        "body_position_rmse_m": float(body_rmse),
-        "root_rotation_max_error_rad": float(root_error),
-    }
+    return (
+        motion,
+        object_translation,
+        object_rotation,
+        {
+            "body_position_rmse_m": float(body_rmse),
+            "root_rotation_max_error_rad": float(root_error),
+        },
+    )
 
 
 def copy_object_assets(meshes: dict[str, Path], output_root: Path) -> dict[str, Path]:
@@ -351,6 +369,24 @@ def copy_object_assets(meshes: dict[str, Path], output_root: Path) -> dict[str, 
     return copied
 
 
+def build_manifest_metadata(
+    motion_root: Path,
+    object_root: Path,
+    mjcf_path: Path,
+    fps: float,
+) -> dict:
+    """Build dataset-level provenance shared by every converted clip."""
+
+    return {
+        "schema_version": 1,
+        "source_format": "intermimic_omomo_tensor_v2_591",
+        "source_motion_root": str(motion_root.resolve()),
+        "source_object_root": str(object_root.resolve()),
+        "robot_mjcf": str(mjcf_path.resolve()),
+        "fps": fps,
+    }
+
+
 def build_manifest(
     clips: list[ConvertedClip],
     motion_root: Path,
@@ -359,12 +395,7 @@ def build_manifest(
     fps: float,
 ) -> dict:
     manifest = {
-        "schema_version": 1,
-        "source_format": "intermimic_omomo_tensor_v2_591",
-        "source_motion_root": str(motion_root.resolve()),
-        "source_object_root": str(object_root.resolve()),
-        "robot_mjcf": str(mjcf_path.resolve()),
-        "fps": fps,
+        **build_manifest_metadata(motion_root, object_root, mjcf_path, fps),
         "clips": [
             {
                 "motion_id": motion_id,
@@ -373,18 +404,98 @@ def build_manifest(
                 "subject": clip.record.subject,
                 "object": clip.record.object_name,
                 "num_frames": clip.num_frames,
-                "motion_file": str(clip.motion_path.relative_to(clip.motion_path.parents[2])),
+                "motion_file": str(
+                    clip.motion_path.relative_to(clip.motion_path.parents[2])
+                ),
                 "object_reference_file": str(
                     clip.object_reference_path.relative_to(clip.motion_path.parents[2])
                 ),
                 "body_position_rmse_m": clip.body_position_rmse_m,
                 "root_rotation_max_error_rad": clip.root_rotation_max_error_rad,
                 **clip.retarget_metrics,
+                **clip.object_repair_metrics,
             }
             for motion_id, clip in enumerate(clips)
         ],
     }
     return manifest
+
+
+def validate_incremental_dataset_metadata(existing: dict, requested: dict) -> None:
+    """Require an incremental run to use the original dataset provenance."""
+
+    mismatches = []
+    for key in ("schema_version", "source_format"):
+        if existing.get(key) != requested[key]:
+            mismatches.append(
+                f"{key}: existing={existing.get(key)!r}, requested={requested[key]!r}"
+            )
+
+    for key in ("source_motion_root", "source_object_root", "robot_mjcf"):
+        existing_value = existing.get(key)
+        if (
+            existing_value is None
+            or Path(existing_value).resolve() != Path(requested[key]).resolve()
+        ):
+            mismatches.append(
+                f"{key}: existing={existing_value!r}, requested={requested[key]!r}"
+            )
+
+    try:
+        fps_matches = math.isclose(float(existing.get("fps")), float(requested["fps"]))
+    except (TypeError, ValueError):
+        fps_matches = False
+    if not fps_matches:
+        mismatches.append(
+            f"fps: existing={existing.get('fps')!r}, requested={requested['fps']!r}"
+        )
+
+    if mismatches:
+        raise ValueError(
+            "Incremental update dataset metadata does not match the existing "
+            "manifest:\n- " + "\n- ".join(mismatches)
+        )
+
+
+def validate_incremental_clip_names(
+    existing: dict, selected_clip_names: list[str]
+) -> None:
+    """Require every selected clip to already exist in the manifest."""
+
+    existing_clips = existing.get("clips")
+    if not isinstance(existing_clips, list):
+        raise TypeError("Existing manifest has no valid clips list")
+    existing_names = [clip.get("clip_name") for clip in existing_clips]
+    if len(existing_names) != len(set(existing_names)):
+        raise ValueError("Existing manifest contains duplicate clip names")
+
+    unknown = set(selected_clip_names) - set(existing_names)
+    if unknown:
+        raise ValueError(
+            "Incremental update cannot add clips missing from the existing manifest: "
+            f"{sorted(unknown)}"
+        )
+
+
+def merge_existing_manifest(existing: dict, updated: dict) -> dict:
+    """Replace selected clip entries while preserving the full manifest."""
+
+    validate_incremental_dataset_metadata(existing, updated)
+
+    existing_clips = existing["clips"]
+    updated_by_name = {clip["clip_name"]: clip for clip in updated["clips"]}
+    if len(updated_by_name) != len(updated["clips"]):
+        raise ValueError("Updated manifest contains duplicate clip names")
+    validate_incremental_clip_names(existing, list(updated_by_name))
+
+    merged = dict(existing)
+    merged["clips"] = []
+    for motion_id, old_clip in enumerate(existing_clips):
+        clip_name = old_clip["clip_name"]
+        clip = dict(updated_by_name.get(clip_name, old_clip))
+        clip["motion_id"] = motion_id
+        merged["clips"].append(clip)
+    return merged
 
 
 def reject_existing_motion_outputs(
@@ -401,9 +512,7 @@ def reject_existing_motion_outputs(
         if motion_path.exists():
             existing_paths.append(motion_path)
         if object_references_dir is not None:
-            object_reference_path = (
-                object_references_dir / f"{record.clip_name}.pt"
-            )
+            object_reference_path = object_references_dir / f"{record.clip_name}.pt"
             if object_reference_path.exists():
                 existing_paths.append(object_reference_path)
 
@@ -422,6 +531,24 @@ def run_conversion(args: argparse.Namespace) -> dict:
     object_root = args.object_root.resolve()
     output_root = args.output_root.resolve()
     mjcf_path = args.mjcf.resolve()
+    manifest_path = output_root / "manifest.json"
+    existing_manifest = None
+    if args.update_existing:
+        if args.subjects is None and args.clip_names is None:
+            raise ValueError(
+                "--update-existing requires --clip-names or --subjects to limit the update"
+            )
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"--update-existing requires an existing manifest: {manifest_path}"
+            )
+        with manifest_path.open() as stream:
+            existing_manifest = json.load(stream)
+        validate_incremental_dataset_metadata(
+            existing_manifest,
+            build_manifest_metadata(motion_root, object_root, mjcf_path, args.fps),
+        )
+
     source_meshes = discover_object_meshes(object_root)
     records = discover_clips(motion_root, set(source_meshes))
     if args.subjects is not None:
@@ -447,6 +574,10 @@ def run_conversion(args: argparse.Namespace) -> dict:
         ]
     if args.max_clips is not None:
         records = records[: args.max_clips]
+    if existing_manifest is not None:
+        validate_incremental_clip_names(
+            existing_manifest, [record.clip_name for record in records]
+        )
     clips_dir = output_root / "motions" / "clips"
     object_references_dir = output_root / "object_references"
     reject_existing_motion_outputs(
@@ -468,6 +599,12 @@ def run_conversion(args: argparse.Namespace) -> dict:
     for index, record in enumerate(records, 1):
         source = torch.load(record.path, map_location="cpu", weights_only=False)
         validate_source_tensor(source, record.path)
+        source, object_repair_metrics = repair_object_jumps(source, args.fps)
+        if (
+            object_repair_metrics["object_jump_repairs"]
+            or object_repair_metrics["object_jump_unresolved_edges"]
+        ):
+            print(f"Object repair {record.clip_name}: {object_repair_metrics}")
         motion_path = clips_dir / f"{record.clip_name}.motion"
         motion, obj_pos, obj_rot, metrics = convert_source_tensor(
             source, kinematic_info, args.fps
@@ -488,9 +625,7 @@ def run_conversion(args: argparse.Namespace) -> dict:
                 )
             retarget_device = torch.device(args.retarget_device)
             if retarget_device.type == "cuda" and not torch.cuda.is_available():
-                print(
-                    f"Warning: {retarget_device} unavailable; falling back to CPU"
-                )
+                print(f"Warning: {retarget_device} unavailable; falling back to CPU")
                 retarget_device = torch.device("cpu")
             motion, retarget_metrics = retarget_motion_contacts(
                 data=source,
@@ -503,22 +638,14 @@ def run_conversion(args: argparse.Namespace) -> dict:
                 device=retarget_device,
                 config=ContactRetargetConfig(),
             )
-            source_body_pos = source[:, BODY_POS].reshape(
-                -1, EXPECTED_BODY_COUNT, 3
-            )
+            source_body_pos = source[:, BODY_POS].reshape(-1, EXPECTED_BODY_COUNT, 3)
             metrics["body_position_rmse_m"] = float(
-                torch.sqrt(
-                    torch.mean((motion.rigid_body_pos - source_body_pos) ** 2)
-                )
+                torch.sqrt(torch.mean((motion.rigid_body_pos - source_body_pos) ** 2))
             )
-        obj_vel, obj_ang_vel = compute_object_velocities(
-            obj_pos, obj_rot, args.fps
-        )
+        obj_vel, obj_ang_vel = compute_object_velocities(obj_pos, obj_rot, args.fps)
         obj_contact_labels = source[:, OBJECT_CONTACT].round().to(torch.int8)
         torch.save(motion.to_dict(), motion_path)
-        object_reference_path = (
-            object_references_dir / f"{record.clip_name}.pt"
-        )
+        object_reference_path = object_references_dir / f"{record.clip_name}.pt"
         save_object_reference(
             path=object_reference_path,
             translation=obj_pos,
@@ -541,6 +668,7 @@ def run_conversion(args: argparse.Namespace) -> dict:
                 object_reference_path=object_reference_path,
                 **metrics,
                 retarget_metrics=retarget_metrics,
+                object_repair_metrics=object_repair_metrics,
             )
         )
         if (
@@ -551,12 +679,17 @@ def run_conversion(args: argparse.Namespace) -> dict:
         ):
             print(f"[{index}/{len(records)}] {record.path.name}")
 
-    manifest = build_manifest(
-        converted, motion_root, object_root, mjcf_path, args.fps
-    )
-    manifest_path = output_root / "manifest.json"
+    manifest = build_manifest(converted, motion_root, object_root, mjcf_path, args.fps)
+    if existing_manifest is not None:
+        manifest = merge_existing_manifest(existing_manifest, manifest)
     with manifest_path.open("w") as stream:
         json.dump(manifest, stream, indent=2)
+
+    if existing_manifest is not None:
+        print(
+            f"Updated {len(converted)} clips; preserved "
+            f"{len(manifest['clips']) - len(converted)} existing manifest entries"
+        )
 
     if args.contact_aware_retarget:
         write_contact_retarget_report(manifest, output_root)
@@ -648,6 +781,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional exact clip-name filter, without the .pt suffix.",
     )
     parser.add_argument(
+        "--update-existing",
+        action="store_true",
+        help=(
+            "Merge one or more filtered conversion results into the existing "
+            "output manifest. Requires --clip-names or --subjects."
+        ),
+    )
+    parser.add_argument(
         "--contact-aware-retarget",
         action="store_true",
         help="Optimize canonical upper limbs against source object contact anchors.",
@@ -680,9 +821,7 @@ def main() -> None:
     if args.max_clips is not None and args.max_clips < 1:
         raise ValueError("--max-clips must be at least 1")
     if args.contact_aware_retarget and args.source_mjcf_root is None:
-        raise ValueError(
-            "--source-mjcf-root is required with --contact-aware-retarget"
-        )
+        raise ValueError("--source-mjcf-root is required with --contact-aware-retarget")
     manifest = run_conversion(args)
     print(f"Conversion complete: {len(manifest['clips'])} individual motions")
 
