@@ -30,8 +30,12 @@ def launch_isaaclab(
     ujitso_cache_dir=None,
     ujitso_cache_budget_mb=1024,
     kit_log_dir=None,
+    headless=True,
 ):
-    """Start Kit without uploading process-memory crash dumps."""
+    """Start Kit without uploading process-memory crash dumps.
+
+    Training always runs headless; single-process inference opens the viewer.
+    """
     from isaaclab.app import AppLauncher
 
     # This IsaacLab version filters out SimulationApp's documented setting.
@@ -76,13 +80,18 @@ def launch_isaaclab(
                 ),
             )
         )
-    launcher = AppLauncher(
-        headless=True,
-        device=str(device),
-        distributed=distributed,
-        enable_crashreporter=False,
-        kit_args=" ".join(kit_args),
-    )
+    launcher_args = {
+        "headless": headless,
+        "device": str(device),
+        "distributed": distributed,
+        "enable_crashreporter": False,
+        "kit_args": " ".join(kit_args),
+    }
+    if not headless:
+        # Without the Kit visualizer there is no viewport, so the camera cannot
+        # follow an environment; inference_agent.py selects it the same way.
+        launcher_args["visualizer"] = ["kit"]
+    launcher = AppLauncher(**launcher_args)
     # AppLauncher installs SIGSEGV/SIGABRT handlers that call SimulationApp.close(),
     # which ends the process with status 0 and no traceback, so a native crash in
     # Kit or PhysX looks exactly like a clean shutdown. Re-arm faulthandler on top
@@ -98,9 +107,23 @@ def launch_isaaclab(
 
 
 def build_environment(
-    manifest, configs, rank, world_size, num_envs, device, simulation_app
+    manifest,
+    configs,
+    rank,
+    world_size,
+    num_envs,
+    device,
+    simulation_app,
+    assigned=None,
+    headless=True,
+    custom_key_handlers=None,
 ):
-    """Build one simulator per rank from the corresponding frozen teacher config."""
+    """Build one simulator per rank from the corresponding frozen teacher config.
+
+    ``assigned`` overrides the rank's source assignment, which single-process
+    inference needs because a one-rank layout has no valid rank assignment.
+    ``rank`` then only selects the locomotion shard.
+    """
     from protomotions.components.motion_lib import MotionLib
     from protomotions.components.scene_lib import SceneLib
     from protomotions.simulator.base_simulator.utils import (
@@ -111,11 +134,13 @@ def build_environment(
         build_terrain_from_config,
     )
 
-    assigned = manifest.assignment(rank, world_size)
+    assigned = (
+        manifest.assignment(rank, world_size) if assigned is None else tuple(assigned)
+    )
     cfg = deepcopy(configs[assigned[0]])
     task = manifest.sources[assigned[0]].task
     cfg["simulator"].num_envs = num_envs
-    cfg["simulator"].headless = True
+    cfg["simulator"].headless = headless
     for control in cfg["env"].control_components.values():
         if hasattr(control, "physical_buffer_size"):
             control.physical_buffer_size = 1
@@ -159,6 +184,7 @@ def build_environment(
         scene_lib,
         device,
         simulation_app=simulation_app,
+        custom_key_handlers=custom_key_handlers,
     )
     env = get_class(cfg["env"]._target_)(
         config=cfg["env"],
