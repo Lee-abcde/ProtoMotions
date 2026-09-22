@@ -272,8 +272,22 @@ def evaluate_sources(
     output_dir,
     rank,
     teacher_router=None,
+    sampling_curriculum=None,
+    evaluation_iteration=None,
 ):
-    """Evaluate every motion from frame zero; preserve source and shard identity."""
+    """Evaluate every motion from frame zero; preserve source and shard identity.
+
+    Supply both sampling_curriculum and evaluation_iteration to update student
+    sampling weights, or omit both for evaluation without a curriculum update.
+    Validate the update before constructing an evaluator or running any waves.
+    """
+    if (sampling_curriculum is None) != (evaluation_iteration is None):
+        raise ValueError(
+            "sampling_curriculum and evaluation_iteration must be provided together"
+        )
+    if sampling_curriculum is not None:
+        sampling_curriculum.validate_update_iteration(evaluation_iteration)
+
     from protomotions.agents.evaluators.inference_trials import (
         run_parallel_mimic_trials,
     )
@@ -298,6 +312,9 @@ def evaluate_sources(
     agent = EvaluationAgent(model, env, task, output_dir, source_ids, teacher_router)
     evaluator = MimicEvaluator(agent, SimpleNamespace(device=env.device), eval_cfg)
     records = run_parallel_mimic_trials(evaluator, trials_per_motion=1)[0]["motions"]
+    # Update after complete trial collection and before IDs are gathered across ranks.
+    if sampling_curriculum is not None and teacher_router is None:
+        sampling_curriculum.update(records, evaluation_iteration)
     result = []
     for record in records:
         motion_id = record["motion_id"]

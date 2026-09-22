@@ -39,6 +39,7 @@ from protomotions.agents.multi_source_distill.config import (
     reference_offsets,
     teacher_contract,
 )
+from protomotions.agents.multi_source_distill.curriculum import MotionSamplingCurriculum
 from protomotions.agents.multi_source_distill.data import complete_observations
 from protomotions.agents.multi_source_distill.model import (
     OBS_KEYS,
@@ -594,6 +595,20 @@ def run(args):
             env.motion_manager.motion_weights.copy_(state["motion_weights"].to(device))
             for quantizer, usage_count in zip(model.quantizers, state["usage"]):
                 quantizer._usage_count.copy_(usage_count.to(device))
+        sampling_curriculum = collective_call(
+            lambda: MotionSamplingCurriculum.from_teacher_configs(
+                env.motion_manager,
+                source_ids,
+                configs,
+                assigned,
+                iteration=start,
+                state=(
+                    saved["rank_states"][rank].get("motion_sampling_curriculum")
+                    if args.resume
+                    else None
+                ),
+            )
+        )
         collective_call(
             lambda: (
                 (output_dir / "run_config.json").write_text(
@@ -635,6 +650,16 @@ def run(args):
                         output_dir,
                         rank,
                         teacher,
+                        sampling_curriculum=(
+                            sampling_curriculum
+                            if not args.evaluate_only and teacher is None
+                            else None
+                        ),
+                        evaluation_iteration=(
+                            iteration
+                            if not args.evaluate_only and teacher is None
+                            else None
+                        ),
                     )
                 )
                 gathered = gather_objects(records)
@@ -811,6 +836,7 @@ def run(args):
                     "python_rng": random.getstate(),
                     "numpy_rng": np.random.get_state(),
                     "motion_weights": env.motion_manager.motion_weights.cpu(),
+                    "motion_sampling_curriculum": sampling_curriculum.state_dict(),
                     "usage": [q._usage_count.cpu() for q in model.quantizers],
                 }
                 states = gather_objects(rank_state)
