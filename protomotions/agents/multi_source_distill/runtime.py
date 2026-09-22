@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -238,6 +239,26 @@ class EvaluationAgent:
         return self.student(inputs, self.task)
 
 
+def evaluation_step_limit(
+    longest_motion_seconds: float,
+    dt: float,
+    task: str,
+    teacher_limit: int | None = None,
+) -> int:
+    """Cap evaluation episodes the way the teacher's own evaluator does.
+
+    HOI clips are all shorter than the tracker's limit, so they keep running to
+    their true end. AMASS-X has a long tail (a single 264 s clip) and every
+    environment in a wave steps until the longest clip in that wave finishes,
+    so an uncapped locomotion episode costs an order of magnitude more than the
+    locomotion tracker's own evaluation protocol.
+    """
+    full_length = math.ceil(longest_motion_seconds / dt) + 1
+    if task != "locomotion" or teacher_limit is None:
+        return full_length
+    return min(full_length, int(teacher_limit))
+
+
 @torch.no_grad()
 def evaluate_sources(
     model,
@@ -267,8 +288,11 @@ def evaluate_sources(
             raise ValueError("Pooled teachers must use identical evaluation components")
     eval_cfg.collect_trajectory_metrics = False
     eval_cfg.save_predicted_motion_lib_every = None
-    eval_cfg.max_eval_steps = (
-        int((env.motion_lib.motion_lengths.max() / env.dt).ceil()) + 1
+    eval_cfg.max_eval_steps = evaluation_step_limit(
+        float(env.motion_lib.motion_lengths.max()),
+        float(env.dt),
+        task,
+        getattr(configs[assigned[0]]["agent"].evaluator, "max_eval_steps", None),
     )
     eval_cfg.evaluation_action_key = "action"
     agent = EvaluationAgent(model, env, task, output_dir, source_ids, teacher_router)
