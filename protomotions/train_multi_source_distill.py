@@ -45,6 +45,7 @@ from protomotions.agents.multi_source_distill.model import (
     OBS_KEYS,
     JointModelConfig,
     JointPVQModel,
+    task_balanced_source_weights,
     weighted_sample_loss,
 )
 from protomotions.agents.multi_source_distill.psi import (
@@ -309,7 +310,11 @@ class WandbRun:
 
         output_dir = Path(output_dir)
         id_file = output_dir / "wandb_id.txt"
-        run_id = id_file.read_text().strip() if id_file.is_file() else wandb.util.generate_id()
+        run_id = (
+            id_file.read_text().strip()
+            if id_file.is_file()
+            else wandb.util.generate_id()
+        )
         if mode is not None:
             # wandb caches the settings of the first init, so the retry has to
             # ask for offline explicitly rather than through the environment.
@@ -584,6 +589,7 @@ def run(args):
                 device,
                 launcher.app,
                 psi=psi_enabled(args),
+                equal_motion_sampling=not args.evaluate_only,
             )
         )
         print(
@@ -664,6 +670,11 @@ def run(args):
             env.motion_manager.motion_weights.copy_(state["motion_weights"].to(device))
             for quantizer, usage_count in zip(model.quantizers, state["usage"]):
                 quantizer._usage_count.copy_(usage_count.to(device))
+        curriculum_state = (
+            saved["rank_states"][rank].get("motion_sampling_curriculum")
+            if args.resume
+            else None
+        )
         sampling_curriculum = collective_call(
             lambda: MotionSamplingCurriculum.from_teacher_configs(
                 env.motion_manager,
@@ -671,10 +682,9 @@ def run(args):
                 configs,
                 assigned,
                 iteration=start,
-                state=(
-                    saved["rank_states"][rank].get("motion_sampling_curriculum")
-                    if args.resume
-                    else None
+                state=curriculum_state,
+                normalize_initial_weights=bool(
+                    args.resume and curriculum_state is None
                 ),
             )
         )
@@ -744,7 +754,9 @@ def run(args):
                 else None
             )
         )
-        target_weights = torch.tensor(manifest.target_weights(), device=device)
+        source_is_hoi = torch.tensor(
+            [source.task == "hoi" for source in manifest.sources], device=device
+        )
         # The resumed checkpoint's record is the score to beat, also in a new
         # output directory; a warm start's sources make old scores incomparable.
         best_evaluation = saved.get("best_evaluation") if args.resume else None
@@ -918,6 +930,9 @@ def run(args):
                 raise ValueError(
                     f"No rollout samples for {missing}; increase num-envs/rollout-steps or allocate more HOI ranks"
                 )
+            target_weights = task_balanced_source_weights(
+                counts, source_is_hoi, manifest.hoi_weight
+            )
             total = len(ids)
             minibatches = (total + args.batch_size - 1) // args.batch_size
             logs = torch.zeros(len(manifest.sources), 2, device=device)

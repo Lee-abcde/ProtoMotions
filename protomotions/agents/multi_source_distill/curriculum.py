@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Rank-local motion curriculum with fixed source sampling mass."""
+"""Rank-local motion curriculum with a common score scale across sources."""
 
 from __future__ import annotations
 
@@ -18,12 +18,10 @@ if TYPE_CHECKING:
 
 
 class MotionSamplingCurriculum:
-    """Keep raw difficulty scores separate from source-normalized sampling weights.
+    """Apply per-motion difficulty on one rank without source normalization.
 
-    Each source starts with its largest positive score at one, preserving initial
-    within-source ratios. Initially disabled motions stay disabled; scores that
-    decay to zero may recover after failure. Only student trial results from this
-    rank may be passed to :meth:`update`.
+    Initially disabled motions stay disabled; scores that decay to zero may
+    recover after failure. Only this rank's student trials may update scores.
     """
 
     def __init__(
@@ -33,6 +31,7 @@ class MotionSamplingCurriculum:
         rules: dict[int, MotionWeightsRulesConfig],
         iteration: int = 0,
         state: dict | None = None,
+        normalize_initial_weights: bool = False,
     ):
         self.motion_manager = motion_manager
         self.source_ids = source_ids
@@ -41,12 +40,12 @@ class MotionSamplingCurriculum:
         weights = motion_manager.motion_weights
         self.scores = weights.clone()
         self.enabled = weights > 0
-        self.source_mass = {}
         if source_ids.shape != weights.shape:
             raise ValueError("Source IDs must match the motion weight vector")
         for source in source_ids.unique().tolist():
             mask = source_ids == source
-            self.source_mass[source] = float(weights[mask].sum())
+            # Legacy checkpoints may only carry source-normalized weights.
+            # Remove their source mass while retaining within-source difficulty.
             maximum = self.scores[mask].max()
             if maximum > 0:
                 self.scores[mask] /= maximum
@@ -60,7 +59,6 @@ class MotionSamplingCurriculum:
             self._minimum(source)
         if state is not None:
             self.scores = state["scores"].to(weights).clone()
-            self.source_mass = dict(state["source_mass"])
             self.last_update_iteration = int(state["last_update_iteration"])
             # Older curriculum checkpoints enforced a positive floor, so zero
             # scores in those checkpoints can only represent disabled motions.
@@ -69,9 +67,9 @@ class MotionSamplingCurriculum:
                 .to(device=weights.device, dtype=torch.bool)
                 .clone()
             )
-            if self.scores.shape != weights.shape or set(self.source_mass) != set(
-                rules
-            ):
+            if self.scores.shape != weights.shape or set(
+                source_ids.unique().tolist()
+            ) != set(rules):
                 raise ValueError("Motion curriculum checkpoint does not match sources")
             if self.enabled.shape != weights.shape:
                 raise ValueError(
@@ -79,18 +77,23 @@ class MotionSamplingCurriculum:
                 )
         if not torch.isfinite(self.scores).all() or (self.scores < 0).any():
             raise ValueError("Motion curriculum scores must be finite and nonnegative")
-        if any(
-            not math.isfinite(mass) or mass < 0 for mass in self.source_mass.values()
-        ):
-            raise ValueError(
-                "Motion curriculum source masses must be finite and nonnegative"
-            )
         if not 0 <= self.last_update_iteration <= iteration:
             raise ValueError("Invalid motion curriculum checkpoint iteration")
+        # A checkpoint predating curriculum has no state, but its saved motion
+        # weights still need conversion before the first resumed rollout.
+        if state is not None or normalize_initial_weights:
+            self._install_weights(self.scores)
 
     @classmethod
     def from_teacher_configs(
-        cls, motion_manager, source_ids, configs, assigned, iteration=0, state=None
+        cls,
+        motion_manager,
+        source_ids,
+        configs,
+        assigned,
+        iteration=0,
+        state=None,
+        normalize_initial_weights=False,
     ) -> MotionSamplingCurriculum:
         """Construct from frozen configs, including pickles predating the rules field."""
         rules = {
@@ -101,14 +104,19 @@ class MotionSamplingCurriculum:
             )
             for i in assigned
         }
-        return cls(motion_manager, source_ids, rules, iteration=iteration, state=state)
+        return cls(
+            motion_manager,
+            source_ids,
+            rules,
+            iteration=iteration,
+            state=state,
+            normalize_initial_weights=normalize_initial_weights,
+        )
 
     def _minimum(self, source: int) -> float:
         value = self.rules[source].min_motion_weight
         minimum = (
-            1.0 / int((self.source_ids == source).sum())
-            if value == "1/num_motions"
-            else float(value)
+            1.0 / self.scores.numel() if value == "1/num_motions" else float(value)
         )
         if not math.isfinite(minimum) or minimum < 0:
             raise ValueError(
@@ -122,6 +130,33 @@ class MotionSamplingCurriculum:
             raise TypeError("Motion curriculum iteration must be an integer")
         if iteration <= self.last_update_iteration:
             raise ValueError("Motion curriculum updates require increasing iterations")
+
+    def _install_weights(
+        self, scores: torch.Tensor, enabled: torch.Tensor | None = None
+    ) -> None:
+        """Normalize once across the rank, restoring zero-score object groups."""
+        previous_weights = self.motion_manager.motion_weights
+        weights = scores.clone()
+        active = (self.enabled if enabled is None else enabled).clone()
+        excluded = getattr(self.motion_manager, "excluded_motion_ids", None)
+        if excluded is not None:
+            active[excluded] = False
+        weights[~active] = 0
+        compatibility = getattr(
+            self.motion_manager, "motion_sampling_mask_per_env", None
+        )
+        if compatibility is not None:
+            starved = ~(compatibility & (weights > 0).unsqueeze(0)).any(dim=1)
+            if starved.any():
+                restore = compatibility[starved].any(dim=0) & active
+                weights[restore] = previous_weights[restore]
+        if weights.sum() <= 0:
+            weights = previous_weights.clone()
+            weights[~active] = 0
+        if not torch.isfinite(weights).all() or weights.sum() <= 0:
+            raise ValueError("No positive finite motion sampling weights remain")
+        weights /= weights.sum()
+        self.motion_manager.update_sampling_weights(weights)
 
     @torch.no_grad()
     def update(self, records: list[dict], iteration: int) -> None:
@@ -140,8 +175,6 @@ class MotionSamplingCurriculum:
             success[motion_id] = bool(record["success"])
 
         scores = self.scores.clone()
-        previous_weights = self.motion_manager.motion_weights
-        weights = previous_weights.clone()
         # Preserve exclusions and clips with no valid reset-time sampling window.
         # Zero curriculum scores are NOT exclusions when the floor is zero.
         enabled = self.enabled.clone()
@@ -149,8 +182,7 @@ class MotionSamplingCurriculum:
         if excluded is not None:
             enabled[excluded] = False
         scores[~enabled] = 0
-        weights[~enabled] = 0
-        for source, mass in self.source_mass.items():
+        for source in self.rules:
             mask = (self.source_ids == source) & enabled
             active = mask & evaluated
             rule = self.rules[source]
@@ -163,30 +195,9 @@ class MotionSamplingCurriculum:
             else:
                 scores[active & ~success] /= failure_discount
             scores[active] = scores[active].clamp_min(self._minimum(source))
-            total = scores[mask].sum()
-            if not torch.isfinite(total):
-                raise ValueError("Motion curriculum scores overflowed")
-            if total > 0:
-                weights[mask] = scores[mask] / total * mass
-            # If every score is zero, retain this source's previous distribution
-            # without changing raw scores or imposing a hidden positive floor.
-
-        compatibility = getattr(
-            self.motion_manager, "motion_sampling_mask_per_env", None
-        )
-        if compatibility is not None:
-            starved = ~(compatibility & (weights > 0).unsqueeze(0)).any(dim=1)
-            if starved.any():
-                # A zero-floor HOI group may have all-zero scores even while
-                # other objects have failures. Keep its existing envs sampleable.
-                restore = compatibility[starved].any(dim=0) & enabled
-                weights[restore] = previous_weights[restore]
-        for source, mass in self.source_mass.items():
-            mask = self.source_ids == source
-            total = weights[mask].sum()
-            if total > 0:
-                weights[mask] *= mass / total
-        self.motion_manager.update_sampling_weights(weights)
+        if not torch.isfinite(scores).all():
+            raise ValueError("Motion curriculum scores overflowed")
+        self._install_weights(scores, enabled)
         self.scores = scores
         self.enabled = enabled
         self.last_update_iteration = int(iteration)
@@ -196,6 +207,6 @@ class MotionSamplingCurriculum:
         return {
             "scores": self.scores.detach().cpu().clone(),
             "enabled": self.enabled.detach().cpu().clone(),
-            "source_mass": dict(self.source_mass),
+            "normalization": "rank",
             "last_update_iteration": self.last_update_iteration,
         }

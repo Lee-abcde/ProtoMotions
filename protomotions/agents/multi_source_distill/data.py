@@ -123,6 +123,15 @@ def merge_motion_libraries(
     return merged, source_ids, local_ids, offsets
 
 
+def equal_motion_sampling_weights(weights: torch.Tensor) -> torch.Tensor:
+    """Start each enabled motion with equal probability across pooled sources."""
+    enabled = weights > 0
+    if not enabled.any():
+        raise ValueError("No enabled motions are available for sampling")
+    result = enabled.to(weights.dtype)
+    return result / result.sum()
+
+
 def merge_scene_sources(sources: list, configs: list[dict], motion_offsets: list[int]):
     """Deserialize each scene against its own asset root, then remap motion IDs."""
     from protomotions.components.scene_lib import SceneLib

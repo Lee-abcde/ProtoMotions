@@ -18,6 +18,7 @@ from protomotions.agents.multi_source_distill.config import canonical
 from protomotions.agents.multi_source_distill.data import (
     TeacherRouter,
     complete_observations,
+    equal_motion_sampling_weights,
     merge_motion_libraries,
     merge_scene_sources,
 )
@@ -118,6 +119,7 @@ def build_environment(
     headless=True,
     custom_key_handlers=None,
     psi=False,
+    equal_motion_sampling=False,
 ):
     """Build one simulator per rank from the corresponding frozen teacher config.
 
@@ -125,6 +127,8 @@ def build_environment(
     inference needs because a one-rank layout has no valid rank assignment.
     ``rank`` then only selects the locomotion shard. ``psi`` keeps the HOI
     teacher's PSI buffer size; otherwise every reset uses the raw reference.
+    Training can set ``equal_motion_sampling`` to give all enabled clips the
+    same initial weight across pooled sources.
     """
     from protomotions.components.motion_lib import MotionLib
     from protomotions.components.scene_lib import SceneLib
@@ -159,6 +163,12 @@ def build_environment(
     motion_lib, source_ids, local_ids, offsets = merge_motion_libraries(
         libraries, list(assigned), [manifest.sources[i].weight for i in assigned]
     )
+    if equal_motion_sampling:
+        # A source is only a storage shard here. Give every enabled clip the
+        # same initial sampling score, regardless of source size or weight.
+        motion_lib.motion_weights = equal_motion_sampling_weights(
+            motion_lib.motion_weights
+        )
     motion_lib.different_motion_files_across_ranks = True
     cfg["terrain"], cfg["simulator"] = convert_friction_for_simulator(
         cfg["terrain"], cfg["simulator"]

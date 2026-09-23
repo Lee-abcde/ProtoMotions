@@ -256,6 +256,23 @@ class JointPVQModel(nn.Module):
             quantizer._usage_count.zero_()
 
 
+def task_balanced_source_weights(
+    global_counts: torch.Tensor,
+    source_is_hoi: torch.Tensor,
+    hoi_weight: float,
+) -> torch.Tensor:
+    """Give every sample in a task equal loss weight across source boundaries."""
+    if global_counts.shape != source_is_hoi.shape:
+        raise ValueError("Source counts and task IDs must have the same shape")
+    weights = torch.empty_like(global_counts)
+    for mask, mass in ((source_is_hoi, hoi_weight), (~source_is_hoi, 1 - hoi_weight)):
+        total = global_counts[mask].sum()
+        if total <= 0:
+            raise ValueError("Each task needs at least one rollout sample")
+        weights[mask] = mass * global_counts[mask] / total
+    return weights
+
+
 def weighted_sample_loss(
     per_sample: torch.Tensor,
     source_ids: torch.Tensor,
