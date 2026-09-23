@@ -16,6 +16,13 @@ set -euo pipefail
 : "${CONTAINER:?Submit with --export=ALL,CONTAINER=/cluster/scratch/lijingy/<image>.sif}"
 PROTOMOTIONS_DIR="${PROTOMOTIONS_DIR:-/cluster/home/lijingy/ProtoMotions}"
 DATA_DIR="${DATA_DIR:-/cluster/scratch/lijingy/protomotion_data}"
+# Scene files resolve object meshes relative to their own scenes/ directory, so
+# the meshes have to appear under DATA_DIR. Euler purges scratch by file age and
+# these .obj files are never rewritten, so the scratch copy gets emptied and every
+# HOI rank dies at scene build with FileNotFoundError. Keep the real copy in the
+# repo (home is never purged) and bind it over that path.
+OMOMO_OBJECTS_DIR="${OMOMO_OBJECTS_DIR:-$PROTOMOTIONS_DIR/data/omomo_objects}"
+OMOMO_DATASET="${OMOMO_DATASET:-omomo_correct_v2_contact_retarget_arms_v3}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/cluster/scratch/lijingy/joint_pvq_results}"
 # Teacher run directories (each holds score_based.ckpt + resolved_configs.pt).
 HOI_TEACHER_DIR="${HOI_TEACHER_DIR:-/cluster/scratch/lijingy/HOI_smplx}"
@@ -43,7 +50,8 @@ export USE_WANDB WANDB_PROJECT WANDB_MODE
 PREFLIGHT_RANKS="${SLURM_NTASKS:-8}"
 export PREFLIGHT_RANKS
 
-for path in "$CONTAINER" "$PROTOMOTIONS_DIR" "$DATA_DIR" "$HOI_TEACHER_DIR" "$LOCO_TEACHER_DIR"; do
+for path in "$CONTAINER" "$PROTOMOTIONS_DIR" "$DATA_DIR" "$OMOMO_OBJECTS_DIR" \
+           "$HOI_TEACHER_DIR" "$LOCO_TEACHER_DIR"; do
   if [[ ! -e "$path" ]]; then
     echo "Required Euler path does not exist: $path" >&2
     exit 2
@@ -78,6 +86,7 @@ container_args=(
   --bind "$HOME:$HOME"
   --bind "$PROTOMOTIONS_DIR:/workspace/ProtoMotions:rw"
   --bind "$DATA_DIR:/workspace/protomotion_data:ro"
+  --bind "$OMOMO_OBJECTS_DIR:/workspace/protomotion_data/$OMOMO_DATASET/objects:ro"
   --bind "$HOI_TEACHER_DIR:/workspace/hoi_teachers:ro"
   --bind "$LOCO_TEACHER_DIR:/workspace/loco_teachers:ro"
   --bind "$OUTPUT_ROOT:/workspace/output:rw"
