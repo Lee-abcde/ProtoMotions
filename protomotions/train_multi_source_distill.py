@@ -48,6 +48,19 @@ from protomotions.agents.multi_source_distill.model import (
     weighted_sample_loss,
 )
 
+BEST_CHECKPOINT = "score_based.ckpt"
+SNAPSHOT_DIR = "snapshots"
+
+
+def snapshot_path(output_dir, iteration):
+    return Path(output_dir) / SNAPSHOT_DIR / f"student_{iteration}.ckpt"
+
+
+def is_new_best(score, best_evaluation):
+    return score is not None and (
+        best_evaluation is None or score > best_evaluation["score"]
+    )
+
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
@@ -233,18 +246,28 @@ def save_checkpoint(
     model_config,
     rank_states,
     training_config,
+    best_evaluation=None,
 ):
+    """Write atomically; without optimizer and rank states it is a student snapshot.
+
+    A snapshot still loads for inference, --warm-start and --evaluate-only,
+    but not for --resume.
+    """
     state = {
         "format": "hoi_loco_pvq_v1",
         "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
         "iteration": iteration,
         "manifest": manifest_state(manifest),
         "teacher_contract": contract,
         "model_config": asdict(model_config),
-        "rank_states": rank_states,
         "training_config": training_config,
     }
+    if optimizer is not None:
+        state["optimizer"] = optimizer.state_dict()
+        state["rank_states"] = rank_states
+    if best_evaluation is not None:
+        state["best_evaluation"] = best_evaluation
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".writing")
     torch.save(state, temporary)
     os.replace(temporary, path)
@@ -346,10 +369,10 @@ class WandbRun:
         )
 
     def log_evaluation(self, report):
-        self._log(
-            self._flatten(f"eval_{report['policy']}", report["summary"], {}),
-            report["iteration"],
-        )
+        prefix = f"eval_{report['policy']}"
+        metrics = self._flatten(prefix, report["summary"], {})
+        self._flatten(f"{prefix}/selection", report.get("selection", {}), metrics)
+        self._log(metrics, report["iteration"])
 
     def finish(self):
         try:
@@ -385,6 +408,11 @@ def restore_checkpoint(
     if warm_start:
         validate_warm_start_contract(saved, manifest, contract)
     if not warm_start:
+        if "optimizer" not in saved:
+            raise ValueError(
+                "Checkpoint is a student-only snapshot; resume from last.ckpt "
+                "or score_based.ckpt, or load it with --warm-start"
+            )
         if (
             saved["manifest"] != manifest_state(manifest)
             or saved["teacher_contract"] != contract
@@ -465,6 +493,8 @@ def prepare_output_directory(args):
             output / "wandb_id.txt",
         ]
         stale += output.glob("eval_*.json")
+        stale += output.glob(f"{SNAPSHOT_DIR}/*.ckpt")
+        stale.append(output / BEST_CHECKPOINT)
         for path in stale:
             path.unlink(missing_ok=True)
         print(
@@ -482,6 +512,7 @@ def run(args):
         launch_isaaclab,
         load_teachers,
         object_mask,
+        selection_score,
         summarize_evaluation,
     )
 
@@ -631,6 +662,57 @@ def run(args):
             )
         )
         target_weights = torch.tensor(manifest.target_weights(), device=device)
+        # The resumed checkpoint's record is the score to beat, also in a new
+        # output directory; a warm start's sources make old scores incomparable.
+        best_evaluation = saved.get("best_evaluation") if args.resume else None
+
+        def gather_rank_states():
+            return gather_objects(
+                {
+                    "torch_rng": torch.get_rng_state(),
+                    "cuda_rng": torch.cuda.get_rng_state(device),
+                    "python_rng": random.getstate(),
+                    "numpy_rng": np.random.get_state(),
+                    "motion_weights": env.motion_manager.motion_weights.cpu(),
+                    "motion_sampling_curriculum": sampling_curriculum.state_dict(),
+                    "usage": [q._usage_count.cpu() for q in model.quantizers],
+                }
+            )
+
+        def save_evaluated_student(iteration, score, states):
+            """Rank zero keeps a snapshot of every evaluation and the best one."""
+            nonlocal best_evaluation
+            if rank != 0:
+                return
+            save_checkpoint(
+                snapshot_path(output_dir, iteration),
+                model,
+                None,
+                iteration,
+                manifest,
+                contract,
+                model_config,
+                None,
+                training_config,
+            )
+            if is_new_best(score, best_evaluation):
+                best_evaluation = {"score": score, "iteration": iteration}
+                save_checkpoint(
+                    output_dir / BEST_CHECKPOINT,
+                    model,
+                    optimizer,
+                    iteration,
+                    manifest,
+                    contract,
+                    model_config,
+                    states,
+                    training_config,
+                    best_evaluation=best_evaluation,
+                )
+                print(
+                    f"New best student at iteration {iteration}: score {score:.4f}",
+                    flush=True,
+                )
 
         def evaluate(iteration):
             labels = [("student", None)]
@@ -664,10 +746,25 @@ def run(args):
                 )
                 gathered = gather_objects(records)
                 records = [r for batch in gathered for r in batch]
+                summary = summarize_evaluation(records)
+                score = selection_score(summary)
+                if label == "student" and not args.evaluate_only:
+                    # Usage counters are rank-local; retain them separately from rank-zero buffers.
+                    states = gather_rank_states()
+                    collective_call(
+                        lambda score=score, states=states: save_evaluated_student(
+                            iteration, score, states
+                        )
+                    )
+                selection = {} if score is None else {"score": score}
+                if best_evaluation is not None and label == "student":
+                    selection["best_score"] = best_evaluation["score"]
+                    selection["best_iteration"] = best_evaluation["iteration"]
                 report = {
                     "iteration": iteration,
                     "policy": label,
-                    "summary": summarize_evaluation(records),
+                    "summary": summary,
+                    "selection": selection,
                     "motions": records,
                 }
                 collective_call(
@@ -677,7 +774,13 @@ def run(args):
                 )
                 if rank == 0:
                     print(
-                        json.dumps({"evaluation": report["summary"], "policy": label}),
+                        json.dumps(
+                            {
+                                "evaluation": report["summary"],
+                                "selection": selection,
+                                "policy": label,
+                            }
+                        ),
                         flush=True,
                     )
                     if wandb_run is not None:
@@ -827,20 +930,18 @@ def run(args):
                     output_dir / "metrics.jsonl", report, append=True
                 )
             )
-            if args.eval_every and iteration % args.eval_every == 0:
+            evaluated = args.eval_every and iteration % args.eval_every == 0
+            if evaluated:
                 obs = evaluate(iteration)
-            if iteration % args.save_every == 0 or iteration == args.iterations:
-                rank_state = {
-                    "torch_rng": torch.get_rng_state(),
-                    "cuda_rng": torch.cuda.get_rng_state(device),
-                    "python_rng": random.getstate(),
-                    "numpy_rng": np.random.get_state(),
-                    "motion_weights": env.motion_manager.motion_weights.cpu(),
-                    "motion_sampling_curriculum": sampling_curriculum.state_dict(),
-                    "usage": [q._usage_count.cpu() for q in model.quantizers],
-                }
-                states = gather_objects(rank_state)
+            # Saving after every evaluation keeps last.ckpt's best record current,
+            # so a resume never lets a worse student replace score_based.ckpt.
+            if (
+                evaluated
+                or iteration % args.save_every == 0
+                or iteration == args.iterations
+            ):
                 # Usage counters are rank-local; retain them separately from rank-zero buffers.
+                states = gather_rank_states()
                 collective_call(
                     lambda iteration=iteration, states=states: (
                         save_checkpoint(
@@ -853,6 +954,7 @@ def run(args):
                             model_config,
                             states,
                             training_config,
+                            best_evaluation=best_evaluation,
                         )
                         if rank == 0
                         else None

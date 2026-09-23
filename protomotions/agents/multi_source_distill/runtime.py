@@ -347,6 +347,7 @@ def evaluate_sources(
         index = int(source_ids[motion_id])
         record = dict(record)
         record["source_id"] = manifest.sources[index].id
+        record["task"] = task
         record["local_motion_id"] = int(local_ids[motion_id])
         record["motion_name"] = env.motion_lib.motion_files[motion_id]
         record["shard_index"] = (
@@ -360,8 +361,18 @@ def evaluate_sources(
     return result
 
 
+def task_summary_key(task: str) -> str:
+    """Summary key pooling every motion of one task, e.g. all OMOMO subjects."""
+    return f"{task}_all"
+
+
 def summarize_evaluation(records: list[dict]) -> dict:
-    """Deduplicate replicated sources and aggregate by actual motion counts."""
+    """Deduplicate replicated sources and aggregate by actual motion counts.
+
+    Besides each source and shard, ``<task>_all`` pools all motions of a task,
+    so the HOI entry is the success rate over every OMOMO motion rather than a
+    mean of per-subject rates.
+    """
     unique = {}
     for record in records:
         key = (record["source_id"], record["shard_index"], record["local_motion_id"])
@@ -371,6 +382,8 @@ def summarize_evaluation(records: list[dict]) -> dict:
         keys = [r["source_id"]]
         if r["shard_index"] is not None:
             keys.append(f"{r['source_id']}/shard_{r['shard_index']}")
+        if r.get("task") is not None:
+            keys.append(task_summary_key(r["task"]))
         for key in keys:
             groups.setdefault(key, []).append(r)
     result = {}
@@ -393,3 +406,17 @@ def summarize_evaluation(records: list[dict]) -> dict:
             },
         }
     return result
+
+
+def selection_score(summary: dict) -> float | None:
+    """Checkpoint selection score: the sum of the pooled per-task success rates.
+
+    With locomotion and HOI this is AMASS-X success plus whole-OMOMO success,
+    each pooled over motions. None when no task was evaluated.
+    """
+    rates = [
+        summary[task_summary_key(task)]["success_rate"]
+        for task in ("locomotion", "hoi")
+        if summary.get(task_summary_key(task), {}).get("num_motions", 0) > 0
+    ]
+    return sum(rates) if rates else None
