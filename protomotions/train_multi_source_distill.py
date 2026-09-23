@@ -47,6 +47,18 @@ from protomotions.agents.multi_source_distill.model import (
     JointPVQModel,
     weighted_sample_loss,
 )
+from protomotions.agents.multi_source_distill.psi import (
+    PSI_DIR,
+    PSI_MODES,
+    find_psi_control,
+    find_teacher_psi,
+    initialize_psi,
+    owned_sources,
+    psi_statistics,
+    save_student_psi,
+    source_frame_ranges,
+    student_psi_path,
+)
 
 BEST_CHECKPOINT = "score_based.ckpt"
 SNAPSHOT_DIR = "snapshots"
@@ -90,6 +102,17 @@ def parser():
         help="Weights & Biases project name",
     )
     p.add_argument("--revive-every", type=int, default=100)
+    p.add_argument(
+        "--student-psi",
+        choices=PSI_MODES,
+        default="teacher",
+        help=(
+            "HOI physical state initialization: seed from each teacher's PSI "
+            "buffer (empty where that file is missing or corrupt), start empty, "
+            "or reset only from the raw reference. The student keeps adding its "
+            "own states; --resume restores them."
+        ),
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--timeout-minutes", type=int, default=120)
     p.add_argument(
@@ -494,6 +517,7 @@ def prepare_output_directory(args):
         ]
         stale += output.glob("eval_*.json")
         stale += output.glob(f"{SNAPSHOT_DIR}/*.ckpt")
+        stale += output.glob(f"{PSI_DIR}/*.pt")
         stale.append(output / BEST_CHECKPOINT)
         for path in stale:
             path.unlink(missing_ok=True)
@@ -503,6 +527,10 @@ def prepare_output_directory(args):
         )
     output.mkdir(parents=True, exist_ok=True)
     return output
+
+
+def psi_enabled(args):
+    return args.student_psi != "off" and not args.evaluate_only
 
 
 def run(args):
@@ -518,6 +546,9 @@ def run(args):
 
     rank, world_size = dist.get_rank(), dist.get_world_size()
     manifest, configs = collective_call(lambda: preflight(args, world_size))
+    collective_call(
+        lambda: check_teacher_psi(args, manifest, configs) if rank == 0 else None
+    )
     local_rank = int(os.environ["LOCAL_RANK"])
     device = torch.device("cuda", local_cuda_device(local_rank))
     output_dir = collective_call(
@@ -545,7 +576,14 @@ def run(args):
     try:
         env, obs, assigned, source_ids, local_ids, _cfg = collective_call(
             lambda: build_environment(
-                manifest, configs, rank, world_size, args.num_envs, device, launcher.app
+                manifest,
+                configs,
+                rank,
+                world_size,
+                args.num_envs,
+                device,
+                launcher.app,
+                psi=psi_enabled(args),
             )
         )
         print(
@@ -640,6 +678,51 @@ def run(args):
                 ),
             )
         )
+        psi_control = (
+            find_psi_control(env) if task == "hoi" and psi_enabled(args) else None
+        )
+
+        def start_psi():
+            if task != "hoi" or not psi_enabled(args):
+                return None
+            if psi_control is None:
+                raise ValueError(
+                    "HOI teachers were trained without PSI "
+                    "(physical_buffer_size <= 1); use --student-psi off"
+                )
+            ranges = source_frame_ranges(env.motion_lib, source_ids, assigned)
+            origins = initialize_psi(
+                psi_control._physical_state_buffer,
+                ranges,
+                env.motion_lib,
+                source_ids,
+                manifest.sources,
+                configs,
+                args.student_psi,
+                resume_dir=Path(args.resume).parent if args.resume else None,
+            )
+            print(f"[rank {rank}] student PSI: {origins}", flush=True)
+            return ranges
+
+        # A resumed run restores its own buffers; new sources fall back to the mode.
+        psi_ranges = collective_call(start_psi)
+        psi_owned = (
+            owned_sources(manifest, rank, world_size) if psi_ranges is not None else ()
+        )
+
+        def save_psi(iteration):
+            if psi_ranges is not None:
+                save_student_psi(
+                    psi_control._physical_state_buffer,
+                    psi_ranges,
+                    env.motion_lib,
+                    source_ids,
+                    manifest.sources,
+                    psi_owned,
+                    output_dir,
+                    iteration,
+                )
+
         collective_call(
             lambda: (
                 (output_dir / "run_config.json").write_text(
@@ -796,6 +879,7 @@ def run(args):
 
         for iteration in range(start + 1, args.iterations + 1):
             collected, actions, identities = [], [], []
+            resets = physical_resets = 0
             model.train()
             with torch.no_grad():
                 for _ in range(args.rollout_steps):
@@ -809,7 +893,13 @@ def run(args):
                     actions.append(teacher_actions)
                     identities.append(ids)
                     obs, _, dones, _, _ = env.step(out["action"])
-                    obs, _ = env.reset(dones.nonzero().flatten())
+                    reset_ids = dones.nonzero().flatten()
+                    obs, _ = env.reset(reset_ids)
+                    if psi_control is not None:
+                        resets += reset_ids.numel()
+                        physical_resets += int(
+                            psi_control._last_physical_reset_mask[reset_ids].sum()
+                        )
             batch = {
                 key: torch.cat([step[key] for step in collected])
                 for key in collected[0]
@@ -893,6 +983,19 @@ def run(args):
                         }
                         for i in assigned
                     },
+                    "psi": (
+                        {
+                            "resets": resets,
+                            "physical_resets": physical_resets,
+                            "sources": psi_statistics(
+                                psi_control._physical_state_buffer,
+                                psi_ranges,
+                                manifest.sources,
+                            ),
+                        }
+                        if psi_ranges is not None
+                        else None
+                    ),
                 }
             )
             dist.all_reduce(logs)
@@ -922,6 +1025,19 @@ def run(args):
                         / (used[0] | used[1]).sum(-1).clamp_min(1)
                     ).tolist(),
                 }
+                psi_ranks = [r["psi"] for r in rank_metrics if r["psi"] is not None]
+                if psi_ranks:
+                    psi_sources = {}
+                    for r in psi_ranks:
+                        for key, value in r["sources"].items():
+                            psi_sources.setdefault(key, value)
+                    report["psi"] = {
+                        "physical_reset_fraction": sum(
+                            r["physical_resets"] for r in psi_ranks
+                        )
+                        / max(1, sum(r["resets"] for r in psi_ranks)),
+                        "sources": psi_sources,
+                    }
                 print(json.dumps(report), flush=True)
                 if wandb_run is not None:
                     wandb_run.log_training(report)
@@ -942,6 +1058,8 @@ def run(args):
             ):
                 # Usage counters are rank-local; retain them separately from rank-zero buffers.
                 states = gather_rank_states()
+                # Per-source files keep the large PSI buffers out of the gather.
+                collective_call(lambda iteration=iteration: save_psi(iteration))
                 collective_call(
                     lambda iteration=iteration, states=states: (
                         save_checkpoint(
@@ -983,6 +1101,30 @@ def preflight(args, world_size):
     return manifest, configs
 
 
+def check_teacher_psi(args, manifest, configs) -> dict[str, str]:
+    """Report, before any simulator starts, which HOI sources lack teacher PSI.
+
+    A resumed source with a saved student buffer needs no teacher file; every
+    other HOI source, e.g. from an older run or newly added, reads it. Sources
+    whose file is missing or corrupt start with an empty buffer instead.
+    """
+    if not psi_enabled(args) or args.student_psi != "teacher":
+        return {}
+    resume_dir = Path(args.resume).parent if args.resume else None
+    empty = {}
+    for source, config in zip(manifest.sources, configs):
+        if source.task != "hoi":
+            continue
+        if resume_dir is not None and student_psi_path(resume_dir, source.id).is_file():
+            continue
+        path, reason = find_teacher_psi(source, config)
+        if path is None:
+            empty[source.id] = reason
+    for source_id, reason in empty.items():
+        print(f"WARNING: {source_id} starts with an empty PSI buffer: {reason}")
+    return empty
+
+
 def main():
     # A native crash inside Kit or PhysX otherwise leaves no Python-side trace.
     faulthandler.enable()
@@ -1018,10 +1160,12 @@ def main():
     )
     if args.check_config_only:
         manifest, configs = preflight(args, args.world_size)
+        psi_empty = check_teacher_psi(args, manifest, configs)
         print(
             json.dumps(
                 {
                     "valid": True,
+                    "student_psi_empty_without_teacher": psi_empty,
                     "reference_offsets_seconds": {
                         s.id: reference_offsets(c)
                         for s, c in zip(manifest.sources, configs)

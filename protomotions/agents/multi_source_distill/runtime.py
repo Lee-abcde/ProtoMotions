@@ -117,12 +117,14 @@ def build_environment(
     assigned=None,
     headless=True,
     custom_key_handlers=None,
+    psi=False,
 ):
     """Build one simulator per rank from the corresponding frozen teacher config.
 
     ``assigned`` overrides the rank's source assignment, which single-process
     inference needs because a one-rank layout has no valid rank assignment.
-    ``rank`` then only selects the locomotion shard.
+    ``rank`` then only selects the locomotion shard. ``psi`` keeps the HOI
+    teacher's PSI buffer size; otherwise every reset uses the raw reference.
     """
     from protomotions.components.motion_lib import MotionLib
     from protomotions.components.scene_lib import SceneLib
@@ -142,7 +144,7 @@ def build_environment(
     cfg["simulator"].num_envs = num_envs
     cfg["simulator"].headless = headless
     for control in cfg["env"].control_components.values():
-        if hasattr(control, "physical_buffer_size"):
+        if not psi and hasattr(control, "physical_buffer_size"):
             control.physical_buffer_size = 1
     libraries = []
     for i in assigned:

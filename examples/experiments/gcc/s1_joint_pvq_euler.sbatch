@@ -37,12 +37,17 @@ ROLLOUT_STEPS="${ROLLOUT_STEPS:-32}"
 ITERATIONS="${ITERATIONS:-10000}"
 # Full student evaluation (all AMASS-X shards and every OMOMO subject); 0 disables it.
 EVAL_EVERY="${EVAL_EVERY:-1000}"
+# HOI physical state initialization: teacher (seed from each teacher's
+# env_<motion>.ckpt PSI buffer; a subject whose file is missing or corrupt
+# starts empty), empty (student PSI only) or off (raw reference).
+STUDENT_PSI="${STUDENT_PSI:-teacher}"
 # Weights & Biases: USE_WANDB=1 enables it. Online like train_slurm.py, with
 # credentials from ~/.netrc on the cluster; set WANDB_MODE=offline to defer upload.
 USE_WANDB="${USE_WANDB:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-physical_animation}"
 WANDB_MODE="${WANDB_MODE:-online}"
 export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS ITERATIONS EVAL_EVERY
+export STUDENT_PSI
 export USE_WANDB WANDB_PROJECT WANDB_MODE
 # Follows sbatch --ntasks-per-node overrides, so a smaller smoke run needs no edit.
 # Deliberately not the name torch uses for its own rank count: exporting that one
@@ -139,6 +144,7 @@ python -u -m protomotions.train_multi_source_distill \
   --iterations "$ITERATIONS" \
   --save-every 50 \
   --eval-every "$EVAL_EVERY" \
+  --student-psi "$STUDENT_PSI" \
   --kit-log-dir "/workspace/output/$RUN_NAME/kit_logs" \
   --ujitso-cache-dir /tmp/protomotions_ujitso \
   --ujitso-cache-budget-mb 1024 \
@@ -155,7 +161,7 @@ INNER
 echo "Euler preflight: code, data, checkpoints, action contract, and rank assignment"
 mkdir -p "$NODE_TMP_ROOT/overlay_preflight/upper" "$NODE_TMP_ROOT/overlay_preflight/work"
 apptainer exec --overlay "$NODE_TMP_ROOT/overlay_preflight" "${container_args[@]}" "$CONTAINER" bash -lc \
-  'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_multi_source_distill --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS"'
+  'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; resume_args=(); if [[ -f "/workspace/output/$RUN_NAME/last.ckpt" ]]; then resume_args=(--resume "/workspace/output/$RUN_NAME/last.ckpt"); fi; python -m protomotions.train_multi_source_distill --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS" --student-psi "$STUDENT_PSI" "${resume_args[@]}"'
 
 echo "Starting $PREFLIGHT_RANKS-rank training in $RUN_DIR"
 # Each task computes its own overlay, so SLURM_PROCID must expand inside srun.
