@@ -28,6 +28,7 @@ def compute_intermimic_object_observation(
     object_contacts: Tensor,
     neutral_pointclouds: Tensor,
     object_valid_mask: Tensor,
+    include_object_contacts: bool = True,
 ) -> Tensor:
     """Encode current object kinematics, contact, and interaction geometry."""
     batch_size = body_pos.shape[0]
@@ -69,17 +70,16 @@ def compute_intermimic_object_observation(
     interaction_vectors = heading_rotate_vectors(interaction_vectors, root_rot)
     interaction = interaction_geometry_embedding(interaction_vectors)
 
-    return torch.cat(
-        (
-            local_object_pos.reshape(batch_size, -1),
-            local_object_rot.reshape(batch_size, -1),
-            local_object_vel.reshape(batch_size, -1),
-            local_object_ang_vel.reshape(batch_size, -1),
-            object_contacts.float().reshape(batch_size, -1),
-            interaction.reshape(batch_size, -1),
-        ),
-        dim=-1,
-    )
+    features = [
+        local_object_pos.reshape(batch_size, -1),
+        local_object_rot.reshape(batch_size, -1),
+        local_object_vel.reshape(batch_size, -1),
+        local_object_ang_vel.reshape(batch_size, -1),
+    ]
+    if include_object_contacts:
+        features.append(object_contacts.float().reshape(batch_size, -1))
+    features.append(interaction.reshape(batch_size, -1))
+    return torch.cat(features, dim=-1)
 
 
 def compute_intermimic_target_observation(
@@ -109,6 +109,7 @@ def compute_intermimic_target_observation(
     non_finger_body_ids: Tensor,
     finger_body_ids: Tensor | None = None,
     finger_parent_body_ids: Tensor | None = None,
+    include_object_contact_features: bool = True,
 ) -> Tensor:
     """Build full-reference goals for all configured future horizons."""
     batch_size, num_future = future_body_pos.shape[:2]
@@ -226,10 +227,6 @@ def compute_intermimic_target_observation(
         (future_body_contact_labels + 1.0) * 0.5
         - body_object_contacts.float().unsqueeze(1)
     )
-    object_contact_residual = (
-        future_object_contact_labels.squeeze(-1)
-        - object_contacts.float().unsqueeze(1)
-    )
     interaction_residual = (
         future_interaction[:, :, key_body_ids]
         - current_interaction[:, None, key_body_ids]
@@ -251,9 +248,17 @@ def compute_intermimic_target_observation(
         interaction_residual,
         future_body_contact_labels,
         signed_contact_residual,
-        future_object_contact_labels,
-        object_contact_residual,
     )
+    if include_object_contact_features:
+        object_contact_residual = (
+            future_object_contact_labels.squeeze(-1)
+            - object_contacts.float().unsqueeze(1)
+        )
+        features = (
+            *features,
+            future_object_contact_labels,
+            object_contact_residual,
+        )
     if finger_body_ids is not None and finger_parent_body_ids is not None:
         current_finger_local_rot = parent_relative_body_rotations(
             body_rot,

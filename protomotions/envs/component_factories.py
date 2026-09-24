@@ -1921,7 +1921,9 @@ def steering_velocity_error_factory(
 # =============================================================================
 
 
-def intermimic_object_obs_factory() -> MdpComponent:
+def intermimic_object_obs_factory(
+    include_object_contacts: bool = True,
+) -> MdpComponent:
     from protomotions.envs.obs import compute_intermimic_object_observation
 
     return MdpComponent(
@@ -1938,6 +1940,9 @@ def intermimic_object_obs_factory() -> MdpComponent:
             "neutral_pointclouds": EnvContext.scene.neutral_pointclouds,
             "object_valid_mask": EnvContext.scene.object_valid_mask,
         },
+        static_params={
+            "include_object_contacts": include_object_contacts,
+        },
     )
 
 
@@ -1946,6 +1951,7 @@ def intermimic_target_obs_factory(
     non_finger_body_ids: Tensor,
     finger_body_ids: Optional[Tensor] = None,
     finger_parent_body_ids: Optional[Tensor] = None,
+    include_object_contact_features: bool = True,
 ) -> MdpComponent:
     from protomotions.envs.obs import compute_intermimic_target_observation
 
@@ -1986,6 +1992,7 @@ def intermimic_target_obs_factory(
             "non_finger_body_ids": non_finger_body_ids,
             "finger_body_ids": finger_body_ids,
             "finger_parent_body_ids": finger_parent_body_ids,
+            "include_object_contact_features": include_object_contact_features,
         },
     )
 
