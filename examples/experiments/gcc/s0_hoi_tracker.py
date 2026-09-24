@@ -444,11 +444,9 @@ def agent_config(
             norm_clamp_value=5,
             out_keys=["actor_trunk_out"],
             num_out=robot_config.number_of_actions,
-            # The packaged one-object SMPL-X setup has 2,579 actor inputs.
-            # Use a nearby power-of-two width without the cost of 4,096 units.
             layers=[
-                MLPLayerConfig(units=2048, activation="relu")
-                for _ in range(6)
+                MLPLayerConfig(units=units, activation="relu")
+                for units in (1024, 1024, 512)
             ],
         ),
     )
@@ -459,8 +457,8 @@ def agent_config(
         norm_clamp_value=5,
         num_out=1,
         layers=[
-            MLPLayerConfig(units=1024, activation="relu")
-            for _ in range(4)
+            MLPLayerConfig(units=units, activation="relu")
+            for units in (1024, 1024, 512)
         ],
     )
 
