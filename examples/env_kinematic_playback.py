@@ -31,7 +31,11 @@ Usage (object-aware switching — every motion in the library):
 
 In object-aware switching mode, one environment is created for each object asset
 type. Press F9 and enter any allowed motion ID; playback switches the compatible
-environment to that motion and moves the camera to it.
+environment to that motion and moves the camera to it. Press LEFT/RIGHT to play
+the previous/next motion ID (from the one the camera is on); when that motion
+uses a different object, the camera jumps to the environment holding it. The new
+motion restarts from frame 0. Without 'all', LEFT/RIGHT move the camera to the
+previous/next environment instead.
 
 When --scenes-file is given, matching scenes are automatically loaded alongside the motions.
 """
@@ -223,6 +227,38 @@ def _prompt_for_motion_id(
         if motion_id in selectable_motion_ids:
             return motion_id
         print(f"Motion ID {motion_id} is not selectable. Valid IDs: {valid_text}.")
+
+
+def _step_motion_id(compatible_motion_ids: list[int], current_id: int, step: int) -> int:
+    """Return the compatible motion ``step`` places from ``current_id``, wrapping."""
+    if not compatible_motion_ids:
+        raise ValueError("No compatible motion IDs to step through")
+    if current_id in compatible_motion_ids:
+        index = compatible_motion_ids.index(current_id) + step
+    else:
+        # Current motion is outside the list: step from its sorted insertion point.
+        index = sum(motion_id < current_id for motion_id in compatible_motion_ids)
+        index += step if step < 0 else step - 1
+    return compatible_motion_ids[index % len(compatible_motion_ids)]
+
+
+def _play_motion_in_env(motion_manager, env_id: int, motion_id: int) -> None:
+    """Pin ``motion_id`` to ``env_id`` and restart it from frame 0.
+
+    Writes the motion state directly rather than calling ``sample_motions``,
+    whose mimic override skips unfinished clips when ``resample_on_reset`` is
+    False. KinematicReplayControl reads ``motion_ids``/``motion_times`` every
+    step, so the new clip and its object trajectory show up on the next step.
+    """
+    motion_manager._fixed_motion_ids_per_env[env_id] = motion_id
+    motion_manager.motion_ids[env_id] = motion_id
+    motion_manager.motion_times[env_id] = 0.0
+
+
+def _focus_camera(env, env_id: int) -> None:
+    env.simulator._camera_target["env"] = env_id
+    env.simulator._camera_target["element"] = 0
+    env.simulator.user_interface.active_env_id = env_id
 
 
 def main():
@@ -510,6 +546,8 @@ def main():
         # changing unexpectedly. F9 updates the pin for the selected slot.
         motion_manager._fixed_motion_ids_per_env = initial_motion_ids.clone()
         motion_manager._env_has_fixed_motion[:] = True
+        # LEFT/RIGHT step through motions that some loaded env can play.
+        playable_motion_ids = torch.where(compatibility.any(dim=0))[0].tolist()
         print(f"Initial object-aware motion assignment: {initial_motion_ids.tolist()}")
 
     # Reset the environment
@@ -534,6 +572,17 @@ def main():
                 if all_motions
                 else "Focus the camera on an already loaded motion ID"
             ),
+        )
+        step_description = (
+            "motion ID, following its object environment"
+            if all_motions
+            else "environment for the camera"
+        )
+        motion_selector_keys.register(
+            "LEFT", "previous_motion", f"Switch to the previous {step_description}"
+        )
+        motion_selector_keys.register(
+            "RIGHT", "next_motion", f"Switch to the next {step_description}"
         )
 
     # # Print per-env mapping: which motion and scene each env got
@@ -577,8 +626,13 @@ def main():
         print(
             "  F9 - switch to an available motion ID and follow its object environment"
         )
+        print(
+            "  LEFT/RIGHT - previous/next motion ID; camera follows its object "
+            "environment (restarts from frame 0)"
+        )
     else:
         print("  F9 - focus camera on an already loaded motion ID")
+        print("  LEFT/RIGHT - move camera to the previous/next environment")
     print("  Q - close simulator")
 
     actions = torch.zeros(env.num_envs, robot_config.number_of_actions, device=device)
@@ -589,6 +643,48 @@ def main():
             obs, rewards, dones, terminated, infos = env.step(actions)
 
             step_count += 1
+
+            motion_step = 0
+            if motion_selector_keys is not None:
+                # Consume both so a stale press never fires later.
+                if motion_selector_keys.previous_motion.consume():
+                    motion_step -= 1
+                if motion_selector_keys.next_motion.consume():
+                    motion_step += 1
+            if motion_step != 0:
+                current_env_id = int(env.simulator._camera_target["env"])
+                if all_motions:
+                    current_motion_id = int(
+                        env.motion_manager.motion_ids[current_env_id].item()
+                    )
+                    selected = _step_motion_id(
+                        playable_motion_ids, current_motion_id, motion_step
+                    )
+                    compatibility = env.motion_manager.motion_sampling_mask_per_env
+                    # Stay on the camera's env when it can play the motion;
+                    # otherwise jump to the env holding that motion's object.
+                    if compatibility[current_env_id, selected]:
+                        target_env_id = current_env_id
+                    else:
+                        target_env_id = int(
+                            torch.where(compatibility[:, selected])[0][0].item()
+                        )
+                    _play_motion_in_env(env.motion_manager, target_env_id, selected)
+                    _focus_camera(env, target_env_id)
+                    env_note = (
+                        ""
+                        if target_env_id == current_env_id
+                        else f", camera moved env {current_env_id} -> {target_env_id}"
+                    )
+                    print(
+                        f"Motion {current_motion_id} -> {selected} "
+                        f"(env {target_env_id}{env_note}), restarted from frame 0."
+                    )
+                else:
+                    target_env_id = (current_env_id + motion_step) % env.num_envs
+                    _focus_camera(env, target_env_id)
+                    motion_id = int(env.motion_manager.motion_ids[target_env_id].item())
+                    print(f"Camera now follows env {target_env_id}, motion {motion_id}.")
 
             if (
                 motion_selector_keys is not None
@@ -613,24 +709,12 @@ def main():
                             )
                             continue
                         target_env_id = int(compatible_env_ids[0].item())
-                        target_env_ids = torch.tensor(
-                            [target_env_id], dtype=torch.long, device=device
+                        _play_motion_in_env(
+                            env.motion_manager, target_env_id, selected
                         )
-                        target_motion_ids = torch.tensor(
-                            [selected], dtype=torch.long, device=device
-                        )
-                        env.motion_manager._fixed_motion_ids_per_env[target_env_id] = (
-                            selected
-                        )
-                        env.motion_manager.sample_motions(
-                            target_env_ids, target_motion_ids
-                        )
-                        env.motion_manager.motion_times[target_env_id] = 0.0
                     else:
                         target_env_id = loaded_motion_ids.index(selected)
-                    env.simulator._camera_target["env"] = target_env_id
-                    env.simulator._camera_target["element"] = 0
-                    env.simulator.user_interface.active_env_id = target_env_id
+                    _focus_camera(env, target_env_id)
                     if all_motions:
                         print(
                             f"Env {target_env_id} now plays motion {selected}; "
