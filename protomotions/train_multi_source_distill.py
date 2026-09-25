@@ -139,7 +139,8 @@ def parser():
     p.add_argument(
         "--evaluate-teachers",
         action="store_true",
-        help="Also evaluate frozen teachers with the same protocol",
+        help="Also evaluate frozen teachers with the same protocol: once before "
+        "training starts, or alongside the student with --evaluate-only",
     )
     p.add_argument("--check-config-only", action="store_true")
     p.add_argument(
@@ -609,6 +610,14 @@ def run(args):
         dims = {}
         for key in OBS_KEYS:
             sizes = {layout[key] for layout, _ in layouts if key in layout}
+            if (
+                not sizes
+                and key == "mimic_target_poses"
+                and not manifest.locomotion_num_ranks
+            ):
+                # The unused locomotion encoder still needs a positive input width.
+                dims[key] = 1
+                continue
             if len(sizes) != 1:
                 raise ValueError(
                     f"{key}: inconsistent native observation dimensions {sizes}; package compatible subsets"
@@ -809,9 +818,9 @@ def run(args):
                     flush=True,
                 )
 
-        def evaluate(iteration):
-            labels = [("student", None)]
-            if args.evaluate_teachers:
+        def evaluate(iteration, student=True, teachers=False):
+            labels = [("student", None)] if student else []
+            if teachers:
                 labels.append(("teacher", router))
             for label, teacher in labels:
                 records = collective_call(
@@ -886,8 +895,13 @@ def run(args):
         if args.evaluate_only:
             if not (args.resume or args.warm_start):
                 raise ValueError("--evaluate-only requires --resume or --warm-start")
-            evaluate(start)
+            evaluate(start, teachers=args.evaluate_teachers)
             return
+
+        # Teachers are frozen: one evaluation before training is enough, and a
+        # resumed run already has it.
+        if args.evaluate_teachers and not args.resume:
+            obs = evaluate(start, student=False, teachers=True)
 
         for iteration in range(start + 1, args.iterations + 1):
             collected, actions, identities = [], [], []

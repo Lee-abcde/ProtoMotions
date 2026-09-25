@@ -41,13 +41,16 @@ EVAL_EVERY="${EVAL_EVERY:-1000}"
 # env_<motion>.ckpt PSI buffer; a subject whose file is missing or corrupt
 # starts empty), empty (student PSI only) or off (raw reference).
 STUDENT_PSI="${STUDENT_PSI:-teacher}"
+# EVALUATE_TEACHERS=1 evaluates every frozen teacher once before training
+# (eval_teacher_0.json); a resumed run skips it.
+EVALUATE_TEACHERS="${EVALUATE_TEACHERS:-0}"
 # Weights & Biases: USE_WANDB=1 enables it. Online like train_slurm.py, with
 # credentials from ~/.netrc on the cluster; set WANDB_MODE=offline to defer upload.
 USE_WANDB="${USE_WANDB:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-physical_animation}"
 WANDB_MODE="${WANDB_MODE:-online}"
 export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS ITERATIONS EVAL_EVERY
-export STUDENT_PSI
+export STUDENT_PSI EVALUATE_TEACHERS
 export USE_WANDB WANDB_PROJECT WANDB_MODE
 # Follows sbatch --ntasks-per-node overrides, so a smaller smoke run needs no edit.
 # Deliberately not the name torch uses for its own rank count: exporting that one
@@ -120,6 +123,11 @@ if [[ -f "/workspace/output/$RUN_NAME/last.ckpt" ]]; then
   resume_args=(--resume "/workspace/output/$RUN_NAME/last.ckpt")
 fi
 
+teacher_eval_args=()
+if [[ "$EVALUATE_TEACHERS" == "1" ]]; then
+  teacher_eval_args=(--evaluate-teachers)
+fi
+
 wandb_args=()
 if [[ "$USE_WANDB" == "1" ]]; then
   export WANDB_DIR="/workspace/output/$RUN_NAME"
@@ -149,6 +157,7 @@ python -u -m protomotions.train_multi_source_distill \
   --ujitso-cache-dir /tmp/protomotions_ujitso \
   --ujitso-cache-budget-mb 1024 \
   --timeout-minutes 180 \
+  "${teacher_eval_args[@]}" \
   "${wandb_args[@]}" \
   "${resume_args[@]}"
 status=$?

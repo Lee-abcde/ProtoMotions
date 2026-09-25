@@ -266,6 +266,10 @@ def task_balanced_source_weights(
         raise ValueError("Source counts and task IDs must have the same shape")
     weights = torch.empty_like(global_counts)
     for mask, mass in ((source_is_hoi, hoi_weight), (~source_is_hoi, 1 - hoi_weight)):
+        if not mask.any():
+            if mass != 0:
+                raise ValueError("A task with positive loss weight has no sources")
+            continue
         total = global_counts[mask].sum()
         if total <= 0:
             raise ValueError("Each task needs at least one rollout sample")

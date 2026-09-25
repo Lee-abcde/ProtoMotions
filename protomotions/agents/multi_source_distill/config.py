@@ -32,12 +32,21 @@ class SourceManifest:
     hoi_weight: float = 0.5
 
     def validate(self) -> None:
-        if self.locomotion_num_ranks < 1 or not 0 < self.hoi_weight < 1:
-            raise ValueError("Require locomotion_num_ranks >= 1 and 0 < hoi_weight < 1")
+        if self.locomotion_num_ranks < 0 or not 0 < self.hoi_weight <= 1:
+            raise ValueError(
+                "Require locomotion_num_ranks >= 0 and 0 < hoi_weight <= 1"
+            )
         if len({s.id for s in self.sources}) != len(self.sources):
             raise ValueError("Dataset IDs must be unique")
-        if sum(s.task == "locomotion" for s in self.sources) != 1:
-            raise ValueError("Exactly one logical locomotion source is required")
+        locomotion_sources = sum(s.task == "locomotion" for s in self.sources)
+        if locomotion_sources != int(self.locomotion_num_ranks > 0):
+            raise ValueError(
+                "Require one locomotion source iff locomotion_num_ranks > 0"
+            )
+        if (self.locomotion_num_ranks == 0) != (self.hoi_weight == 1):
+            raise ValueError(
+                "HOI-only runs require hoi_weight=1; joint runs require hoi_weight<1"
+            )
         if not any(s.task == "hoi" for s in self.sources):
             raise ValueError("At least one HOI source is required")
         for s in self.sources:
@@ -261,7 +270,9 @@ def load_teacher_configs(manifest: SourceManifest) -> list[dict]:
 
 
 def validate_teacher_configs(manifest: SourceManifest, configs: list[dict]) -> None:
-    baseline = next(i for i, s in enumerate(manifest.sources) if s.task == "locomotion")
+    baseline = next(
+        (i for i, s in enumerate(manifest.sources) if s.task == "locomotion"), 0
+    )
     base = configs[baseline]
     names = base["robot"].kinematic_info.dof_names
     same_task = {}
@@ -284,7 +295,7 @@ def validate_teacher_configs(manifest: SourceManifest, configs: list[dict]) -> N
         )
         if diffs:
             raise ValueError(
-                f"Action contract mismatch: {label}\nValues are locomotion != {source.task}:\n"
+                f"Action contract mismatch: {label}\nValues are baseline != {source.task}:\n"
                 + "\n".join(diffs)
             )
         fn = canonical(cfg["env"].action_config["fn"])
