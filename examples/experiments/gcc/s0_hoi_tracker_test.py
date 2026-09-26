@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""S0 HOI tracker with contact-cleaned inputs and physical grip shaping."""
+"""S0 HOI tracker with contact-cleaned inputs and baseline grip reward."""
 
 from __future__ import annotations
 
@@ -60,6 +60,7 @@ RIGHT_FINGERTIP_NAMES = [
     "R_Pinky3",
 ]
 FINGER_NAMES = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
+FINGER_ACTION_TANH_GAIN = 2.0
 # Distal capsule endpoints in each fingertip body's local frame.
 LEFT_FINGERTIP_LOCAL_OFFSETS = [
     [0.0140, 0.0180, -0.0025],
@@ -155,6 +156,25 @@ def _finger_dof_groups(
     )
 
 
+def _grip_action_tanh_gain(robot_cfg: RobotConfig) -> torch.Tensor:
+    """Use more of the joint range for the DOFs that close the fingers."""
+    gain = torch.ones(robot_cfg.kinematic_info.num_dofs, dtype=torch.float)
+    for dof_id, dof_name in enumerate(robot_cfg.kinematic_info.dof_names):
+        is_four_finger_flexion = dof_name.endswith("_x") and any(
+            dof_name.startswith(f"{side}_{finger}")
+            for side in ("L", "R")
+            for finger in ("Index", "Middle", "Ring", "Pinky")
+        )
+        is_thumb_flexion = dof_name.endswith("_y") and any(
+            dof_name.startswith(f"{side}_Thumb") for side in ("L", "R")
+        )
+        if is_four_finger_flexion or is_thumb_flexion:
+            gain[dof_id] = FINGER_ACTION_TANH_GAIN
+    if int((gain != 1.0).sum()) != 30:
+        raise ValueError("Expected 30 SMPL-X grip DOFs for finger tanh gain")
+    return gain
+
+
 def _intermimic_body_groups(robot_cfg: RobotConfig):
     body_names = robot_cfg.kinematic_info.body_names
     aliases = robot_cfg.common_naming_to_robot_body_names
@@ -196,7 +216,7 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
     from protomotions.envs.component_factories import (
         intermimic_contact_loss_term_factory,
         intermimic_contact_reward_factory,
-        intermimic_fingertip_bearing_reward_factory,
+        intermimic_grip_reward_factory,
         intermimic_human_error_term_factory,
         intermimic_human_reward_factory,
         intermimic_interaction_error_term_factory,
@@ -205,7 +225,6 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
         intermimic_object_obs_factory,
         intermimic_object_reward_factory,
         intermimic_object_rotation_error_term_factory,
-        intermimic_opposition_grip_reward_factory,
         intermimic_root_height_term_factory,
         intermimic_target_obs_factory,
         max_coords_obs_factory,
@@ -262,6 +281,13 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             if name not in KEY_BODY_NAMES
         ],
     )
+    left_finger_dof_ids, left_finger_effort_limits = _finger_dof_groups(
+        robot_cfg, "L"
+    )
+    right_finger_dof_ids, right_finger_effort_limits = _finger_dof_groups(
+        robot_cfg, "R"
+    )
+
     return EnvConfig(
         ref_respawn_offset=0.0,
         ref_object_respawn_offset=0.0,
@@ -283,12 +309,6 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 # Match the dense update behavior used by always_keypos:
                 # every eligible rollout may contribute PSI candidates.
                 physical_buffer_update_probability=1.0,
-                # Reference-free grasp quality: reward three-finger
-                # participation, opposing object forces, and persistence.
-                grip_opposition_enabled=True,
-                grip_minimum_force=0.5,
-                grip_target_force=5.0,
-                grip_hold_duration=0.2,
             )
         },
         observation_components={
@@ -348,25 +368,17 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
                 negative_weight=3.0,
                 contact_energy_weight=1e-9,
             ),
-            # Encourage a geometric thumb/finger wrap before contact without
-            # copying noisy reference finger poses from OMOMO.
-            "intermimic_fingertip_bearing": (
-                intermimic_fingertip_bearing_reward_factory(
-                    left_fingertip_body_ids=left_grip_fingertip_body_ids,
-                    right_fingertip_body_ids=right_grip_fingertip_body_ids,
-                    left_fingertip_local_offsets=(
-                        left_fingertip_local_offsets[:5]
-                    ),
-                    right_fingertip_local_offsets=(
-                        right_fingertip_local_offsets[:5]
-                    ),
-                    left_hand_body_ids=left_hand_body_ids,
-                    right_hand_body_ids=right_hand_body_ids,
-                    max_hand_weight=1.0,
-                    distance_scale=20.0,
-                )
-            ),
-            "intermimic_grip": intermimic_opposition_grip_reward_factory(
+            "intermimic_grip": intermimic_grip_reward_factory(
+                left_hand_body_ids=left_hand_body_ids,
+                right_hand_body_ids=right_hand_body_ids,
+                left_fingertip_body_ids=left_grip_fingertip_body_ids,
+                right_fingertip_body_ids=right_grip_fingertip_body_ids,
+                left_finger_dof_ids=left_finger_dof_ids,
+                right_finger_dof_ids=right_finger_dof_ids,
+                left_finger_effort_limits=left_finger_effort_limits,
+                right_finger_effort_limits=right_finger_effort_limits,
+                target_force=5.0,
+                target_effort_ratio=0.3,
                 grip_weight=0.2,
             ),
         },
@@ -390,7 +402,10 @@ def env_config(robot_cfg: RobotConfig, args: argparse.Namespace) -> EnvConfig:
             ),
             "required_hand_contact": intermimic_contact_loss_term_factory(),
         },
-        action_config=make_asymmetric_pd_action_config(robot_cfg),
+        action_config=make_asymmetric_pd_action_config(
+            robot_cfg,
+            action_tanh_gain=_grip_action_tanh_gain(robot_cfg),
+        ),
         motion_manager=MimicMotionManagerConfig(
             # Hybrid initialization: 10% from frame zero; PSI samples the
             # remaining starts from full-horizon, difficult frames.
