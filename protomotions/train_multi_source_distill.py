@@ -84,7 +84,9 @@ def parser():
         "--batch-size", type=int, default=4096, help="Minibatch size per GPU"
     )
     p.add_argument("--rollout-steps", type=int, default=32)
-    p.add_argument("--iterations", type=int, default=10000)
+    # Effectively unlimited: a run is bounded by the SLURM wall clock and picked
+    # up again by --resume, so the iteration count should not end it.
+    p.add_argument("--iterations", type=int, default=100000000)
     p.add_argument("--mini-epochs", type=int, default=6)
     p.add_argument("--learning-rate", type=float, default=2e-5)
     p.add_argument("--gradient-clip", type=float, default=50.0)

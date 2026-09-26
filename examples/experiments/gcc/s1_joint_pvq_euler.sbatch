@@ -34,7 +34,9 @@ CONTAINER_ENV="${CONTAINER_ENV:-/opt/IsaacLab_new/.venv/bin/activate}"
 NUM_ENVS="${NUM_ENVS:-2048}"
 BATCH_SIZE="${BATCH_SIZE:-4096}"
 ROLLOUT_STEPS="${ROLLOUT_STEPS:-32}"
-ITERATIONS="${ITERATIONS:-10000}"
+# Effectively unlimited. A run ends on the SLURM wall clock and continues from
+# last.ckpt on the next submission, so the iteration count must not cap it.
+ITERATIONS="${ITERATIONS:-100000000}"
 # Full student evaluation (all AMASS-X shards and every OMOMO subject); 0 disables it.
 EVAL_EVERY="${EVAL_EVERY:-1000}"
 # HOI physical state initialization: teacher (seed from each teacher's
