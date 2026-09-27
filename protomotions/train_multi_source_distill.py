@@ -60,6 +60,13 @@ from protomotions.agents.multi_source_distill.psi import (
     source_frame_ranges,
     student_psi_path,
 )
+from protomotions.agents.multi_source_distill.teacher_filter import (
+    HOI_FILTER_TRIALS_PER_MOTION,
+    apply_filter,
+    excluded_pooled_ids,
+    export_filter,
+    load_filter,
+)
 
 BEST_CHECKPOINT = "score_based.ckpt"
 SNAPSHOT_DIR = "snapshots"
@@ -138,6 +145,11 @@ def parser():
         help="Load student only for a new manifest with the same input layout",
     )
     p.add_argument("--evaluate-only", action="store_true")
+    p.add_argument(
+        "--hoi-teacher-filter",
+        help="HOI filter JSON. Training defaults to <output-dir>/hoi_teacher_filter.json; "
+        "--evaluate-only defaults to the checkpoint run's table.",
+    )
     p.add_argument(
         "--evaluate-teachers",
         action="store_true",
@@ -402,6 +414,8 @@ class WandbRun:
     def log_evaluation(self, report):
         prefix = f"eval_{report['policy']}"
         metrics = self._flatten(prefix, report["summary"], {})
+        if report.get("filtered_record_count", 0) > 0:
+            self._flatten(f"{prefix}/filtered", report["filtered_summary"], metrics)
         self._flatten(f"{prefix}/selection", report.get("selection", {}), metrics)
         self._log(metrics, report["iteration"])
 
@@ -453,7 +467,20 @@ def restore_checkpoint(
             )
         if len(saved["rank_states"]) != world_size:
             raise ValueError("Resume requires the same rank/shard assignment")
-        if saved.get("training_config") != training_config:
+
+        def without_filter_identity(settings):
+            if settings is None:
+                return None
+            # Older filter checkpoints used a file hash instead of a decision digest.
+            return {
+                key: value
+                for key, value in settings.items()
+                if key not in {"hoi_teacher_filter_digest", "hoi_teacher_filter_sha256"}
+            }
+
+        if without_filter_identity(
+            saved.get("training_config")
+        ) != without_filter_identity(training_config):
             raise ValueError(
                 "Resume training settings differ; use warm-start for a new run"
             )
@@ -541,6 +568,37 @@ def psi_enabled(args):
     return args.student_psi != "off" and not args.evaluate_only
 
 
+def hoi_teacher_filter_path(args):
+    """Use the training run's table for checkpoint evaluation."""
+    if args.hoi_teacher_filter:
+        return Path(args.hoi_teacher_filter)
+    if args.evaluate_only and (args.resume or args.warm_start):
+        directory = Path(args.resume or args.warm_start).parent
+        if directory.name == SNAPSHOT_DIR:
+            directory = directory.parent
+        return directory / "hoi_teacher_filter.json"
+    return Path(args.output_dir) / "hoi_teacher_filter.json"
+
+
+def load_hoi_filter_for_start(args, manifest):
+    """Load an existing table; checkpoint evaluation never builds a new one."""
+    path = hoi_teacher_filter_path(args)
+    if path.is_file():
+        return load_filter(path, manifest)
+    if args.evaluate_only:
+        raise FileNotFoundError(
+            f"--evaluate-only needs the HOI teacher filter at {path}; "
+            "pass --hoi-teacher-filter to use another table"
+        )
+    return None
+
+
+def filter_changed_on_resume(saved, current_digest):
+    """Detect a rebuilt filter so old sampling state can be reset."""
+    previous = (saved.get("training_config") or {}).get("hoi_teacher_filter_digest")
+    return previous != current_digest
+
+
 def run(args):
     from protomotions.agents.multi_source_distill.runtime import (
         build_environment,
@@ -554,13 +612,18 @@ def run(args):
 
     rank, world_size = dist.get_rank(), dist.get_world_size()
     manifest, configs = collective_call(lambda: preflight(args, world_size))
+    filter_path = hoi_teacher_filter_path(args)
+    filter_pair = collective_call(
+        lambda: load_hoi_filter_for_start(args, manifest) if rank == 0 else None
+    )
+    filter_document, filter_digest = gather_objects(filter_pair)[0] or (None, None)
     collective_call(
         lambda: check_teacher_psi(args, manifest, configs) if rank == 0 else None
     )
     local_rank = int(os.environ["LOCAL_RANK"])
     device = torch.device("cuda", local_cuda_device(local_rank))
     output_dir = collective_call(
-        lambda: prepare_output_directory(args) if rank == 0 else Path(args.output_dir)
+        lambda: Path(args.output_dir) if rank != 0 else prepare_output_directory(args)
     )
     torch.manual_seed(args.seed + rank)
     wandb_run = collective_call(lambda: WandbRun.start(args, output_dir, rank))
@@ -600,10 +663,69 @@ def run(args):
             f"{[manifest.sources[i].id for i in assigned]}",
             flush=True,
         )
+        initial_motion_weights = env.motion_manager.motion_weights.clone()
         task = manifest.sources[assigned[0]].task
         router = collective_call(
             lambda: load_teachers(manifest, configs, assigned, obs, device)
         )
+        if filter_document is None:
+            print(
+                f"[rank {rank}] building HOI teacher filter: {filter_path}", flush=True
+            )
+            owned = set(owned_sources(manifest, rank, world_size))
+            records = collective_call(
+                lambda: (
+                    evaluate_sources(
+                        torch.nn.Identity(),
+                        env,
+                        task,
+                        configs,
+                        assigned,
+                        source_ids,
+                        local_ids,
+                        manifest,
+                        output_dir,
+                        rank,
+                        teacher_router=router,
+                        trials_per_motion=HOI_FILTER_TRIALS_PER_MOTION,
+                    )
+                    if task == "hoi" and owned
+                    else []
+                )
+            )
+            records = [
+                record
+                for record in records
+                if record["source_id"] in {manifest.sources[i].id for i in owned}
+            ]
+            all_records = [
+                record for batch in gather_objects(records) for record in batch
+            ]
+
+            def save_filter():
+                if rank != 0:
+                    return None
+                document = export_filter(filter_path, manifest, all_records)
+                excluded = sum(
+                    motion["excluded"]
+                    for entry in document["sources"].values()
+                    for motion in entry["motions"]
+                )
+                print(
+                    f"Wrote {filter_path}: excluded {excluded} HOI motions",
+                    flush=True,
+                )
+                return load_filter(filter_path, manifest)
+
+            filter_pair = collective_call(save_filter)
+            filter_document, filter_digest = gather_objects(filter_pair)[0]
+        # Source-local IDs remain stable when the motion libraries are pooled per rank.
+        excluded_keys = {
+            (source_id, motion["local_motion_id"])
+            for source_id, entry in filter_document["sources"].items()
+            for motion in entry["motions"]
+            if motion["excluded"]
+        }
         local_dims = {
             k: obs[k].reshape(env.num_envs, -1).shape[1] for k in OBS_KEYS if k in obs
         }
@@ -648,8 +770,10 @@ def run(args):
                 "revive_every",
             )
         }
+        training_config["hoi_teacher_filter_digest"] = filter_digest
         start = 0
         saved = None
+        filter_changed = False
         if args.resume or args.warm_start:
             saved = collective_call(
                 lambda: restore_checkpoint(
@@ -666,6 +790,7 @@ def run(args):
             )
             if args.resume:
                 start = saved["iteration"]
+                filter_changed = filter_changed_on_resume(saved, filter_digest)
         ddp = DistributedDataParallel(
             model,
             device_ids=[device.index],
@@ -679,11 +804,27 @@ def run(args):
             random.setstate(state["python_rng"])
             np.random.set_state(state["numpy_rng"])
             env.motion_manager.motion_weights.copy_(state["motion_weights"].to(device))
+            if filter_changed:
+                env.motion_manager.motion_weights.copy_(initial_motion_weights)
+                print(
+                    f"[rank {rank}] HOI filter changed; resetting motion curriculum",
+                    flush=True,
+                )
             for quantizer, usage_count in zip(model.quantizers, state["usage"]):
                 quantizer._usage_count.copy_(usage_count.to(device))
+        filtered_ids = collective_call(
+            lambda: excluded_pooled_ids(
+                filter_document,
+                manifest,
+                source_ids,
+                local_ids,
+                env.motion_lib.motion_files,
+            )
+        )
+        collective_call(lambda: apply_filter(env.motion_manager, filtered_ids))
         curriculum_state = (
             saved["rank_states"][rank].get("motion_sampling_curriculum")
-            if args.resume
+            if args.resume and not filter_changed
             else None
         )
         sampling_curriculum = collective_call(
@@ -699,6 +840,8 @@ def run(args):
                 ),
             )
         )
+        if not args.evaluate_only:
+            obs, _ = collective_call(lambda: env.reset())
         psi_control = (
             find_psi_control(env) if task == "hoi" and psi_enabled(args) else None
         )
@@ -770,7 +913,9 @@ def run(args):
         )
         # The resumed checkpoint's record is the score to beat, also in a new
         # output directory; a warm start's sources make old scores incomparable.
-        best_evaluation = saved.get("best_evaluation") if args.resume else None
+        best_evaluation = (
+            saved.get("best_evaluation") if args.resume and not filter_changed else None
+        )
 
         def gather_rank_states():
             return gather_objects(
@@ -853,7 +998,19 @@ def run(args):
                 gathered = gather_objects(records)
                 records = [r for batch in gathered for r in batch]
                 summary = summarize_evaluation(records)
-                score = selection_score(summary)
+                filtered_records = [
+                    record
+                    for record in records
+                    if (record["source_id"], record["local_motion_id"])
+                    not in excluded_keys
+                ]
+                filtered_record_count = len(records) - len(filtered_records)
+                filtered_summary = (
+                    summarize_evaluation(filtered_records)
+                    if filtered_record_count
+                    else summary
+                )
+                score = selection_score(filtered_summary)
                 if label == "student" and not args.evaluate_only:
                     # Usage counters are rank-local; retain them separately from rank-zero buffers.
                     states = gather_rank_states()
@@ -870,6 +1027,8 @@ def run(args):
                     "iteration": iteration,
                     "policy": label,
                     "summary": summary,
+                    "filtered_summary": filtered_summary,
+                    "filtered_record_count": filtered_record_count,
                     "selection": selection,
                     "motions": records,
                 }
@@ -1191,11 +1350,16 @@ def main():
     )
     if args.check_config_only:
         manifest, configs = preflight(args, args.world_size)
+        filter_path = hoi_teacher_filter_path(args)
+        load_hoi_filter_for_start(args, manifest)
         psi_empty = check_teacher_psi(args, manifest, configs)
         print(
             json.dumps(
                 {
                     "valid": True,
+                    "hoi_teacher_filter": (
+                        "existing" if filter_path.is_file() else "build_on_start"
+                    ),
                     "student_psi_empty_without_teacher": psi_empty,
                     "reference_offsets_seconds": {
                         s.id: reference_offsets(c)

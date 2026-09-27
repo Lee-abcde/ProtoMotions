@@ -46,13 +46,15 @@ STUDENT_PSI="${STUDENT_PSI:-teacher}"
 # EVALUATE_TEACHERS=1 evaluates every frozen teacher once before training
 # (eval_teacher_0.json); a resumed run skips it.
 EVALUATE_TEACHERS="${EVALUATE_TEACHERS:-0}"
+# Optional override; the Python entry point chooses the run's default table.
+HOI_TEACHER_FILTER="${HOI_TEACHER_FILTER:-}"
 # Weights & Biases: USE_WANDB=1 enables it. Online like train_slurm.py, with
 # credentials from ~/.netrc on the cluster; set WANDB_MODE=offline to defer upload.
 USE_WANDB="${USE_WANDB:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-physical_animation}"
 WANDB_MODE="${WANDB_MODE:-online}"
 export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS ITERATIONS EVAL_EVERY
-export STUDENT_PSI EVALUATE_TEACHERS
+export STUDENT_PSI EVALUATE_TEACHERS HOI_TEACHER_FILTER
 export USE_WANDB WANDB_PROJECT WANDB_MODE
 # Follows sbatch --ntasks-per-node overrides, so a smaller smoke run needs no edit.
 # Deliberately not the name torch uses for its own rank count: exporting that one
@@ -125,6 +127,11 @@ if [[ -f "/workspace/output/$RUN_NAME/last.ckpt" ]]; then
   resume_args=(--resume "/workspace/output/$RUN_NAME/last.ckpt")
 fi
 
+filter_args=()
+if [[ -n "$HOI_TEACHER_FILTER" ]]; then
+  filter_args=(--hoi-teacher-filter "$HOI_TEACHER_FILTER")
+fi
+
 teacher_eval_args=()
 if [[ "$EVALUATE_TEACHERS" == "1" ]]; then
   teacher_eval_args=(--evaluate-teachers)
@@ -159,6 +166,7 @@ python -u -m protomotions.train_multi_source_distill \
   --ujitso-cache-dir /tmp/protomotions_ujitso \
   --ujitso-cache-budget-mb 1024 \
   --timeout-minutes 180 \
+  "${filter_args[@]}" \
   "${teacher_eval_args[@]}" \
   "${wandb_args[@]}" \
   "${resume_args[@]}"
@@ -172,7 +180,7 @@ INNER
 echo "Euler preflight: code, data, checkpoints, action contract, and rank assignment"
 mkdir -p "$NODE_TMP_ROOT/overlay_preflight/upper" "$NODE_TMP_ROOT/overlay_preflight/work"
 apptainer exec --overlay "$NODE_TMP_ROOT/overlay_preflight" "${container_args[@]}" "$CONTAINER" bash -lc \
-  'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; resume_args=(); if [[ -f "/workspace/output/$RUN_NAME/last.ckpt" ]]; then resume_args=(--resume "/workspace/output/$RUN_NAME/last.ckpt"); fi; python -m protomotions.train_multi_source_distill --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS" --student-psi "$STUDENT_PSI" "${resume_args[@]}"'
+  'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; resume_args=(); filter_args=(); if [[ -f "/workspace/output/$RUN_NAME/last.ckpt" ]]; then resume_args=(--resume "/workspace/output/$RUN_NAME/last.ckpt"); fi; if [[ -n "$HOI_TEACHER_FILTER" ]]; then filter_args=(--hoi-teacher-filter "$HOI_TEACHER_FILTER"); fi; python -m protomotions.train_multi_source_distill --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS" "${filter_args[@]}" --student-psi "$STUDENT_PSI" "${resume_args[@]}"'
 
 echo "Starting $PREFLIGHT_RANKS-rank training in $RUN_DIR"
 # Each task computes its own overlay, so SLURM_PROCID must expand inside srun.

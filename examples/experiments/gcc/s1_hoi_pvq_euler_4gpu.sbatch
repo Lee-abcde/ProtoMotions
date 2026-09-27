@@ -11,6 +11,6 @@
 #SBATCH --error=/cluster/scratch/lijingy/joint_pvq_results/hoi_pvq_%j.log
 
 export RUN_NAME="${RUN_NAME:-hoi_pvq_v1}"
-export EVALUATE_TEACHERS="${EVALUATE_TEACHERS:-1}"
+export EVALUATE_TEACHERS="${EVALUATE_TEACHERS:-0}"
 export SOURCES="${SOURCES:-examples/experiments/gcc/s1_hoi_pvq_sources_euler_4gpu.yaml}"
 source "${PROTOMOTIONS_DIR:-/cluster/home/lijingy/ProtoMotions}/examples/experiments/gcc/s1_joint_pvq_euler.sbatch"

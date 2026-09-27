@@ -312,6 +312,7 @@ def evaluate_sources(
     teacher_router=None,
     sampling_curriculum=None,
     evaluation_iteration=None,
+    trials_per_motion=1,
 ):
     """Evaluate every motion from frame zero; preserve source and shard identity.
 
@@ -323,6 +324,10 @@ def evaluate_sources(
         raise ValueError(
             "sampling_curriculum and evaluation_iteration must be provided together"
         )
+    if trials_per_motion != 1 and (
+        teacher_router is None or sampling_curriculum is not None
+    ):
+        raise ValueError("Repeated trials are only supported for teacher evaluation")
     if sampling_curriculum is not None:
         sampling_curriculum.validate_update_iteration(evaluation_iteration)
 
@@ -349,7 +354,14 @@ def evaluate_sources(
     eval_cfg.evaluation_action_key = "action"
     agent = EvaluationAgent(model, env, task, output_dir, source_ids, teacher_router)
     evaluator = MimicEvaluator(agent, SimpleNamespace(device=env.device), eval_cfg)
-    records = run_parallel_mimic_trials(evaluator, trials_per_motion=1)[0]["motions"]
+    trial_results = run_parallel_mimic_trials(
+        evaluator, trials_per_motion=trials_per_motion
+    )
+    records = [
+        {**record, "trial_index": trial_index} if trials_per_motion > 1 else record
+        for trial_index, trial in enumerate(trial_results)
+        for record in trial["motions"]
+    ]
     # Update after complete trial collection and before IDs are gathered across ranks.
     if sampling_curriculum is not None and teacher_router is None:
         sampling_curriculum.update(records, evaluation_iteration)
