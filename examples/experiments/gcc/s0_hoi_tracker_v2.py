@@ -470,8 +470,8 @@ def agent_config(
             out_keys=["actor_trunk_out"],
             num_out=robot_config.number_of_actions,
             layers=[
-                MLPLayerConfig(units=1024, activation="relu")
-                for _ in range(6)
+                MLPLayerConfig(units=units, activation="relu")
+                for units in (4096, 4096, 2048)
             ],
         ),
     )
@@ -482,8 +482,8 @@ def agent_config(
         norm_clamp_value=5,
         num_out=1,
         layers=[
-            MLPLayerConfig(units=1024, activation="relu")
-            for _ in range(4)
+            MLPLayerConfig(units=units, activation="relu")
+            for units in (4096, 4096, 2048)
         ],
     )
 
