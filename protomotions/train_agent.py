@@ -148,14 +148,6 @@ For temporary overrides, use a new experiment name.
 """
 
 
-def positive_int(value):
-    """Parse a strictly positive integer CLI value."""
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
-    return parsed
-
-
 def create_parser():
     """Create and configure the argument parser."""
     parser = argparse.ArgumentParser(
@@ -298,6 +290,7 @@ def create_parser():
             "collects one rollout and performs its optimization updates."
         ),
     )
+    add_mlp_architecture_arguments(parser)
     parser.add_argument(
         "--overrides",
         nargs="*",
@@ -322,7 +315,12 @@ import faulthandler  # noqa: E402
 
 faulthandler.enable()
 
-from protomotions.utils.cli_utils import parse_bool  # noqa: E402
+from protomotions.utils.cli_utils import (  # noqa: E402
+    MLP_ARCHITECTURE_ARGUMENTS,
+    add_mlp_architecture_arguments,
+    parse_bool,
+    positive_int,
+)
 
 parser = create_parser()
 args, unknown_args = parser.parse_known_args()
@@ -620,6 +618,32 @@ def apply_training_iteration_limit(args, agent_config):
         agent_config.training_max_iterations = max_iterations
 
 
+def validate_warm_start_mlp_architecture(args, agent_config, checkpoint_path):
+    """Fail before building the simulator if MLP args don't match the checkpoint."""
+    if (
+        getattr(args, "actor_hidden_dims", None) is None
+        and getattr(args, "critic_hidden_dims", None) is None
+    ):
+        return
+
+    from protomotions.utils.config_builder import (
+        mismatched_checkpoint_mlp_architecture,
+    )
+
+    state_dict = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=False, mmap=True
+    )
+    mismatches = mismatched_checkpoint_mlp_architecture(
+        args, agent_config, state_dict.get("model", {})
+    )
+    if mismatches:
+        raise ValueError(
+            "WARM START: MLP architecture does not match the checkpoint: "
+            + "; ".join(mismatches)
+            + ". Pass widths matching the checkpoint or train without --checkpoint."
+        )
+
+
 def load_motion_shard_cycle(checkpoint_path: Path) -> int:
     """Read the required packaged-motion shard cycle from a training checkpoint."""
     state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -660,6 +684,13 @@ def main():
     save_dir = Path("results") / args.experiment_name
     resolved_configs_path = save_dir / "resolved_configs.pt"
     original_experiment_path = Path(args.experiment_path)
+
+    # Snapshot CLI values before detect_checkpoint_mode replaces args with
+    # config.yaml on resume, so resume warnings report what was actually typed.
+    requested_mlp_widths = {
+        name: getattr(args, name, None) for _, name, _ in MLP_ARCHITECTURE_ARGUMENTS
+    }
+    requested_overrides = list(args.overrides or [])
 
     # --create-config-only: Force fresh mode to just generate configs
     if args.create_config_only:
@@ -702,10 +733,24 @@ def main():
             None  # Intentionally skip loading - frozen config from pickle
         )
 
-        # Warn if user tried to use overrides during resume
-        if args.overrides:
+        from protomotions.utils.config_builder import mismatched_mlp_architecture_args
+
+        ignored_mlp_args = mismatched_mlp_architecture_args(
+            requested_mlp_widths, agent_config
+        )
+        if ignored_mlp_args:
             log.warning(
-                "CLI overrides provided during RESUME will be IGNORED.\n"
+                "MLP architecture arguments are ignored during RESUME: "
+                + "; ".join(ignored_mlp_args)
+                + ". Use a new --experiment-name to train a different architecture."
+            )
+
+        # Warn if user passed overrides that differ from the saved run's
+        saved_overrides = list(args.overrides or [])
+        if requested_overrides and requested_overrides != saved_overrides:
+            log.warning(
+                f"CLI overrides provided during RESUME will be IGNORED: {requested_overrides} "
+                f"(saved: {saved_overrides}).\n"
                 "Resume uses exact configs from resolved_configs.pt.\n"
                 "For a new run with modified configs, use --checkpoint for warm start instead."
             )
@@ -744,7 +789,10 @@ def main():
         configure_robot_and_simulator_fn = getattr(experiment_module, "configure_robot_and_simulator", None)
         agent_config_fn = getattr(experiment_module, "agent_config", None)
 
-        from protomotions.utils.config_builder import build_standard_configs
+        from protomotions.utils.config_builder import (
+            apply_mlp_architecture_args,
+            build_standard_configs,
+        )
 
         configs = build_standard_configs(
             args=args,
@@ -764,6 +812,7 @@ def main():
         agent_config = configs["agent"]
 
         apply_training_iteration_limit(args, agent_config)
+        apply_mlp_architecture_args(args, agent_config)
 
         # Apply CLI overrides (highest priority)
         # NOTE: These overrides are saved to resolved_configs.pt and become permanent!
@@ -789,6 +838,9 @@ def main():
                     motion_lib_config=motion_lib_config,
                     scene_lib_config=scene_lib_config,
                 )
+
+        if mode == "warm_start":
+            validate_warm_start_mlp_architecture(args, agent_config, checkpoint_path)
 
         motion_lib_config.validate()
 

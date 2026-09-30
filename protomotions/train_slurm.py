@@ -51,9 +51,14 @@ Convert Docker images to Singularity/Enroot format as required by your cluster.
 import argparse
 import datetime
 import os
-from pathlib import Path
 import shlex
 import subprocess
+from pathlib import Path
+
+from protomotions.utils.cli_utils import (
+    add_mlp_architecture_arguments,
+    mlp_architecture_cli_args,
+)
 
 
 # =============================================================================
@@ -225,6 +230,7 @@ def create_parser():
         help="UJITSO disk cache budget in MB. Euler Isaac Lab jobs default to 1024.",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    add_mlp_architecture_arguments(parser)
     parser.add_argument("--overrides", nargs="*", default=[], help="Config overrides (key=value)")
 
     # SLURM arguments
@@ -389,6 +395,7 @@ def build_train_agent_command(args):
             cmd += ["--ujitso-cache-dir", ujitso_cache_dir]
         if ujitso_cache_budget_mb is not None:
             cmd += ["--ujitso-cache-budget-mb", ujitso_cache_budget_mb]
+    cmd += mlp_architecture_cli_args(args)
     if args.overrides:
         cmd += ["--overrides", *args.overrides]
 
@@ -466,6 +473,9 @@ def build_job_command(args, exp_folder, python_path):
                 "--ujitso-cache-budget-mb="
                 f"{args.ujitso_cache_budget_mb} "
             )
+    mlp_args = mlp_architecture_cli_args(args)
+    if mlp_args:
+        job_cmd += f"{quote_cmd(mlp_args)} "
     if args.overrides:
         job_cmd += f"--overrides {' '.join(args.overrides)} "
 

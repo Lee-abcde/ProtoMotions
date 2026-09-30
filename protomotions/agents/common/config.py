@@ -188,7 +188,12 @@ class MLPLayerConfig:
     )
     use_layer_norm: bool = field(
         default=False,
-        metadata={"help": "Whether to apply layer normalization after activation."},
+        metadata={
+            "help": (
+                "Whether to apply layer normalization between the linear layer and "
+                "its activation. Only honored on the first hidden layer."
+            )
+        },
     )
 
 
