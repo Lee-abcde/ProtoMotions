@@ -599,6 +599,29 @@ def filter_changed_on_resume(saved, current_digest):
     return previous != current_digest
 
 
+def resume_scene_motion_weights(args, rank, world_size, filter_digest):
+    """This rank's saved motion weights, which size its object-type env quotas.
+
+    The HOI tracker re-apportions envs across object types from its curriculum
+    weights on resume; this does the same before the simulator is built. Fresh
+    and warm starts, evaluation, a changed HOI filter (which resets the motion
+    curriculum) and a rank layout that restore_checkpoint rejects keep equal
+    quotas. So does a missing filter table: run() builds it after the simulator,
+    and only then is it known whether the curriculum survives.
+    """
+    if not args.resume or args.evaluate_only or filter_digest is None:
+        return None
+    # mmap reads only the rank states here; restore_checkpoint loads the rest.
+    saved = torch.load(args.resume, map_location="cpu", weights_only=False, mmap=True)
+    states = saved.get("rank_states")
+    if not states or len(states) != world_size:
+        return None
+    if filter_changed_on_resume(saved, filter_digest):
+        return None
+    weights = states[rank].get("motion_weights")
+    return None if weights is None else weights.clone()
+
+
 def run(args):
     from protomotions.agents.multi_source_distill.runtime import (
         build_environment,
@@ -645,6 +668,14 @@ def run(args):
     )
     print(f"[rank {rank}] Kit is up", flush=True)
     try:
+        scene_motion_weights = collective_call(
+            lambda: resume_scene_motion_weights(args, rank, world_size, filter_digest)
+        )
+        if scene_motion_weights is not None:
+            print(
+                f"[rank {rank}] object-type env quotas follow resumed motion weights",
+                flush=True,
+            )
         env, obs, assigned, source_ids, local_ids, _cfg = collective_call(
             lambda: build_environment(
                 manifest,
@@ -656,6 +687,7 @@ def run(args):
                 launcher.app,
                 psi=psi_enabled(args),
                 equal_motion_sampling=not args.evaluate_only,
+                scene_motion_weights=scene_motion_weights,
             )
         )
         print(

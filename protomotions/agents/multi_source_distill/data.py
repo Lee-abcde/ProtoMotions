@@ -132,6 +132,25 @@ def equal_motion_sampling_weights(weights: torch.Tensor) -> torch.Tensor:
     return result / result.sum()
 
 
+def scene_weights_from_motion_weights(
+    scenes: list, motion_weights: torch.Tensor
+) -> list[float]:
+    """Map pooled per-motion curriculum weights onto their paired scenes.
+
+    The object curriculum sums these per object type, like the HOI tracker
+    does with its env checkpoint weights on resume.
+    """
+    weights = motion_weights.detach().flatten().cpu().double()
+    if len(scenes) != weights.numel():
+        raise ValueError(
+            f"Resume weights cover {weights.numel()} motions, "
+            f"but this rank has {len(scenes)} scenes"
+        )
+    if not torch.isfinite(weights).all() or (weights < 0).any():
+        raise ValueError("Resume motion weights must be finite and nonnegative")
+    return [float(weights[scene.humanoid_motion_id]) for scene in scenes]
+
+
 def merge_scene_sources(sources: list, configs: list[dict], motion_offsets: list[int]):
     """Deserialize each scene against its own asset root, then remap motion IDs."""
     from protomotions.components.scene_lib import SceneLib

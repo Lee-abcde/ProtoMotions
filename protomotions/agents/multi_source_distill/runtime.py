@@ -21,6 +21,7 @@ from protomotions.agents.multi_source_distill.data import (
     equal_motion_sampling_weights,
     merge_motion_libraries,
     merge_scene_sources,
+    scene_weights_from_motion_weights,
 )
 from protomotions.utils.hydra_replacement import get_class
 
@@ -120,6 +121,7 @@ def build_environment(
     custom_key_handlers=None,
     psi=False,
     equal_motion_sampling=False,
+    scene_motion_weights=None,
 ):
     """Build one simulator per rank from the corresponding frozen teacher config.
 
@@ -128,10 +130,13 @@ def build_environment(
     ``rank`` then only selects the locomotion shard. ``psi`` keeps the HOI
     teacher's PSI buffer size; otherwise every reset uses the raw reference.
     Training can set ``equal_motion_sampling`` to give all enabled clips the
-    same initial weight across pooled sources.
+    same initial weight across pooled sources. ``scene_motion_weights`` are a
+    resumed rank's pooled motion weights; an HOI rank with an object curriculum
+    then sizes its per-object-type env quotas from them, as the HOI tracker
+    does on resume. Without them every object type gets an equal share.
     """
     from protomotions.components.motion_lib import MotionLib
-    from protomotions.components.scene_lib import SceneLib
+    from protomotions.components.scene_lib import ReplicationMethod, SceneLib
     from protomotions.simulator.base_simulator.utils import (
         convert_friction_for_simulator,
     )
@@ -183,8 +188,21 @@ def build_environment(
             [configs[i] for i in assigned],
             offsets,
         )
+        scene_weights = None
+        if (
+            scene_motion_weights is not None
+            and sc.replicate_method == ReplicationMethod.OBJECT_CURRICULUM
+        ):
+            scene_weights = scene_weights_from_motion_weights(
+                scenes, scene_motion_weights
+            )
         scene_lib = SceneLib(
-            sc, num_envs=num_envs, scenes=scenes, device=device, terrain=terrain
+            sc,
+            num_envs=num_envs,
+            scenes=scenes,
+            device=device,
+            terrain=terrain,
+            scene_weights=scene_weights,
         )
         scene_lib._set_support_surface_metadata(support)
     else:
