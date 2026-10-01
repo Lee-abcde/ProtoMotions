@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Detect OMOMO clips that end with an unsupported elevated object."""
+"""Detect OMOMO clips with unsupported elevated object endpoints."""
 
 from __future__ import annotations
 
@@ -104,7 +104,9 @@ def detect_support_surfaces(
     Strict endpoint rules first establish reliable support heights for each
     object. A second pass recovers clips whose human contact or immediate
     pickup prevents the strict stability/contact rules from succeeding, but
-    whose endpoint height matches a reliable height for the same object.
+    whose endpoint height matches a reliable height for the same object. A
+    stable initial pose at a known support height also needs a table when the
+    object ends held above the ground.
     """
     records = []
     for scene_idx, scene in enumerate(scenes):
@@ -120,9 +122,7 @@ def detect_support_surfaces(
         )
         terminal_slice = slice(obj.translation.shape[0] - window, None)
         initial_slice = slice(0, window)
-        initial_speed = (
-            obj.linear_velocity[initial_slice].norm(dim=-1).median().item()
-        )
+        initial_speed = obj.linear_velocity[initial_slice].norm(dim=-1).median().item()
         terminal_speed = (
             obj.linear_velocity[terminal_slice].norm(dim=-1).median().item()
         )
@@ -139,9 +139,7 @@ def detect_support_surfaces(
             ]
         )
         initial_bottom_median = initial_bottoms.median().item()
-        initial_bottom_range = (
-            initial_bottoms.max() - initial_bottoms.min()
-        ).item()
+        initial_bottom_range = (initial_bottoms.max() - initial_bottoms.min()).item()
         terminal_bottoms = torch.tensor(
             [
                 _world_vertices(obj, vertices, frame)[:, 2].min().item()
@@ -152,9 +150,7 @@ def detect_support_surfaces(
             ]
         )
         terminal_bottom = terminal_bottoms.median().item()
-        terminal_bottom_range = (
-            terminal_bottoms.max() - terminal_bottoms.min()
-        ).item()
+        terminal_bottom_range = (terminal_bottoms.max() - terminal_bottoms.min()).item()
 
         terminal_is_stable = (
             terminal_speed <= max_terminal_speed
@@ -176,8 +172,7 @@ def detect_support_surfaces(
             <= max_endpoint_height_delta
         )
         ends_stable_on_ground = (
-            terminal_is_stable
-            and terminal_bottom <= max_initial_bottom_height
+            terminal_is_stable and terminal_bottom <= max_initial_bottom_height
         )
 
         records.append(
@@ -242,16 +237,12 @@ def detect_support_surfaces(
                 "top_height": support_top_height,
                 "footprint": (float(footprint[0]), float(footprint[1])),
                 "terminal_speed": record["terminal_speed"],
-                "terminal_contact_fraction": record[
-                    "terminal_contact_fraction"
-                ],
+                "terminal_contact_fraction": record["terminal_contact_fraction"],
                 "detection_rule": detection_rule,
             }
         )
         selected_motion_ids.add(record["motion_id"])
-        support_heights_by_object[obj.object_identifier].append(
-            support_top_height
-        )
+        support_heights_by_object[obj.object_identifier].append(support_top_height)
 
     # First pass: preserve the strict endpoint rules and use their results as
     # reliable support-height references for each object in this subject.
@@ -281,8 +272,7 @@ def detect_support_surfaces(
                 True,
             )
         elif (
-            record["initial_is_stable_and_elevated"]
-            and record["ends_stable_on_ground"]
+            record["initial_is_stable_and_elevated"] and record["ends_stable_on_ground"]
         ):
             add_candidate(
                 record,
@@ -311,13 +301,11 @@ def detect_support_surfaces(
             continue
 
         matches_terminal_height = any(
-            abs(record["terminal_bottom"] - height)
-            <= terminal_support_height_tolerance
+            abs(record["terminal_bottom"] - height) <= terminal_support_height_tolerance
             for height in known_heights
         )
         matches_initial_height = any(
-            abs(record["initial_bottom"] - height)
-            <= initial_support_height_tolerance
+            abs(record["initial_bottom"] - height) <= initial_support_height_tolerance
             for height in known_heights
         )
         if (
@@ -343,6 +331,18 @@ def detect_support_surfaces(
                 "matches_known_initial_support",
                 0,
                 record["initial_bottom"],
+                False,
+            )
+        elif record["initial_is_stable_and_elevated"] and any(
+            abs(record["initial_bottom_median"] - height)
+            <= initial_support_height_tolerance
+            for height in known_heights
+        ):
+            add_candidate(
+                record,
+                "starts_stable_on_known_support",
+                0,
+                record["initial_bottom_median"],
                 False,
             )
 
