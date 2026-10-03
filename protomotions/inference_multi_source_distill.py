@@ -7,6 +7,8 @@ The training entry point needs one rank per source and never opens a viewer.
 This script runs one source in one process, so a workstation with a single GPU
 can watch the distilled student (or its frozen teacher, for comparison) and can
 evaluate that one source without the full rank layout.
+The viewer loads the teacher's resolved_configs_inference.pt; --evaluate keeps
+resolved_configs.pt for the training-time evaluation protocol.
 
     IsaacLab/.venv/bin/python -m protomotions.inference_multi_source_distill \\
         --checkpoint results/joint_pvq_v1/last.ckpt \\
@@ -102,10 +104,11 @@ def locomotion_shard_slot(source, shard_index: int | None) -> int:
     return indices.index(shard_index)
 
 
-def load_source_config(source) -> dict:
-    """Load one teacher's frozen configs; the others stay unread and unneeded."""
+def load_source_config(source, *, evaluate: bool = False) -> dict:
+    """Load frozen inference configs for the viewer, training configs for evaluation."""
     checkpoint = Path(source.teacher_checkpoint)
-    configs = checkpoint.parent / "resolved_configs.pt"
+    filename = "resolved_configs.pt" if evaluate else "resolved_configs_inference.pt"
+    configs = checkpoint.parent / filename
     if not configs.is_file():
         raise FileNotFoundError(configs)
     return torch.load(configs, map_location="cpu", weights_only=False)
@@ -194,7 +197,7 @@ def run(args):
     source = manifest.sources[index]
     saved = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     model_config = model_config_from_checkpoint(saved)
-    cfg = load_source_config(source)
+    cfg = load_source_config(source, evaluate=args.evaluate)
     validate_source_against_checkpoint(saved, source, cfg)
 
     configs = [None] * len(manifest.sources)
