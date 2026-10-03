@@ -1759,7 +1759,10 @@ class SceneLib:
         return self._per_env_motion_ids_cached
 
     def build_motion_to_original_scene_map(self, num_motions: int) -> torch.Tensor:
-        """Build reverse mapping from motion_id to original_scene_index.
+        """Return a cached, read-only motion_id to original_scene_index mapping.
+
+        Original scene associations are static after construction. Replacing the
+        scene list invalidates this cache; larger requests only pad missing IDs.
 
         Args:
             num_motions: Total number of motions in the motion library.
@@ -1768,12 +1771,38 @@ class SceneLib:
             (num_motions,) tensor where map[motion_id] = original_scene_index,
             or -1 if no scene is associated with that motion.
         """
-        mapping = torch.full((num_motions,), -1, dtype=torch.long, device=self.device)
-        for scene_idx, scene in enumerate(self._original_scenes):
-            mid = scene.humanoid_motion_id
-            if mid >= 0 and mid < num_motions:
+        if num_motions < 0:
+            raise ValueError("num_motions must be non-negative")
+        cached = getattr(self, "_motion_to_scene_cache", None)
+        if (
+            cached is None
+            or cached[0] is not self._original_scenes
+            or cached[1] != len(self._original_scenes)
+        ):
+            # Build all associations on CPU once, not one GPU assignment per scene
+            # on every get_scene_pose call. Last scene wins for duplicate motion IDs.
+            associations = {
+                scene.humanoid_motion_id: scene_idx
+                for scene_idx, scene in enumerate(self._original_scenes)
+                if scene.humanoid_motion_id >= 0
+            }
+            size = max(num_motions, max(associations, default=-1) + 1)
+            mapping = torch.full((size,), -1, dtype=torch.long)
+            for mid, scene_idx in associations.items():
                 mapping[mid] = scene_idx
-        return mapping
+            mapping = mapping.to(self.device)
+        else:
+            mapping = cached[2]
+            if num_motions > mapping.numel():
+                enlarged = mapping.new_full((num_motions,), -1)
+                enlarged[: mapping.numel()] = mapping
+                mapping = enlarged
+        self._motion_to_scene_cache = (
+            self._original_scenes,
+            len(self._original_scenes),
+            mapping,
+        )
+        return mapping[:num_motions]
 
     @staticmethod
     def _freeze_asset_value(value):
