@@ -71,9 +71,11 @@ class MimicEvaluator(BaseEvaluator):
                     obs, _ = self.env.reset(
                         switch_env_ids, disable_motion_resample=True
                     )
+                    self._notify_agent_reset(switch_env_ids)
                     done_indices = None
                 else:
                     obs, _ = self.env.reset(done_indices)
+                    self._notify_agent_reset(done_indices)
                 self.agent.pre_collect_step(step)
                 obs = self.agent.add_agent_info_to_obs(obs)
                 obs_td = self.agent.obs_dict_to_tensordict(obs)

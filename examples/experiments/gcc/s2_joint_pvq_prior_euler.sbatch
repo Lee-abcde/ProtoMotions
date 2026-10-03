@@ -1,0 +1,210 @@
+#!/bin/bash
+#SBATCH --job-name=joint_prior
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus=rtx_4090:8
+#SBATCH --cpus-per-task=8
+#SBATCH --mem-per-cpu=4G
+#SBATCH --tmp=80G
+#SBATCH --time=24:00:00
+# Absolute so the log lands next to the run outputs; the directory must exist.
+#SBATCH --output=/cluster/scratch/lijingy/joint_pvq_results/joint_prior_%j.log
+#SBATCH --error=/cluster/scratch/lijingy/joint_pvq_results/joint_prior_%j.log
+
+set -euo pipefail
+
+: "${CONTAINER:?Submit with --export=ALL,CONTAINER=/cluster/scratch/lijingy/<image>.sif}"
+PROTOMOTIONS_DIR="${PROTOMOTIONS_DIR:-/cluster/home/lijingy/ProtoMotions}"
+DATA_DIR="${DATA_DIR:-/cluster/scratch/lijingy/protomotion_data}"
+# Scene files resolve object meshes relative to their own scenes/ directory, so
+# the meshes have to appear under DATA_DIR. Euler purges scratch by file age and
+# these .obj files are never rewritten, so the scratch copy gets emptied and every
+# HOI rank dies at scene build with FileNotFoundError. Keep the real copy in the
+# repo (home is never purged) and bind it over that path.
+OMOMO_OBJECTS_DIR="${OMOMO_OBJECTS_DIR:-$PROTOMOTIONS_DIR/data/omomo_objects}"
+OMOMO_DATASET="${OMOMO_DATASET:-omomo_correct_v2_contact_retarget_arms_v3}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/cluster/scratch/lijingy/joint_pvq_results}"
+# Teacher run directories (each holds score_based.ckpt + resolved_configs.pt).
+HOI_TEACHER_DIR="${HOI_TEACHER_DIR:-/cluster/scratch/lijingy/HOI_smplx}"
+LOCO_TEACHER_DIR="${LOCO_TEACHER_DIR:-/cluster/scratch/lijingy/smplx_results}"
+# The frozen stage-one run is mounted separately and read-only.
+POSTERIOR_DIR="${POSTERIOR_DIR:-$OUTPUT_ROOT/joint_pvq_v1}"
+POSTERIOR_FILE="${POSTERIOR_FILE:-score_based.ckpt}"
+RUN_NAME="${RUN_NAME:-joint_pvq_prior_v1}"
+EXPERIMENT_PATH="${EXPERIMENT_PATH:-examples/experiments/gcc/s2_joint_pvq_prior.py}"
+PRIOR_ROLLOUT_START="${PRIOR_ROLLOUT_START:-500}"
+PRIOR_ROLLOUT_RAMP="${PRIOR_ROLLOUT_RAMP:-9500}"
+PRIOR_ROLLOUT_MAX_PROB="${PRIOR_ROLLOUT_MAX_PROB:-0.95}"
+SAVE_EVERY="${SAVE_EVERY:-50}"
+MINI_EPOCHS="${MINI_EPOCHS:-6}"
+export POSTERIOR_FILE EXPERIMENT_PATH PRIOR_ROLLOUT_START PRIOR_ROLLOUT_RAMP
+export PRIOR_ROLLOUT_MAX_PROB SAVE_EVERY MINI_EPOCHS
+SOURCES="${SOURCES:-examples/experiments/gcc/s1_joint_pvq_sources_euler.yaml}"
+export SOURCES
+CONTAINER_ENV="${CONTAINER_ENV:-/opt/IsaacLab_new/.venv/bin/activate}"
+NUM_ENVS="${NUM_ENVS:-1024}"
+BATCH_SIZE="${BATCH_SIZE:-4096}"
+ROLLOUT_STEPS="${ROLLOUT_STEPS:-32}"
+# Effectively unlimited. A run ends on the SLURM wall clock and continues from
+# last.ckpt on the next submission, so the iteration count must not cap it.
+ITERATIONS="${ITERATIONS:-100000000}"
+# Full-reference tracking diagnostic under sparse goals; disabled by default.
+EVAL_EVERY="${EVAL_EVERY:-0}"
+# HOI physical state initialization: teacher (seed from each teacher's
+# env_<motion>.ckpt PSI buffer; a subject whose file is missing or corrupt
+# starts empty), empty (student PSI only) or off (raw reference).
+STUDENT_PSI="${STUDENT_PSI:-teacher}"
+# Optional container path; otherwise reuse the frozen posterior's filter if present.
+HOI_TEACHER_FILTER="${HOI_TEACHER_FILTER:-}"
+# Weights & Biases: USE_WANDB=1 enables it. Online like train_slurm.py, with
+# credentials from ~/.netrc on the cluster; set WANDB_MODE=offline to defer upload.
+USE_WANDB="${USE_WANDB:-0}"
+WANDB_PROJECT="${WANDB_PROJECT:-physical_animation}"
+WANDB_MODE="${WANDB_MODE:-online}"
+export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS ITERATIONS EVAL_EVERY
+export STUDENT_PSI HOI_TEACHER_FILTER
+export USE_WANDB WANDB_PROJECT WANDB_MODE
+# Follows sbatch --ntasks-per-node overrides, so a smaller smoke run needs no edit.
+# Deliberately not the name torch uses for its own rank count: exporting that one
+# makes the training ranks expect a torchrun launch and demand RANK/LOCAL_RANK.
+PREFLIGHT_RANKS="${SLURM_NTASKS:-8}"
+export PREFLIGHT_RANKS
+
+for path in "$CONTAINER" "$PROTOMOTIONS_DIR" "$DATA_DIR" "$OMOMO_OBJECTS_DIR" \
+           "$HOI_TEACHER_DIR" "$LOCO_TEACHER_DIR" "$POSTERIOR_DIR/$POSTERIOR_FILE"; do
+  if [[ ! -e "$path" ]]; then
+    echo "Required Euler path does not exist: $path" >&2
+    exit 2
+  fi
+done
+
+RUN_DIR="$OUTPUT_ROOT/$RUN_NAME"
+NODE_TMP_ROOT="${TMPDIR:-/tmp}/protomotions_joint_prior_$SLURM_JOB_ID"
+mkdir -p "$OUTPUT_ROOT" "$OUTPUT_ROOT/collision_cache" "$NODE_TMP_ROOT"
+
+export MASTER_ADDR
+MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)"
+export MASTER_PORT=$((15000 + SLURM_JOB_ID % 20000))
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export PXR_WORK_THREAD_LIMIT="${SLURM_CPUS_PER_TASK:-8}"
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
+export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
+export TORCH_NCCL_DUMP_ON_TIMEOUT=1
+export TORCH_NCCL_DESYNC_DEBUG=1
+
+# --writable-tmpfs is a 64 MB in-memory layer on Euler, and Kit fills it while
+# converting the robot MJCF (OSError: No space left on device). A node-local
+# overlay directory has the whole local disk instead, and each rank needs its
+# own: two overlay mounts cannot share one work directory.
+container_args=(
+  --nv
+  # Apptainer mounts the working directory, not the home directory, so a job
+  # submitted from inside the repo cannot read ~/.netrc and W&B has no
+  # credentials. Bind home explicitly.
+  --bind "$HOME:$HOME"
+  --bind "$PROTOMOTIONS_DIR:/workspace/ProtoMotions:rw"
+  --bind "$DATA_DIR:/workspace/protomotion_data:ro"
+  --bind "$OMOMO_OBJECTS_DIR:/workspace/protomotion_data/$OMOMO_DATASET/objects:ro"
+  --bind "$HOI_TEACHER_DIR:/workspace/hoi_teachers:ro"
+  --bind "$LOCO_TEACHER_DIR:/workspace/loco_teachers:ro"
+  --bind "$OUTPUT_ROOT:/workspace/output:rw"
+  --bind "$POSTERIOR_DIR:/workspace/joint_pvq:ro"
+  --bind "$NODE_TMP_ROOT:/tmp:rw"
+  --bind /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro
+)
+
+inner_script=$(cat <<'INNER'
+set -euo pipefail
+source "$CONTAINER_ENV"
+export ACCEPT_EULA=Y
+export OMNI_KIT_ACCEPT_EULA=Y
+export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
+export TMPDIR=/tmp
+export MPLCONFIGDIR="/tmp/matplotlib_rank_${SLURM_PROCID}"
+export PROTOMOTIONS_COLLISION_CACHE_DIR=/workspace/output/collision_cache
+# Startup milestones and Kit verbosity, for diagnosing a silent early exit.
+export PROTOMOTIONS_DEBUG_STAGES="${PROTOMOTIONS_DEBUG_STAGES:-1}"
+export PROTOMOTIONS_KIT_LOG_LEVEL="${PROTOMOTIONS_KIT_LOG_LEVEL:-warning}"
+mkdir -p "$MPLCONFIGDIR" "$PROTOMOTIONS_COLLISION_CACHE_DIR"
+cd /workspace/ProtoMotions
+
+resume_args=()
+if [[ -f "/workspace/output/$RUN_NAME/last.ckpt" ]]; then
+  resume_args=(--resume "/workspace/output/$RUN_NAME/last.ckpt")
+fi
+
+filter_args=()
+if [[ -n "$HOI_TEACHER_FILTER" ]]; then
+  filter_args=(--hoi-teacher-filter "$HOI_TEACHER_FILTER")
+fi
+
+wandb_args=()
+if [[ "$USE_WANDB" == "1" ]]; then
+  export WANDB_DIR="/workspace/output/$RUN_NAME"
+  export WANDB_CACHE_DIR="/workspace/output/wandb_cache"
+  export WANDB_CONFIG_DIR="/workspace/output/wandb_config"
+  # train_slurm.py does the same: wandb spawns its service with this
+  # interpreter, and sys.executable is not usable once Kit is running.
+  export WANDB__EXECUTABLE="$(dirname "$CONTAINER_ENV")/python"
+  mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_CONFIG_DIR"
+  wandb_args=(--use-wandb --wandb-project "$WANDB_PROJECT")
+fi
+
+# Report the real exit status: a signal (128+n) is otherwise indistinguishable
+# from a clean exit once srun and apptainer have passed it along.
+set +e
+python -u -m protomotions.train_joint_prior \
+  --checkpoint "/workspace/joint_pvq/$POSTERIOR_FILE" \
+  --experiment-path "$EXPERIMENT_PATH" \
+  --distillation-sources "$SOURCES" \
+  --output-dir "/workspace/output/$RUN_NAME" \
+  --num-envs "$NUM_ENVS" \
+  --batch-size "$BATCH_SIZE" \
+  --rollout-steps "$ROLLOUT_STEPS" \
+  --iterations "$ITERATIONS" \
+  --save-every "$SAVE_EVERY" \
+  --mini-epochs "$MINI_EPOCHS" \
+  --prior-rollout-start-iteration "$PRIOR_ROLLOUT_START" \
+  --prior-rollout-ramp-iterations "$PRIOR_ROLLOUT_RAMP" \
+  --prior-rollout-max-prob "$PRIOR_ROLLOUT_MAX_PROB" \
+  --eval-every "$EVAL_EVERY" \
+  --student-psi "$STUDENT_PSI" \
+  --kit-log-dir "/workspace/output/$RUN_NAME/kit_logs" \
+  --ujitso-cache-dir /tmp/protomotions_ujitso \
+  --ujitso-cache-budget-mb 1024 \
+  --timeout-minutes 180 \
+  "${filter_args[@]}" \
+  "${wandb_args[@]}" \
+  "${resume_args[@]}"
+status=$?
+set -e
+echo "[rank ${SLURM_PROCID:-?}] training process exited with status $status" >&2
+exit $status
+INNER
+)
+
+echo "Euler preflight: code, data, checkpoints, action contract, and rank assignment"
+mkdir -p "$NODE_TMP_ROOT/overlay_preflight/upper" "$NODE_TMP_ROOT/overlay_preflight/work"
+apptainer exec --overlay "$NODE_TMP_ROOT/overlay_preflight" "${container_args[@]}" "$CONTAINER" bash -lc \
+  'set -euo pipefail; source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_joint_prior --checkpoint "/workspace/joint_pvq/$POSTERIOR_FILE" --experiment-path "$EXPERIMENT_PATH" --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS" --num-envs "$NUM_ENVS" --batch-size "$BATCH_SIZE" --rollout-steps "$ROLLOUT_STEPS" --iterations "$ITERATIONS" --save-every "$SAVE_EVERY" --mini-epochs "$MINI_EPOCHS" --eval-every "$EVAL_EVERY" --student-psi "$STUDENT_PSI" --prior-rollout-start-iteration "$PRIOR_ROLLOUT_START" --prior-rollout-ramp-iterations "$PRIOR_ROLLOUT_RAMP" --prior-rollout-max-prob "$PRIOR_ROLLOUT_MAX_PROB"'
+
+echo "Starting $PREFLIGHT_RANKS-rank training in $RUN_DIR"
+# Each task computes its own overlay, so SLURM_PROCID must expand inside srun.
+export CONTAINER NODE_TMP_ROOT
+export INNER_SCRIPT="$inner_script"
+LAUNCHER="$NODE_TMP_ROOT/launch_rank.sh"
+# Serialize the Bash array with shell quoting; paths containing spaces stay intact.
+printf '#!/bin/bash\n' > "$LAUNCHER"
+declare -p container_args >> "$LAUNCHER"
+cat >> "$LAUNCHER" <<'LAUNCH'
+set -euo pipefail
+overlay="$NODE_TMP_ROOT/overlay_rank${SLURM_PROCID}"
+mkdir -p "$overlay/upper" "$overlay/work"
+exec apptainer exec --overlay "$overlay" "${container_args[@]}" "$CONTAINER" bash -lc "$INNER_SCRIPT"
+LAUNCH
+chmod +x "$LAUNCHER"
+
+srun --kill-on-bad-exit=1 --wait=60 "$LAUNCHER"

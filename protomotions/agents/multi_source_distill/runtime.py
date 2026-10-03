@@ -277,7 +277,14 @@ class EvaluationAgent:
         self.student.eval()
 
     def pre_collect_step(self, step):
-        pass
+        hook = getattr(self.student, "pre_collect_step", None)
+        if self.teachers is None and hook is not None:
+            hook(step)
+
+    def on_env_reset(self, env_ids):
+        hook = getattr(self.student, "on_env_reset", None)
+        if self.teachers is None and hook is not None:
+            hook(env_ids)
 
     def add_agent_info_to_obs(self, obs):
         return obs

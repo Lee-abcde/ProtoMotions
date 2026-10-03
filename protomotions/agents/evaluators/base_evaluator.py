@@ -821,6 +821,12 @@ class BaseEvaluator:
         plt.close(fig)
         print("Per-frame metrics plotted successfully")
 
+    def _notify_agent_reset(self, env_ids):
+        """Notify stateful policies of viewer resets; None means all environments."""
+        hook = getattr(self.agent, "on_env_reset", None)
+        if hook is not None:
+            hook(env_ids)
+
     def simple_test_policy(self, collect_metrics: bool = False) -> None:
         """
         Simple evaluation loop for interactive testing.
@@ -847,9 +853,11 @@ class BaseEvaluator:
                     obs, _ = self.env.reset(
                         switch_env_ids, disable_motion_resample=True
                     )
+                    self._notify_agent_reset(switch_env_ids)
                     done_indices = None
                 else:
                     obs, _ = self.env.reset(done_indices)
+                    self._notify_agent_reset(done_indices)
                 self.agent.pre_collect_step(step)
                 obs = self.agent.add_agent_info_to_obs(obs)
                 obs_td = self.agent.obs_dict_to_tensordict(obs)

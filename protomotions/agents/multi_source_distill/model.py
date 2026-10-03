@@ -214,6 +214,29 @@ class JointPVQModel(nn.Module):
             "latent": latent.detach(),
         }
 
+    def decode_indices(
+        self, obs: dict[str, torch.Tensor], indices: torch.Tensor
+    ) -> torch.Tensor:
+        """Decode [batch, quantizers] codes without reading future observations."""
+        if indices.shape != (
+            obs["max_coords_obs"].shape[0],
+            self.config.num_quantizers,
+        ):
+            raise ValueError("indices must have shape [batch, num_quantizers]")
+        latent = torch.cat(
+            [q.codebook[indices[:, i]] for i, q in enumerate(self.quantizers)], -1
+        )
+        state = [
+            self.normalizers[key](obs[key], torch.ones_like(obs[key], dtype=torch.bool))
+            for key in ("max_coords_obs", "previous_actions")
+        ]
+        objects = self.normalizers["intermimic_object_obs"](
+            obs["intermimic_object_obs"], obs["object_feature_mask"]
+        )
+        return self.decoder(
+            torch.cat(state + [latent, objects, obs["object_valid_mask"].float()], -1)
+        )
+
     @torch.no_grad()
     def record_usage(self, indices: torch.Tensor) -> None:
         for i, quantizer in enumerate(self.quantizers):
