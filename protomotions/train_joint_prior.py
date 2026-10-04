@@ -13,6 +13,8 @@ import json
 import os
 import random
 import runpy
+import sys
+import traceback
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
@@ -584,6 +586,15 @@ def run(args):
                 conditioning.reset(torch.arange(env.num_envs, device=device))
             if iteration % args.save_every == 0 or iteration == args.iterations:
                 save(iteration)
+    except BaseException:
+        # Isaac Sim tears the process down inside app.close() below, which can
+        # end the interpreter before it reports the active exception: the rank
+        # then looks like a clean "exited with status 0". Print it first.
+        print(f"[rank {rank}] joint prior run failed", flush=True)
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        raise
     finally:
         if wandb_run is not None:
             wandb_run.finish()
