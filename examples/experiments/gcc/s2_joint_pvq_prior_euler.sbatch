@@ -43,7 +43,11 @@ SOURCES="${SOURCES:-examples/experiments/gcc/s1_joint_pvq_sources_euler.yaml}"
 export SOURCES
 CONTAINER_ENV="${CONTAINER_ENV:-/opt/IsaacLab_new/.venv/bin/activate}"
 NUM_ENVS="${NUM_ENVS:-1024}"
-BATCH_SIZE="${BATCH_SIZE:-4096}"
+# 4096 runs the transformer prior out of memory on a 24GB RTX 4090: the rollout
+# env keeps Isaac Sim resident on the same GPU, leaving ~17GB for PyTorch, and
+# self-attention over 4096 sequences needs more than that. This is a per-rank
+# minibatch size, so adding GPUs does not shrink it.
+BATCH_SIZE="${BATCH_SIZE:-2048}"
 ROLLOUT_STEPS="${ROLLOUT_STEPS:-32}"
 # Effectively unlimited. A run ends on the SLURM wall clock and continues from
 # last.ckpt on the next submission, so the iteration count must not cap it.
