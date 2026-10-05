@@ -421,6 +421,45 @@ def test_mimic_evaluate_episode_applies_action_ema_and_records_actions(tmp_path)
     assert torch.equal(evaluator._metrics["actions"].data[0, 1], torch.full((2,), 1.5))
 
 
+def test_mimic_episode_reports_both_jitter_windows_without_trajectory_buffers(tmp_path):
+    evaluator = _evaluator(
+        tmp_path, compute_jitter=True, collect_trajectory_metrics=False
+    )
+    evaluator._metrics = evaluator.initialize_eval()
+    evaluator._motion_failed = torch.zeros(3, dtype=torch.bool)
+    evaluator._eval_mask = torch.tensor([True, True, False])
+    evaluator._episode_ctx = MimicEpisodeContext(
+        motion_ids=torch.tensor([1, 0]), frame_limits=torch.tensor([3, 3])
+    )
+    positions = torch.zeros(2, 1, 3)
+    evaluator.env.context = SimpleNamespace(
+        current=SimpleNamespace(rigid_body_pos=positions)
+    )
+    original_step = evaluator.env.step
+
+    def step(actions):
+        result = original_step(actions)
+        positions[:, :, 0] = [1.0, 4.0, 16.0][len(evaluator.env.step_actions) - 1]
+        return result
+
+    def check(env_ids, motion_ids):
+        if len(evaluator.env.step_actions) == 2:
+            evaluator._motion_failed[1] = True
+
+    evaluator.env.step = step
+    evaluator._check_evaluation_failures = check
+    evaluator.evaluate_episode(torch.tensor([0, 1]), max_steps=3)
+    assert evaluator._metrics == {}
+    assert evaluator._jitter_means_by_mode["full_motion"][:2].tolist() == [22.0, 22.0]
+    assert evaluator._jitter_means_by_mode["until_failure"][:2].tolist() == [22.0, 8.0]
+    metrics, _, _ = evaluator.process_eval_results()
+    assert metrics["eval/jitter/full_motion/mean"] == 22.0
+    assert metrics["eval/jitter/until_failure/mean"] == 15.0
+    assert metrics["eval/jitter/until_failure/num_valid"] == 2
+    evaluator.cleanup_after_evaluation()
+    assert evaluator._jitter_means_by_mode == {}
+
+
 def test_mimic_process_eval_results_updates_weights_and_additional_metrics(tmp_path):
     evaluator = _evaluator(tmp_path)
     evaluator._motion_failed = torch.tensor([False, True, False])

@@ -3,7 +3,7 @@
 
 """Configuration classes for evaluators."""
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union
 from dataclasses import dataclass, field
 
 from protomotions.envs.mdp_component import MdpComponent
@@ -51,6 +51,18 @@ class MimicEvaluatorConfig(EvaluatorConfig):
     """Configuration for Mimic evaluator."""
 
     _target_: str = "protomotions.agents.evaluators.mimic_evaluator.MimicEvaluator"
+    compute_jitter: bool = field(
+        default=False,
+        metadata={
+            "help": "Report streaming body-position acceleration jitter in m/s^2 for both error windows."
+        },
+    )
+    jitter_body_ids: Optional[List[int]] = field(
+        default=None,
+        metadata={
+            "help": "Bodies averaged for jitter. None includes every robot rigid body, including fingers."
+        },
+    )
     evaluation_action_key: Optional[str] = field(
         default=None,
         metadata={

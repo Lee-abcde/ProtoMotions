@@ -321,6 +321,49 @@ def test_component_failure_buffers_accumulate_values_and_process_success_rate(tm
     assert log_dict["eval/speed/min"] == pytest.approx(0.1)
 
 
+def test_component_errors_report_both_windows(tmp_path):
+    evaluator = _evaluator(
+        tmp_path,
+        components={
+            "human_error": _EvalComponent(),
+            "contact_loss": _EvalComponent(threshold=0.5),
+        },
+    )
+    evaluator.agent.num_envs = 4
+    evaluator._init_eval_component_buffers(num_eval_ids=4)
+    # Environment order differs from motion order; failures occur on frames
+    # 1, 2, and 3 respectively, while the fourth motion succeeds.
+    motion_ids = torch.tensor([2, 0, 3, 1])
+    for step, error in enumerate([1.0, 2.0, 100.0], start=1):
+        failures = torch.tensor([step == 1, step == 2, step == 3, False])
+        evaluator._component_manager = _FakeComponentManager(
+            {
+                "human_error": torch.full((4,), error),
+                "contact_loss": failures[motion_ids].float(),
+            }
+        )
+        evaluator._check_evaluation_failures(torch.arange(4), motion_ids)
+
+    expected_counts = [3, 3, 3, 3]
+    expected_sums = [103.0] * 4
+    assert evaluator._component_step_count["human_error"].tolist() == expected_counts
+    assert evaluator._component_value_sum["human_error"].tolist() == expected_sums
+    assert evaluator._component_value_min["human_error"].tolist() == [1.0] * 4
+    assert evaluator._component_value_max["human_error"].tolist() == [100.0] * 4
+    assert evaluator._motion_failed.tolist() == [True, True, True, False]
+    metrics = evaluator.process_eval_results()[0]
+    assert metrics["eval/success_rate"] == 0.25
+    for mode, expected in (
+        ("full_motion", [103.0 / 3] * 4),
+        ("until_failure", [1.0, 1.5, 103.0 / 3, 103.0 / 3]),
+    ):
+        assert metrics[f"eval/errors/{mode}/human_error/mean"] == pytest.approx(
+            sum(expected) / 4
+        )
+    evaluator.cleanup_after_evaluation()
+    assert evaluator._component_metrics_by_mode == {}
+
+
 def test_process_eval_results_handles_no_evaluated_items(tmp_path):
     evaluator = _evaluator(
         tmp_path,

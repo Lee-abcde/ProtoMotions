@@ -14,6 +14,7 @@ from torch import Tensor
 from protomotions.agents.evaluators.base_evaluator import BaseEvaluator
 from protomotions.agents.evaluators.config import MimicEvaluatorConfig
 from protomotions.agents.evaluators.metrics import MotionMetrics
+from protomotions.agents.evaluators.jitter import StreamingJitter
 from protomotions.components.motion_lib import MotionLib
 from protomotions.envs.motion_manager.mimic_motion_manager import MimicMotionManager
 from protomotions.utils.motion_interpolation_utils import interpolate_quat
@@ -152,6 +153,14 @@ class MimicEvaluator(BaseEvaluator):
             max=self.config.max_eval_steps
         )
         self._init_eval_component_buffers(num_motions)
+        self._jitter_means_by_mode = (
+            {
+                mode: torch.full((num_motions,), float("nan"), device=self.device)
+                for mode in ("full_motion", "until_failure")
+            }
+            if getattr(self.config, "compute_jitter", False)
+            else {}
+        )
         self._init_predicted_export_buffers(
             num_motions, export_motion_num_frames, motion_num_frames
         )
@@ -381,6 +390,13 @@ class MimicEvaluator(BaseEvaluator):
         obs = self.agent.add_agent_info_to_obs(obs)
         obs_td = self.agent.obs_dict_to_tensordict(obs)
 
+        jitter = None
+        if getattr(self.config, "compute_jitter", False):
+            jitter = StreamingJitter(
+                self.env.context.current.rigid_body_pos[env_ids],
+                self.env.dt,
+                getattr(self.config, "jitter_body_ids", None),
+            )
         prev_actions = None
 
         for step_idx in range(max_steps):
@@ -408,8 +424,24 @@ class MimicEvaluator(BaseEvaluator):
             obs = self.agent.add_agent_info_to_obs(obs)
             obs_td = self.agent.obs_dict_to_tensordict(obs)
 
+            if jitter is not None:
+                motion_ids = self._episode_ctx.motion_ids
+                previously_failed = (
+                    self._motion_failed[motion_ids]
+                    if self._motion_failed is not None
+                    else torch.zeros_like(motion_ids, dtype=torch.bool)
+                )
+                jitter.update(
+                    self.env.context.current.rigid_body_pos[env_ids],
+                    self._episode_ctx.frame_limits > step_idx,
+                    previously_failed,
+                )
             self._check_eval_components(env_ids, step_idx)
             self._on_episode_step(env_ids, extras, actions)
+
+        if jitter is not None:
+            for mode, values in jitter.means().items():
+                self._jitter_means_by_mode[mode][self._episode_ctx.motion_ids] = values
 
     def run_evaluation(self) -> None:
         """Run evaluation across multiple motions."""
@@ -522,6 +554,12 @@ class MimicEvaluator(BaseEvaluator):
 
         additional_metrics = self._compute_additional_metrics(self._metrics)
         to_log.update(additional_metrics)
+        for mode, values in getattr(self, "_jitter_means_by_mode", {}).items():
+            valid = torch.isfinite(values)
+            to_log[f"eval/jitter/{mode}/num_valid"] = int(valid.sum().item())
+            to_log[f"eval/jitter/{mode}/mean"] = (
+                values[valid].mean().item() if valid.any() else float("nan")
+            )
 
         if self.fabric.global_rank == 0:
             if (
@@ -549,6 +587,7 @@ class MimicEvaluator(BaseEvaluator):
         del self._cached_motion_ids
         del self._cached_motion_times
         self._clear_predicted_export_buffers()
+        self._jitter_means_by_mode = {}
         super().cleanup_after_evaluation()
 
     def _plot_per_frame_metrics(

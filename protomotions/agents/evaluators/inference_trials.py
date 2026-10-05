@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 import torch
 
 from protomotions.agents.evaluators.mimic_evaluator import MimicEpisodeContext
+from protomotions.agents.evaluators.jitter import StreamingJitter
 from protomotions.envs.base_env.utils import combine_evaluation
 
 
@@ -152,6 +153,23 @@ def _mask_parallel_trial_actions(
     return actions
 
 
+def _component_means(
+    component_sums: Dict[str, torch.Tensor],
+    component_counts: Dict[str, torch.Tensor],
+    batch_index: int,
+) -> Dict[str, float]:
+    """Reduce one trial's component accumulators without retaining trajectories."""
+    component_means = {}
+    for name, sums in component_sums.items():
+        count = int(component_counts[name][batch_index].item())
+        component_means[name] = (
+            float(sums[batch_index].item()) / count
+            if count > 0
+            else float("nan")
+        )
+    return component_means
+
+
 def _parallel_trial_result(
     motion_id: int,
     total_steps: int,
@@ -162,14 +180,6 @@ def _parallel_trial_result(
     batch_index: int,
     failure_components: set[str],
 ) -> Dict[str, Any]:
-    component_means = {}
-    for name, sums in component_sums.items():
-        count = int(component_counts[name][batch_index].item())
-        component_means[name] = (
-            float(sums[batch_index].item()) / count
-            if count > 0
-            else float("nan")
-        )
     return {
         "motion_id": motion_id,
         "evaluated": total_steps > 0,
@@ -179,7 +189,9 @@ def _parallel_trial_result(
         "execution_fraction": (
             execution_steps / total_steps if total_steps > 0 else 0.0
         ),
-        "component_means": component_means,
+        "component_means": _component_means(
+            component_sums, component_counts, batch_index
+        ),
         "failure_components": sorted(failure_components),
     }
 
@@ -251,21 +263,35 @@ def run_parallel_mimic_trials(
             obs = evaluator.agent.add_agent_info_to_obs(obs)
             obs_td = evaluator.agent.obs_dict_to_tensordict(obs)
 
+            jitter = None
+            if getattr(config, "compute_jitter", False):
+                jitter = StreamingJitter(
+                    evaluator.env.context.current.rigid_body_pos[env_ids],
+                    evaluator.env.dt,
+                    getattr(config, "jitter_body_ids", None),
+                )
+
             failed = torch.zeros(
                 batch_size, dtype=torch.bool, device=evaluator.device
             )
             execution_steps = frame_limits.clone()
             component_sums = {
-                name: torch.zeros(
-                    batch_size, dtype=torch.float, device=evaluator.device
-                )
-                for name in config.evaluation_components
+                mode: {
+                    name: torch.zeros(
+                        batch_size, dtype=torch.float, device=evaluator.device
+                    )
+                    for name in config.evaluation_components
+                }
+                for mode in ("full_motion", "until_failure")
             }
             component_counts = {
-                name: torch.zeros(
-                    batch_size, dtype=torch.long, device=evaluator.device
-                )
-                for name in config.evaluation_components
+                mode: {
+                    name: torch.zeros(
+                        batch_size, dtype=torch.long, device=evaluator.device
+                    )
+                    for name in config.evaluation_components
+                }
+                for mode in component_sums
             }
             failure_components = [set() for _ in range(batch_size)]
             previous_actions = None
@@ -314,9 +340,24 @@ def run_parallel_mimic_trials(
                     )
                 )
 
-                for name, values in component_values.items():
-                    component_sums[name][active] += values[env_ids][active]
-                    component_counts[name][active] += 1
+                # Use failures from previous steps so the first failure frame
+                # contributes, while subsequent frames do not in truncated mode.
+                for mode, accumulate in (
+                    ("full_motion", active),
+                    ("until_failure", active & ~failed),
+                ):
+                    for name, values in component_values.items():
+                        component_sums[mode][name][accumulate] += values[env_ids][
+                            accumulate
+                        ]
+                        component_counts[mode][name][accumulate] += 1
+
+                if jitter is not None:
+                    jitter.update(
+                        evaluator.env.context.current.rigid_body_pos[env_ids],
+                        active,
+                        failed,
+                    )
 
                 newly_failed = active & ~failed & failed_buf[env_ids]
                 execution_steps[newly_failed] = step_index + 1
@@ -328,6 +369,7 @@ def run_parallel_mimic_trials(
                         failure_components[batch_index].add(name)
                 failed |= newly_failed
 
+            jitter_means = jitter.means() if jitter is not None else {}
             for batch_index in range(batch_size):
                 motion_id = int(motion_ids[batch_index].item())
                 trial_index = int(trial_indices[batch_index].item())
@@ -336,11 +378,26 @@ def run_parallel_mimic_trials(
                     total_steps=int(frame_limits[batch_index].item()),
                     execution_steps=int(execution_steps[batch_index].item()),
                     failed=bool(failed[batch_index].item()),
-                    component_sums=component_sums,
-                    component_counts=component_counts,
+                    component_sums=component_sums["full_motion"],
+                    component_counts=component_counts["full_motion"],
                     batch_index=batch_index,
                     failure_components=failure_components[batch_index],
                 )
+                record["component_means_by_mode"] = {
+                    mode: _component_means(
+                        component_sums[mode], component_counts[mode], batch_index
+                    )
+                    for mode in component_sums
+                }
+                if jitter is not None:
+                    record["jitter_by_mode"] = {
+                        mode: float(values[batch_index].item())
+                        for mode, values in jitter_means.items()
+                    }
+                    record["jitter_sample_counts"] = {
+                        mode: int(counts[batch_index].item())
+                        for mode, counts in jitter.counts.items()
+                    }
                 trial_records[motion_id][trial_index] = record
             completed_trials += batch_size
 
@@ -358,10 +415,23 @@ def run_parallel_mimic_trials(
 
         return [
             {
+                "error_accumulation_mode": "full_motion",
+                "jitter_metadata": (
+                    {
+                        "definition": "mean_body_position_second_difference_norm",
+                        "units": "m/s^2",
+                        "control_dt": evaluator.env.dt,
+                        "body_ids": getattr(config, "jitter_body_ids", None),
+                        "includes_reset_pose": True,
+                        "zero_padding": False,
+                    }
+                    if getattr(config, "compute_jitter", False)
+                    else None
+                ),
                 "motions": [
                     trial_records[motion_id][trial_index]
                     for motion_id in range(num_motions)
-                ]
+                ],
             }
             for trial_index in range(trials_per_motion)
         ]
@@ -472,9 +542,52 @@ def aggregate_best_trials(
     ]
     num_evaluated_motions = len(evaluated_best)
 
+    # Compare both windows on the same trials, including the same selected best
+    # trial per motion. Older saved trial records may only contain one window.
+    errors_by_mode = {}
+    for mode in ("full_motion", "until_failure"):
+        if not evaluated_candidates or not all(
+            mode in item.get("component_means_by_mode", {})
+            for item in evaluated_candidates
+        ):
+            continue
+        errors_by_mode[mode] = {
+            f"average_{group}_{component}": finite_mean(
+                [
+                    item["component_means_by_mode"][mode].get(component, float("nan"))
+                    for item in items
+                ]
+            )
+            for group, items in (
+                ("trial", evaluated_candidates),
+                ("best", evaluated_best),
+            )
+            for component in ("human_error", "object_error")
+        }
+
+    jitter_by_mode = {}
+    for mode in ("full_motion", "until_failure"):
+        if not evaluated_candidates or not all(
+            mode in item.get("jitter_by_mode", {}) for item in evaluated_candidates
+        ):
+            continue
+        jitter_by_mode[mode] = {}
+        for group, items in (("trial", evaluated_candidates), ("best", evaluated_best)):
+            values = [item["jitter_by_mode"][mode] for item in items]
+            jitter_by_mode[mode][f"average_{group}_jitter"] = finite_mean(values)
+            jitter_by_mode[mode][f"num_valid_{group}_jitter"] = sum(
+                math.isfinite(value) for value in values
+            )
+
     return {
         "num_trials": len(trial_results),
+        "jitter_by_mode": jitter_by_mode,
+        "jitter_metadata": trial_results[0].get("jitter_metadata"),
+        "error_accumulation_mode": trial_results[0].get(
+            "error_accumulation_mode", "full_motion"
+        ),
         "num_motions": len(evaluated_best),
+        "errors_by_mode": errors_by_mode,
         "per_trial_success_rate": (
             total_successes / evaluated_trials if evaluated_trials else 0.0
         ),
@@ -499,15 +612,11 @@ def aggregate_best_trials(
             {
                 "num_trials": trial_index,
                 "success_rate": (
-                    successes / num_evaluated_motions
-                    if num_evaluated_motions
-                    else 0.0
+                    successes / num_evaluated_motions if num_evaluated_motions else 0.0
                 ),
                 "num_successes": successes,
             }
-            for trial_index, successes in enumerate(
-                cumulative_successes, start=1
-            )
+            for trial_index, successes in enumerate(cumulative_successes, start=1)
         ],
         "average_best_execution_steps": finite_mean(
             [float(item["execution_steps"]) for item in evaluated_best]

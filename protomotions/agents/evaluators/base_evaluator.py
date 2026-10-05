@@ -85,6 +85,7 @@ class BaseEvaluator:
         self._component_value_min: Dict[str, Tensor] = {}
         self._component_value_max: Dict[str, Tensor] = {}
         self._component_step_count: Dict[str, Tensor] = {}
+        self._component_metrics_by_mode: Dict[str, Dict[str, Dict[str, Tensor]]] = {}
 
         # Instance state for metrics collection during evaluation
         self._metrics: Optional[Dict] = None
@@ -424,6 +425,22 @@ class BaseEvaluator:
                         self._component_value_min[name][valid].min().item()
                     )
 
+            for mode, buffers in self._component_metrics_by_mode.items():
+                for name, sums in buffers["sum"].items():
+                    counts = buffers["count"][name]
+                    valid = counts > 0
+                    if valid.any():
+                        prefix = f"eval/errors/{mode}/{name}"
+                        to_log[f"{prefix}/mean"] = (
+                            (sums[valid] / counts[valid]).mean().item()
+                        )
+                        to_log[f"{prefix}/max"] = (
+                            buffers["max"][name][valid].max().item()
+                        )
+                        to_log[f"{prefix}/min"] = (
+                            buffers["min"][name][valid].min().item()
+                        )
+
             return to_log, success_rate, num_eval_items
 
         return to_log, None, 0
@@ -446,6 +463,7 @@ class BaseEvaluator:
         self._component_value_min = {}
         self._component_value_max = {}
         self._component_step_count = {}
+        self._component_metrics_by_mode = {}
         self._component_manager = None
 
     def _disable_perturbations(self) -> None:
@@ -483,22 +501,28 @@ class BaseEvaluator:
             name: torch.zeros(num_eval_ids, dtype=torch.bool, device=self.device)
             for name in self.config.evaluation_components.keys()
         }
-        self._component_value_sum = {
-            name: torch.zeros(num_eval_ids, device=self.device)
-            for name in self.config.evaluation_components.keys()
-        }
-        self._component_value_min = {
-            name: torch.full((num_eval_ids,), float("inf"), device=self.device)
-            for name in self.config.evaluation_components.keys()
-        }
-        self._component_value_max = {
-            name: torch.full((num_eval_ids,), float("-inf"), device=self.device)
-            for name in self.config.evaluation_components.keys()
-        }
-        self._component_step_count = {
-            name: torch.zeros(num_eval_ids, dtype=torch.long, device=self.device)
-            for name in self.config.evaluation_components.keys()
-        }
+        self._component_metrics_by_mode = {}
+        for mode in ("full_motion", "until_failure"):
+            self._component_metrics_by_mode[mode] = {
+                statistic: {
+                    name: torch.full(
+                        (num_eval_ids,), initial, dtype=dtype, device=self.device
+                    )
+                    for name in self.config.evaluation_components
+                }
+                for statistic, initial, dtype in (
+                    ("sum", 0.0, torch.float),
+                    ("min", float("inf"), torch.float),
+                    ("max", float("-inf"), torch.float),
+                    ("count", 0, torch.long),
+                )
+            }
+        selected = self._component_metrics_by_mode["full_motion"]
+        # Keep the existing metric names and internal buffers as aliases.
+        self._component_value_sum = selected["sum"]
+        self._component_value_min = selected["min"]
+        self._component_value_max = selected["max"]
+        self._component_step_count = selected["count"]
 
         self._component_manager = ComponentManager(self.device)
 
@@ -521,6 +545,10 @@ class BaseEvaluator:
             device=self.device,
         )
 
+        # Capture the mask before updating failures to include the first failure
+        # frame, even when another component (e.g. contact loss) caused it.
+        before_failure = ~self._motion_failed[active_motion_ids]
+
         # Vectorized update of motion failures
         active_failed = failed_buf[active_env_ids]
         self._motion_failed[active_motion_ids] = (
@@ -534,16 +562,22 @@ class BaseEvaluator:
                 self._per_component_failures[name][active_motion_ids] | active_failures
             )
 
-        for name, values in component_values.items():
-            active_vals = values[active_env_ids]
-            self._component_value_sum[name][active_motion_ids] += active_vals
-            self._component_value_min[name][active_motion_ids] = torch.minimum(
-                self._component_value_min[name][active_motion_ids], active_vals
-            )
-            self._component_value_max[name][active_motion_ids] = torch.maximum(
-                self._component_value_max[name][active_motion_ids], active_vals
-            )
-            self._component_step_count[name][active_motion_ids] += 1
+        for mode, buffers in self._component_metrics_by_mode.items():
+            metric_env_ids = active_env_ids
+            metric_motion_ids = active_motion_ids
+            if mode == "until_failure":
+                metric_env_ids = active_env_ids[before_failure]
+                metric_motion_ids = active_motion_ids[before_failure]
+            for name, values in component_values.items():
+                active_vals = values[metric_env_ids]
+                buffers["sum"][name][metric_motion_ids] += active_vals
+                buffers["min"][name][metric_motion_ids] = torch.minimum(
+                    buffers["min"][name][metric_motion_ids], active_vals
+                )
+                buffers["max"][name][metric_motion_ids] = torch.maximum(
+                    buffers["max"][name][metric_motion_ids], active_vals
+                )
+                buffers["count"][name][metric_motion_ids] += 1
 
     def _create_base_metrics(
         self,

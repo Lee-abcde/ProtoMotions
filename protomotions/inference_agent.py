@@ -645,6 +645,9 @@ def _print_best_trial_summary(summary: dict, output_path: Path) -> None:
     print(f"PRIVATE-STYLE BEST-OF-{summary['num_trials']} RESULTS")
     print("=" * 60)
     print(f"  Motions Evaluated: {summary['num_motions']}")
+    print(
+        f"  Error Accumulation Mode: {summary.get('error_accumulation_mode', 'full_motion')}"
+    )
     print(f"  Per-Trial Success Rate: {summary['per_trial_success_rate']:.6f}")
     print(f"  Average Trial Human Error: {summary['average_trial_human_error']:.6f}")
     print(f"  Average Trial Object Error: {summary['average_trial_object_error']:.6f}")
@@ -665,6 +668,26 @@ def _print_best_trial_summary(summary: dict, output_path: Path) -> None:
     )
     print(f"  Average Best Human Error: {summary['average_best_human_error']:.6f}")
     print(f"  Average Best Object Error: {summary['average_best_object_error']:.6f}")
+    for mode, errors in summary.get("errors_by_mode", {}).items():
+        print(f"  Errors [{mode}] (m; same selected best trials):")
+        print(
+            f"    All trials: Human={errors['average_trial_human_error']:.6f}, "
+            f"Object={errors['average_trial_object_error']:.6f}"
+        )
+        print(
+            f"    Best trials: Human={errors['average_best_human_error']:.6f}, "
+            f"Object={errors['average_best_object_error']:.6f}"
+        )
+    for mode, jitter in summary.get("jitter_by_mode", {}).items():
+        print(f"  Jitter [{mode}] (m/s^2; same selected best trials):")
+        print(
+            f"    All trials: {jitter['average_trial_jitter']:.6f} "
+            f"(valid={jitter['num_valid_trial_jitter']})"
+        )
+        print(
+            f"    Best trials: {jitter['average_best_jitter']:.6f} "
+            f"(valid={jitter['num_valid_best_jitter']})"
+        )
     print(f"  Saved: {output_path}")
     print("=" * 60 + "\n")
 
