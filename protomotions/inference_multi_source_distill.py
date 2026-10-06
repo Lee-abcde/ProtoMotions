@@ -224,6 +224,11 @@ def run(args):
         if evaluator is not None:
             evaluator.request_interactive_motion_id()
 
+    def step_motion_id(direction):
+        evaluator = handler_target.get("evaluator")
+        if evaluator is not None:
+            evaluator.request_relative_motion_id(direction)
+
     launcher = launch_isaaclab(
         device, headless=args.headless, kit_log_dir=args.kit_log_dir
     )
@@ -238,7 +243,11 @@ def run(args):
             launcher.app,
             assigned=(index,),
             headless=args.headless,
-            custom_key_handlers={"F9": switch_motion_id},
+            custom_key_handlers={
+                "F9": switch_motion_id,
+                "LEFT": lambda: step_motion_id(-1),
+                "RIGHT": lambda: step_motion_id(1),
+            },
         )
         print(
             f"{source.id} ({source.task}): {env.motion_lib.num_motions()} motions from "
@@ -287,7 +296,11 @@ def run(args):
         interface = getattr(env.simulator, "user_interface", None)
         if not args.headless and interface is not None:
             print(f"Viewer keybinds:\n{interface.help_text()}", flush=True)
-            print("F9 switches the reference motion id.", flush=True)
+            print(
+                "LEFT/RIGHT: previous/next reference motion (wraps). "
+                "F9: enter a motion id.",
+                flush=True,
+            )
         evaluator.simple_test_policy(collect_metrics=True)
     finally:
         launcher.app.close()

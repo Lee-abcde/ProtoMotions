@@ -117,6 +117,10 @@ class MotionManager:
         # Handle fixed motion IDs for scene-motion correspondence
         self._setup_fixed_motion_ids(fixed_motion_ids_per_env)
         self._setup_motion_sampling_mask(motion_sampling_mask_per_env)
+        # Viewer selections persist across resets without changing scene assignments.
+        self._interactive_motion_ids = torch.full(
+            (num_envs,), -1, dtype=torch.long, device=device
+        )
 
     def _setup_motion_subset(self):
         """
@@ -484,6 +488,15 @@ class MotionManager:
 
         return motion_time
 
+    def set_interactive_motion_id(self, env_ids: torch.Tensor, motion_id: int) -> None:
+        """Keep a compatible viewer selection across subsequent implicit resets."""
+        if not 0 <= motion_id < self.motion_lib.num_motions():
+            raise ValueError("Interactive motion ID is out of range")
+        mask = self.motion_sampling_mask_per_env
+        if mask is not None and not mask[env_ids, motion_id].all():
+            raise ValueError("Interactive motion ID is incompatible with object types")
+        self._interactive_motion_ids[env_ids] = motion_id
+
     def set_start_time_sampler(
         self,
         sampler: Optional[Callable[[torch.Tensor], torch.Tensor]],
@@ -508,6 +521,8 @@ class MotionManager:
         Returns:
             None
         """
+
+        use_interactive_selection = new_motion_ids is None
 
         # Handle subset case - deterministic assignment
         if self.available_motion_ids is not None:
@@ -541,6 +556,12 @@ class MotionManager:
             else:
                 # Pure random sampling
                 new_motion_ids = self._sample_compatible_motion_ids(env_ids)
+
+        if use_interactive_selection:
+            selected_ids = self._interactive_motion_ids[env_ids]
+            new_motion_ids = torch.where(
+                selected_ids >= 0, selected_ids, new_motion_ids
+            )
 
         if self.motion_sampling_mask_per_env is not None:
             compatible = self.motion_sampling_mask_per_env[

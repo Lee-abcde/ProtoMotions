@@ -106,6 +106,33 @@ class BaseEvaluator:
         """Root directory for saving outputs (from agent)."""
         return self.agent.root_dir
 
+    def request_relative_motion_id(self, direction: int) -> None:
+        """Queue the previous/next playable motion, wrapping at either end."""
+        if direction not in (-1, 1):
+            raise ValueError("Motion direction must be -1 or 1.")
+        manager = getattr(self.env, "motion_manager", None)
+        motion_lib = getattr(self.env, "motion_lib", None)
+        if manager is None or motion_lib is None or motion_lib.num_motions() <= 0:
+            print("Interactive motion switch skipped: no motions loaded.")
+            return
+
+        current = self._interactive_motion_id_request
+        if current is None:
+            simulator = getattr(self.env, "simulator", None)
+            camera_target = getattr(simulator, "_camera_target", {})
+            env_id = camera_target.get("env", 0)
+            current = int(manager.motion_ids[env_id].item())
+        mask = getattr(manager, "motion_sampling_mask_per_env", None)
+        playable = mask.bool().any(dim=0) if mask is not None else None
+        num_motions = motion_lib.num_motions()
+        for offset in range(1, num_motions + 1):
+            motion_id = (current + direction * offset) % num_motions
+            if playable is None or bool(playable[motion_id].item()):
+                self._interactive_motion_id_request = motion_id
+                print(f"[motion-debug] Scheduled motion switch to id {motion_id}.")
+                return
+        print("Interactive motion switch skipped: no compatible motions.")
+
     def request_interactive_motion_id(self) -> None:
         """Prompt for a reference motion id to use at runtime."""
         motion_manager = getattr(self.env, "motion_manager", None)
@@ -194,20 +221,7 @@ class BaseEvaluator:
         motion_manager.motion_ids[env_ids] = new_motion_ids
         motion_manager.motion_times[env_ids] = 0.0
 
-        available_motion_ids = getattr(motion_manager, "available_motion_ids", None)
-        if (
-            available_motion_ids is not None
-            and len(available_motion_ids) == self.env.num_envs
-        ):
-            available_motion_ids[env_ids] = new_motion_ids
-
-        fixed_motion_ids = getattr(motion_manager, "_fixed_motion_ids_per_env", None)
-        if (
-            fixed_motion_ids is not None
-            and fixed_motion_ids.shape[0] == self.env.num_envs
-        ):
-            fixed_motion_ids[env_ids] = new_motion_ids
-            motion_manager._env_has_fixed_motion[env_ids] = True
+        motion_manager.set_interactive_motion_id(env_ids, requested_motion_id)
 
         target_env_id = int(env_ids[0].item())
         simulator = getattr(self.env, "simulator", None)
