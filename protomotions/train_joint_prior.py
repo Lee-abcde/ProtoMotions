@@ -88,6 +88,12 @@ def parser():
     p.add_argument("--gradient-clip", type=float, default=50.0)
     p.add_argument("--save-every", type=int, default=100)
     p.add_argument(
+        "--snapshot-every",
+        type=int,
+        default=1000,
+        help="Also keep epoch_<iteration>.ckpt every N iterations; 0 disables",
+    )
+    p.add_argument(
         "--eval-every",
         type=int,
         default=0,
@@ -134,6 +140,8 @@ def prior_preflight(args, world_size):
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
     if args.eval_every < 0 or args.learning_rate <= 0 or args.gradient_clip <= 0:
         raise ValueError("Invalid evaluation interval, learning rate, or gradient clip")
+    if args.snapshot_every < 0:
+        raise ValueError("--snapshot-every must be non-negative")
     if (
         not 0 <= args.prior_rollout_max_prob <= 1
         or min(args.prior_rollout_start_iteration, args.prior_rollout_ramp_iterations)
@@ -432,6 +440,9 @@ def run(args):
                     iteration,
                 )
 
+        def is_snapshot_iteration(iteration):
+            return args.snapshot_every > 0 and iteration % args.snapshot_every == 0
+
         def save(iteration):
             collective_call(lambda: save_psi(iteration))
             states = gather_objects(
@@ -443,10 +454,17 @@ def run(args):
                     "motion_weights": env.motion_manager.motion_weights.cpu(),
                 }
             )
-            collective_call(
-                lambda: (
+
+            def write_checkpoints():
+                if rank != 0:
+                    return
+                checkpoint_names = ["last.ckpt"]
+                # One epoch corresponds to one outer rollout/training iteration.
+                if is_snapshot_iteration(iteration):
+                    checkpoint_names.append(f"epoch_{iteration}.ckpt")
+                for checkpoint_name in checkpoint_names:
                     save_prior_checkpoint(
-                        output / "last.ckpt",
+                        output / checkpoint_name,
                         model,
                         optimizer,
                         iteration,
@@ -455,10 +473,8 @@ def run(args):
                         training,
                         states,
                     )
-                    if rank == 0
-                    else None
-                )
-            )
+
+            collective_call(write_checkpoints)
 
         for iteration in range(start + 1, args.iterations + 1):
             model.eval()
@@ -588,7 +604,11 @@ def run(args):
                 # Evaluation owns simulator resets; start fresh observer histories afterwards.
                 obs, _ = env.reset()
                 conditioning.reset(torch.arange(env.num_envs, device=device))
-            if iteration % args.save_every == 0 or iteration == args.iterations:
+            if (
+                iteration % args.save_every == 0
+                or is_snapshot_iteration(iteration)
+                or iteration == args.iterations
+            ):
                 save(iteration)
     except BaseException:
         # Isaac Sim tears the process down inside app.close() below, which can

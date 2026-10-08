@@ -36,9 +36,10 @@ PRIOR_ROLLOUT_START="${PRIOR_ROLLOUT_START:-500}"
 PRIOR_ROLLOUT_RAMP="${PRIOR_ROLLOUT_RAMP:-9500}"
 PRIOR_ROLLOUT_MAX_PROB="${PRIOR_ROLLOUT_MAX_PROB:-0.95}"
 SAVE_EVERY="${SAVE_EVERY:-50}"
+SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-1000}"
 MINI_EPOCHS="${MINI_EPOCHS:-6}"
 export POSTERIOR_FILE EXPERIMENT_PATH PRIOR_ROLLOUT_START PRIOR_ROLLOUT_RAMP
-export PRIOR_ROLLOUT_MAX_PROB SAVE_EVERY MINI_EPOCHS
+export PRIOR_ROLLOUT_MAX_PROB SAVE_EVERY SNAPSHOT_EVERY MINI_EPOCHS
 SOURCES="${SOURCES:-examples/experiments/gcc/s1_joint_pvq_sources_euler.yaml}"
 export SOURCES
 CONTAINER_ENV="${CONTAINER_ENV:-/opt/IsaacLab_new/.venv/bin/activate}"
@@ -170,6 +171,7 @@ python -u -m protomotions.train_joint_prior \
   --rollout-steps "$ROLLOUT_STEPS" \
   --iterations "$ITERATIONS" \
   --save-every "$SAVE_EVERY" \
+  --snapshot-every "$SNAPSHOT_EVERY" \
   --mini-epochs "$MINI_EPOCHS" \
   --prior-rollout-start-iteration "$PRIOR_ROLLOUT_START" \
   --prior-rollout-ramp-iterations "$PRIOR_ROLLOUT_RAMP" \
@@ -193,7 +195,7 @@ INNER
 echo "Euler preflight: code, data, checkpoints, action contract, and rank assignment"
 mkdir -p "$NODE_TMP_ROOT/overlay_preflight/upper" "$NODE_TMP_ROOT/overlay_preflight/work"
 apptainer exec --overlay "$NODE_TMP_ROOT/overlay_preflight" "${container_args[@]}" "$CONTAINER" bash -lc \
-  'set -euo pipefail; source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_joint_prior --checkpoint "/workspace/joint_pvq/$POSTERIOR_FILE" --experiment-path "$EXPERIMENT_PATH" --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS" --num-envs "$NUM_ENVS" --batch-size "$BATCH_SIZE" --rollout-steps "$ROLLOUT_STEPS" --iterations "$ITERATIONS" --save-every "$SAVE_EVERY" --mini-epochs "$MINI_EPOCHS" --eval-every "$EVAL_EVERY" --student-psi "$STUDENT_PSI" --prior-rollout-start-iteration "$PRIOR_ROLLOUT_START" --prior-rollout-ramp-iterations "$PRIOR_ROLLOUT_RAMP" --prior-rollout-max-prob "$PRIOR_ROLLOUT_MAX_PROB"'
+  'set -euo pipefail; source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_joint_prior --checkpoint "/workspace/joint_pvq/$POSTERIOR_FILE" --experiment-path "$EXPERIMENT_PATH" --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS" --num-envs "$NUM_ENVS" --batch-size "$BATCH_SIZE" --rollout-steps "$ROLLOUT_STEPS" --iterations "$ITERATIONS" --save-every "$SAVE_EVERY" --snapshot-every "$SNAPSHOT_EVERY" --mini-epochs "$MINI_EPOCHS" --eval-every "$EVAL_EVERY" --student-psi "$STUDENT_PSI" --prior-rollout-start-iteration "$PRIOR_ROLLOUT_START" --prior-rollout-ramp-iterations "$PRIOR_ROLLOUT_RAMP" --prior-rollout-max-prob "$PRIOR_ROLLOUT_MAX_PROB"'
 
 echo "Starting $PREFLIGHT_RANKS-rank training in $RUN_DIR"
 # Each task computes its own overlay, so SLURM_PROCID must expand inside srun.
