@@ -189,6 +189,31 @@ def canonical(value: Any) -> Any:
     return value
 
 
+def contract_matches(saved: Any, current: Any) -> bool:
+    """Compare a contract frozen in a checkpoint against a freshly built one.
+
+    ``canonical`` fills in the default of a field an old pickle predates, so a
+    freshly built contract carries fields that a contract frozen before those
+    fields existed has no entry for. A side that never recorded a key cannot
+    disagree about its value, so only the keys both sides carry are compared;
+    everything they share still has to match exactly.
+    """
+    return _shared_keys_match(canonical(saved), canonical(current))
+
+
+def _shared_keys_match(saved: Any, current: Any) -> bool:
+    if isinstance(saved, dict) and isinstance(current, dict):
+        return all(
+            _shared_keys_match(saved[key], current[key])
+            for key in saved.keys() & current.keys()
+        )
+    if isinstance(saved, list) and isinstance(current, list):
+        return len(saved) == len(current) and all(
+            _shared_keys_match(left, right) for left, right in zip(saved, current)
+        )
+    return saved == current
+
+
 TEACHER_CONTRACT_KEYS = (
     "robot",
     "simulator",

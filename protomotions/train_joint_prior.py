@@ -32,7 +32,7 @@ from protomotions.agents.joint_prior.runtime import (
     save_prior_checkpoint,
 )
 from protomotions.agents.multi_source_distill.config import (
-    canonical,
+    contract_matches,
     manifest_state,
     teacher_contract,
 )
@@ -192,9 +192,13 @@ def training_contract(args, pc, world_size, filter_digest, mc, frozen_state):
 
 
 def validate_resume(saved, manifest, contract, training):
-    if canonical(saved["manifest"]) != canonical(manifest_state(manifest)):
+    # Compare with contract_matches, not equality: a contract frozen before a
+    # config dataclass gained a field has no entry for it while the freshly
+    # built one carries that field's default, and an unrelated code update then
+    # breaks resume on an otherwise identical setup.
+    if not contract_matches(saved["manifest"], manifest_state(manifest)):
         raise ValueError("Resume source manifest differs")
-    if canonical(saved["teacher_contract"]) != canonical(contract):
+    if not contract_matches(saved["teacher_contract"], contract):
         raise ValueError("Resume tracker configuration differs")
     # Check the actual embedded posterior, including legacy prior checkpoints
     # written before the training contract recorded its identity.
@@ -206,11 +210,11 @@ def validate_resume(saved, manifest, contract, training):
             if name.startswith("posterior.")
         },
     )
-    if canonical(embedded) != canonical(training["posterior"]):
+    if not contract_matches(embedded, training["posterior"]):
         raise ValueError("Resume frozen posterior differs from --checkpoint")
     saved_training = dict(saved["training_config"])
     saved_training.setdefault("posterior", embedded)
-    if canonical(saved_training) != canonical(training):
+    if not contract_matches(saved_training, training):
         raise ValueError("Resume training settings differ")
     if len(saved["rank_states"]) != training["world_size"]:
         raise ValueError("Resume rank layout differs")
