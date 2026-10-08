@@ -16,6 +16,7 @@ set -euo pipefail
 : "${CONTAINER:?Submit with --export=ALL,CONTAINER=/cluster/scratch/lijingy/<image>.sif}"
 PROTOMOTIONS_DIR="${PROTOMOTIONS_DIR:-/cluster/home/lijingy/ProtoMotions}"
 DATA_DIR="${DATA_DIR:-/cluster/scratch/lijingy/protomotion_data}"
+INCLUDE_HOI="${INCLUDE_HOI:-1}"
 # Scene files resolve object meshes relative to their own scenes/ directory, so
 # the meshes have to appear under DATA_DIR. Euler purges scratch by file age and
 # these .obj files are never rewritten, so the scratch copy gets emptied and every
@@ -62,8 +63,11 @@ export USE_WANDB WANDB_PROJECT WANDB_MODE
 PREFLIGHT_RANKS="${SLURM_NTASKS:-8}"
 export PREFLIGHT_RANKS
 
-for path in "$CONTAINER" "$PROTOMOTIONS_DIR" "$DATA_DIR" "$OMOMO_OBJECTS_DIR" \
-           "$HOI_TEACHER_DIR" "$LOCO_TEACHER_DIR"; do
+required_paths=("$CONTAINER" "$PROTOMOTIONS_DIR" "$DATA_DIR" "$LOCO_TEACHER_DIR")
+if [[ "$INCLUDE_HOI" == "1" ]]; then
+  required_paths+=("$OMOMO_OBJECTS_DIR" "$HOI_TEACHER_DIR")
+fi
+for path in "${required_paths[@]}"; do
   if [[ ! -e "$path" ]]; then
     echo "Required Euler path does not exist: $path" >&2
     exit 2
@@ -98,13 +102,18 @@ container_args=(
   --bind "$HOME:$HOME"
   --bind "$PROTOMOTIONS_DIR:/workspace/ProtoMotions:rw"
   --bind "$DATA_DIR:/workspace/protomotion_data:ro"
-  --bind "$OMOMO_OBJECTS_DIR:/workspace/protomotion_data/$OMOMO_DATASET/objects:ro"
-  --bind "$HOI_TEACHER_DIR:/workspace/hoi_teachers:ro"
   --bind "$LOCO_TEACHER_DIR:/workspace/loco_teachers:ro"
   --bind "$OUTPUT_ROOT:/workspace/output:rw"
   --bind "$NODE_TMP_ROOT:/tmp:rw"
   --bind /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro
 )
+
+if [[ "$INCLUDE_HOI" == "1" ]]; then
+  container_args+=(
+    --bind "$OMOMO_OBJECTS_DIR:/workspace/protomotion_data/$OMOMO_DATASET/objects:ro"
+    --bind "$HOI_TEACHER_DIR:/workspace/hoi_teachers:ro"
+  )
+fi
 
 inner_script=$(cat <<'INNER'
 set -euo pipefail

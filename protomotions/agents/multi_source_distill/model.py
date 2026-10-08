@@ -36,6 +36,37 @@ class JointModelConfig:
     dead_code_threshold: int = 2
 
 
+def model_config_from_layouts(
+    layouts: list[tuple[dict[str, int], int]],
+    num_actions: int,
+    tasks: set[str],
+) -> JointModelConfig:
+    """Resolve native widths, padding modalities absent from single-task runs."""
+    absent_dims = {}
+    if "locomotion" not in tasks:
+        absent_dims["mimic_target_poses"] = 1
+    if "hoi" not in tasks:
+        # One fully masked object slot, with the five native per-object fields.
+        absent_dims.update(intermimic_target_obs=1, intermimic_object_obs=16)
+    dims = {}
+    for key in OBS_KEYS:
+        sizes = {layout[key] for layout, _ in layouts if key in layout}
+        if not sizes and key in absent_dims:
+            dims[key] = absent_dims[key]
+        elif len(sizes) != 1:
+            raise ValueError(
+                f"{key}: inconsistent native observation dimensions {sizes}"
+            )
+        else:
+            dims[key] = sizes.pop()
+    objects = {count for _, count in layouts if count}
+    if "hoi" not in tasks and not objects:
+        objects = {1}
+    if len(objects) != 1:
+        raise ValueError("HOI sources must share the same padded object capacity")
+    return JointModelConfig(dims, num_actions, num_objects=objects.pop())
+
+
 class MaskedNormalizer(nn.Module):
     """Explicit, collective-free forward; synchronize moments only at update boundaries."""
 

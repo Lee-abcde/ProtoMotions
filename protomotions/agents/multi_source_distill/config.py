@@ -32,9 +32,9 @@ class SourceManifest:
     hoi_weight: float = 0.5
 
     def validate(self) -> None:
-        if self.locomotion_num_ranks < 0 or not 0 < self.hoi_weight <= 1:
+        if self.locomotion_num_ranks < 0 or not 0 <= self.hoi_weight <= 1:
             raise ValueError(
-                "Require locomotion_num_ranks >= 0 and 0 < hoi_weight <= 1"
+                "Require locomotion_num_ranks >= 0 and 0 <= hoi_weight <= 1"
             )
         if len({s.id for s in self.sources}) != len(self.sources):
             raise ValueError("Dataset IDs must be unique")
@@ -47,8 +47,11 @@ class SourceManifest:
             raise ValueError(
                 "HOI-only runs require hoi_weight=1; joint runs require hoi_weight<1"
             )
-        if not any(s.task == "hoi" for s in self.sources):
-            raise ValueError("At least one HOI source is required")
+        has_hoi = any(s.task == "hoi" for s in self.sources)
+        if has_hoi != (self.hoi_weight > 0):
+            raise ValueError(
+                "HOI sources require positive hoi_weight; locomotion-only requires hoi_weight=0"
+            )
         for s in self.sources:
             if not s.id or s.task not in ("hoi", "locomotion"):
                 raise ValueError(f"Invalid source: {s.id}, task={s.task}")
@@ -78,8 +81,16 @@ class SourceManifest:
 
     def assignment(self, rank: int, world_size: int) -> tuple[int, ...]:
         """Locomotion ranks come first; HOI sources are distributed round-robin."""
-        if world_size <= self.locomotion_num_ranks or not 0 <= rank < world_size:
-            raise ValueError("Need all locomotion ranks plus at least one HOI rank")
+        has_hoi = any(s.task == "hoi" for s in self.sources)
+        valid_world_size = (
+            world_size > self.locomotion_num_ranks
+            if has_hoi
+            else world_size == self.locomotion_num_ranks
+        )
+        if not valid_world_size or not 0 <= rank < world_size:
+            raise ValueError(
+                "World size must match locomotion ranks, plus HOI ranks when present"
+            )
         if rank < self.locomotion_num_ranks:
             return (
                 next(i for i, s in enumerate(self.sources) if s.task == "locomotion"),

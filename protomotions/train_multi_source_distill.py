@@ -43,8 +43,8 @@ from protomotions.agents.multi_source_distill.curriculum import MotionSamplingCu
 from protomotions.agents.multi_source_distill.data import complete_observations
 from protomotions.agents.multi_source_distill.model import (
     OBS_KEYS,
-    JointModelConfig,
     JointPVQModel,
+    model_config_from_layouts,
     task_balanced_source_weights,
     weighted_sample_loss,
 )
@@ -763,29 +763,10 @@ def run(args):
         }
         local_objects = env.scene_lib.num_objects_per_scene if task == "hoi" else 0
         layouts = gather_objects((local_dims, local_objects))
-        dims = {}
-        for key in OBS_KEYS:
-            sizes = {layout[key] for layout, _ in layouts if key in layout}
-            if (
-                not sizes
-                and key == "mimic_target_poses"
-                and not manifest.locomotion_num_ranks
-            ):
-                # The unused locomotion encoder still needs a positive input width.
-                dims[key] = 1
-                continue
-            if len(sizes) != 1:
-                raise ValueError(
-                    f"{key}: inconsistent native observation dimensions {sizes}; package compatible subsets"
-                )
-            dims[key] = sizes.pop()
-        objects = {count for _, count in layouts if count}
-        if len(objects) != 1:
-            raise ValueError("HOI sources must share the same padded object capacity")
-        model_config = JointModelConfig(
-            obs_dims=dims,
-            num_actions=env.robot_config.number_of_actions,
-            num_objects=objects.pop(),
+        model_config = model_config_from_layouts(
+            layouts,
+            env.robot_config.number_of_actions,
+            {source.task for source in manifest.sources},
         )
         model = JointPVQModel(model_config).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)

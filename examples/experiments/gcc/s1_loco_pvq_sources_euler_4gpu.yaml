@@ -1,0 +1,10 @@
+# Stage-one joint PVQ distillation using only locomotion tracker supervision.
+locomotion_num_ranks: 4
+hoi_weight: 0.0
+sources:
+  - id: amassx
+    task: locomotion
+    motion_file: /workspace/protomotion_data/amassx_shards/amassx_slurmrank.pt
+    motion_file_shard_indices: [0, 1, 2, 3]
+    teacher_checkpoint: /workspace/loco_teachers/gcc_s0_loco_tracker_amassx_v1/score_based.ckpt
+    weight: 1.0
