@@ -67,6 +67,7 @@ from protomotions.train_multi_source_distill import (
     gather_objects,
     local_cuda_device,
     preflight,
+    task_layout,
     write_report,
 )
 
@@ -143,21 +144,6 @@ def rollout_probability(iteration, start, ramp, maximum):
     return maximum * min(1.0, (iteration - start) / max(ramp, 1))
 
 
-def task_layout(args, task):
-    """Per-rank env count and minibatch size; HOI ranks may override both."""
-    if task == "hoi":
-        return (
-            args.hoi_num_envs or args.num_envs,
-            args.hoi_batch_size or args.batch_size,
-        )
-    return args.num_envs, args.batch_size
-
-
-def minibatch_count(args, task):
-    num_envs, batch_size = task_layout(args, task)
-    return -(-num_envs * args.rollout_steps // batch_size)
-
-
 def prior_preflight(args, world_size):
     for name in (
         "num_envs",
@@ -183,10 +169,6 @@ def prior_preflight(args, world_size):
     ):
         raise ValueError("Invalid prior rollout schedule")
     manifest, configs = preflight(args, world_size)
-    # DDP synchronizes every optimizer step, so all ranks must take as many.
-    counts = {t: minibatch_count(args, t) for t in {s.task for s in manifest.sources}}
-    if len(set(counts.values())) > 1:
-        raise ValueError(f"Ranks need equal minibatches per epoch, got {counts}")
     saved = torch.load(
         args.checkpoint, map_location="cpu", weights_only=False, mmap=True
     )

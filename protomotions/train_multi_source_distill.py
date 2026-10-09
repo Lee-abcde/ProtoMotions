@@ -90,6 +90,16 @@ def parser():
     p.add_argument(
         "--batch-size", type=int, default=4096, help="Minibatch size per GPU"
     )
+    p.add_argument(
+        "--hoi-num-envs",
+        type=int,
+        help="Envs per HOI rank; defaults to --num-envs",
+    )
+    p.add_argument(
+        "--hoi-batch-size",
+        type=int,
+        help="Minibatch per HOI rank; defaults to --batch-size",
+    )
     p.add_argument("--rollout-steps", type=int, default=32)
     # Effectively unlimited: a run is bounded by the SLURM wall clock and picked
     # up again by --resume, so the iteration count should not end it.
@@ -164,6 +174,21 @@ def parser():
         help="Rank count for CPU configuration preflight only",
     )
     return p
+
+
+def task_layout(args, task):
+    """Per-rank env count and minibatch size; HOI ranks may override both."""
+    if task == "hoi":
+        return (
+            getattr(args, "hoi_num_envs", None) or args.num_envs,
+            getattr(args, "hoi_batch_size", None) or args.batch_size,
+        )
+    return args.num_envs, args.batch_size
+
+
+def minibatch_count(args, task):
+    num_envs, batch_size = task_layout(args, task)
+    return -(-num_envs * args.rollout_steps // batch_size)
 
 
 def gather_objects(value):
@@ -682,7 +707,10 @@ def run(args):
                 configs,
                 rank,
                 world_size,
-                args.num_envs,
+                task_layout(
+                    args,
+                    manifest.sources[manifest.assignment(rank, world_size)[0]].task,
+                )[0],
                 device,
                 launcher.app,
                 psi=psi_enabled(args),
@@ -783,6 +811,10 @@ def run(args):
                 "revive_every",
             )
         }
+        # Only when set, so runs started before per-task layouts still resume.
+        for name in ("hoi_num_envs", "hoi_batch_size"):
+            if getattr(args, name) is not None:
+                training_config[name] = getattr(args, name)
         training_config["hoi_teacher_filter_digest"] = filter_digest
         start = 0
         saved = None
@@ -1122,7 +1154,8 @@ def run(args):
                 counts, source_is_hoi, manifest.hoi_weight
             )
             total = len(ids)
-            minibatches = (total + args.batch_size - 1) // args.batch_size
+            batch_size = task_layout(args, task)[1]
+            minibatches = (total + batch_size - 1) // batch_size
             logs = torch.zeros(len(manifest.sources), 2, device=device)
             usage = torch.zeros(
                 2,
@@ -1132,7 +1165,7 @@ def run(args):
             )
             for mini_epoch in range(args.mini_epochs):
                 order = torch.randperm(total, device=device)
-                for indices in order.split(args.batch_size):
+                for indices in order.split(batch_size):
                     inputs = {k: v[indices] for k, v in batch.items()}
                     out = ddp(inputs, task)
                     bc = (out["action"] - expert_actions[indices]).square().mean(-1)
@@ -1301,6 +1334,10 @@ def preflight(args, world_size):
     configs = load_teacher_configs(manifest)
     # Build the resume contract here too, so stale saved configs fail before launch.
     teacher_contract(configs)
+    # DDP synchronizes every optimizer step, so all ranks must take as many.
+    counts = {t: minibatch_count(args, t) for t in {s.task for s in manifest.sources}}
+    if len(set(counts.values())) > 1:
+        raise ValueError(f"Ranks need equal minibatches per epoch, got {counts}")
     return manifest, configs
 
 
@@ -1354,6 +1391,9 @@ def main():
     ):
         if getattr(args, name) < 1:
             raise ValueError(f"{name} must be positive")
+    for name in ("hoi_num_envs", "hoi_batch_size"):
+        if getattr(args, name) is not None and getattr(args, name) < 1:
+            raise ValueError(f"{name} must be positive")
     # Kit can end the process through SystemExit, which prints nothing at all.
     atexit.register(
         lambda: print(
@@ -1374,6 +1414,10 @@ def main():
                         "existing" if filter_path.is_file() else "build_on_start"
                     ),
                     "student_psi_empty_without_teacher": psi_empty,
+                    "layout": {
+                        t: dict(zip(("num_envs", "batch_size"), task_layout(args, t)))
+                        for t in sorted({s.task for s in manifest.sources})
+                    },
                     "reference_offsets_seconds": {
                         s.id: reference_offsets(c)
                         for s, c in zip(manifest.sources, configs)
