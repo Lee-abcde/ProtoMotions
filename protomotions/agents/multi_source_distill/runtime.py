@@ -25,6 +25,23 @@ from protomotions.agents.multi_source_distill.data import (
 )
 from protomotions.utils.hydra_replacement import get_class
 
+# Peak GPU contact patches per HOI env (~200 observed at 4096 envs), with margin.
+PHYSX_PATCHES_PER_ENV = 256
+
+
+def scale_physx_patch_capacity(simulator_config, num_envs: int) -> None:
+    """Grow the frozen teacher's patch buffer with the env count.
+
+    The capacity was sized for the teacher's own env count; PhysX drops the
+    contacts that overflow it. Capacity only, so it never shrinks a buffer.
+    """
+    physx = getattr(getattr(simulator_config, "sim", None), "physx", None)
+    if physx is None or not hasattr(physx, "gpu_max_rigid_patch_count"):
+        return
+    physx.gpu_max_rigid_patch_count = max(
+        physx.gpu_max_rigid_patch_count, PHYSX_PATCHES_PER_ENV * num_envs
+    )
+
 
 def launch_isaaclab(
     device,
@@ -152,6 +169,7 @@ def build_environment(
     task = manifest.sources[assigned[0]].task
     cfg["simulator"].num_envs = num_envs
     cfg["simulator"].headless = headless
+    scale_physx_patch_capacity(cfg["simulator"], num_envs)
     for control in cfg["env"].control_components.values():
         if not psi and hasattr(control, "physical_buffer_size"):
             control.physical_buffer_size = 1
