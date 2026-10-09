@@ -20,18 +20,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
+import traceback
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
-import torch
+# Must precede any import that loads OpenBLAS (numpy, scipy). Its atfork handler
+# joins the BLAS worker threads, and headless Kit forks from a fiber thread at
+# startup, which segfaults or hangs. The Euler sbatch exports the same setting.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
-from protomotions.agents.multi_source_distill.config import (
+import torch  # noqa: E402
+
+from protomotions.agents.multi_source_distill.config import (  # noqa: E402
     canonical,
     load_manifest,
     teacher_contract,
 )
-from protomotions.agents.multi_source_distill.model import (
+from protomotions.agents.multi_source_distill.model import (  # noqa: E402
     JointModelConfig,
     JointPVQModel,
 )
@@ -284,6 +292,7 @@ def run(args):
                 "motions": records,
             }
             path = output_dir / f"eval_local_{args.policy}_{source.id}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(report, indent=2))
             print(json.dumps(report["summary"], indent=2), flush=True)
             print(f"Wrote {path}", flush=True)
@@ -302,6 +311,13 @@ def run(args):
                 flush=True,
             )
         evaluator.simple_test_policy(collect_metrics=True)
+    except BaseException:
+        # SimulationApp.close() below ends the process with os._exit(0), which
+        # would discard this traceback and the exit status.
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        raise
     finally:
         launcher.app.close()
 
