@@ -11,7 +11,7 @@ This component manages reference motion tracking, including:
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Union, TYPE_CHECKING
+from typing import Callable, Dict, List, Tuple, Union, TYPE_CHECKING
 
 import torch
 from torch import Tensor
@@ -48,6 +48,7 @@ class MimicControlConfig(ControlComponentConfig):
     bootstrap_on_episode_end: bool = True
     reset_on_motion_end: bool = True
     future_steps: Union[int, List[int]] = 1
+    show_masked_reference_markers: bool = False
 
 
 class MimicControl(ControlComponent):
@@ -69,6 +70,9 @@ class MimicControl(ControlComponent):
         super().__init__(config, env)
         self._future_time_offsets_cache_key = None
         self._future_time_offsets_cache = None
+        self.reference_marker_provider: (
+            Callable[[], Tuple[Tensor, Tensor] | None] | None
+        ) = None
 
     def step(self):
         """Control component step - motion manager is handled by env."""
@@ -332,6 +336,10 @@ class MimicControl(ControlComponent):
             type="sphere", color=(1.0, 0.0, 0.0), markers=body_markers
         )
         visualization_markers["body_markers_red"] = body_markers_red_cfg
+        if self.config.show_masked_reference_markers:
+            visualization_markers["body_markers_masked"] = VisualizationMarkerConfig(
+                type="sphere", color=(0.75, 0.75, 0.75), markers=body_markers
+            )
 
         return visualization_markers
 
@@ -346,20 +354,42 @@ class MimicControl(ControlComponent):
 
         markers_state = {}
 
-        # Get reference state at current time (access motion_manager via env)
-        ref_state = self.env.motion_lib.get_motion_state(
-            self.env.motion_manager.motion_ids, self.env.motion_manager.motion_times
+        reference = (
+            self.reference_marker_provider()
+            if self.reference_marker_provider is not None
+            else None
         )
-
-        target_pos = ref_state.rigid_body_pos.clone()
-        target_pos += (
-            self.env.get_spawn_to_ref_pose_offset_with_terrain_height_correction(
-                target_pos
+        if reference is not None:
+            positions, visible = reference
+            target_pos = positions.clone().view(self.env.num_envs, -1, 3)
+            # Match masked-mimic rendering: move hidden spheres off screen.
+            target_pos[~visible] += 100
+            if self.config.show_masked_reference_markers:
+                masked_pos = positions.clone().view(self.env.num_envs, -1, 3)
+                masked_pos[visible] += 100
+                markers_state["body_markers_masked"] = MarkerState(
+                    translation=masked_pos,
+                    orientation=torch.zeros(
+                        self.env.num_envs,
+                        masked_pos.shape[1],
+                        4,
+                        device=self.env.device,
+                    ),
+                )
+        else:
+            if self.reference_marker_provider is not None:
+                # No prior observation yet; do not briefly expose all targets.
+                return {}
+            ref_state = self.env.motion_lib.get_motion_state(
+                self.env.motion_manager.motion_ids, self.env.motion_manager.motion_times
             )
-        )
-
-        # Standard mimic: show all body markers in red
-        target_pos = target_pos.view(self.env.num_envs, -1, 3)
+            target_pos = ref_state.rigid_body_pos.clone()
+            target_pos += (
+                self.env.get_spawn_to_ref_pose_offset_with_terrain_height_correction(
+                    target_pos
+                )
+            )
+            target_pos = target_pos.view(self.env.num_envs, -1, 3)
         markers_state["body_markers_red"] = MarkerState(
             translation=target_pos,
             orientation=torch.zeros(

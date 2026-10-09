@@ -78,9 +78,24 @@ def reference_residual(target, current, root_rot):
 
 
 class PriorConditioning:
-    def __init__(self, env, task, config: JointPriorConfig, num_objects):
+    def __init__(
+        self,
+        env,
+        task,
+        config: JointPriorConfig,
+        num_objects,
+        *,
+        reference_body_ids: tuple[int, ...] | None = None,
+        full_object_reference: bool = False,
+    ):
         self.env, self.task, self.config = env, task, config
         self.num_objects = num_objects
+        if reference_body_ids is not None:
+            if any(i < 0 or i >= config.num_bodies for i in reference_body_ids):
+                raise ValueError("reference_body_ids must contain valid rigid-body IDs")
+            reference_body_ids = tuple(sorted(set(reference_body_ids)))
+        self.reference_body_ids = reference_body_ids
+        self.full_object_reference = full_object_reference
         b, h, j = env.num_envs, config.history_steps, config.num_bodies
         device = env.device
         self.human_history = torch.zeros(b, h, j, 13, device=device)
@@ -97,7 +112,24 @@ class PriorConditioning:
         )
         self.long_target_time = torch.zeros(b, device=device)
         self.last_human = self.last_object = None
+        self.next_reference_positions = None
         self.reset(torch.arange(b, device=device))
+
+    def get_reference_markers(self):
+        """Return next-step world targets and their actual prior visibility mask."""
+        if self.next_reference_positions is None:
+            return None
+        return self.next_reference_positions, self.human_visible[:, 0]
+
+    def _apply_reference_body_selection(self):
+        """Apply independent human and object inference visibility overrides."""
+        if self.reference_body_ids is not None:
+            self.human_visible.zero_()
+            self.human_visible[:, :-1, list(self.reference_body_ids)] = True
+            self.object_visible.zero_()
+        if self.full_object_reference:
+            # observe() still excludes absent object slots via object_valid_mask.
+            self.object_visible.fill_(True)
 
     def _motion_dt(self):
         manager = self.env.motion_manager
@@ -126,6 +158,7 @@ class PriorConditioning:
             (self.object_visible, self.config.object_visible_prob),
         ):
             mask[env_ids] = torch.rand_like(mask[env_ids], dtype=torch.float) < prob
+        self._apply_reference_body_selection()
 
     @torch.no_grad()
     def advance(self):
@@ -157,6 +190,7 @@ class PriorConditioning:
             refresh[:, -1] |= reached[:, None]
             sampled = torch.rand_like(mask, dtype=torch.float) < prob
             mask.copy_(torch.where(refresh, sampled, mask))
+        self._apply_reference_body_selection()
 
     def _future(self):
         env = self.env
@@ -234,6 +268,7 @@ class PriorConditioning:
         self.last_human, self.last_object = human.clone(), objects.clone()
         root_pos, root_rot = human[:, 0, :3], human[:, 0, 3:7]
         future_human, future_objects, times = self._future()
+        self.next_reference_positions = future_human[:, 0, :, :3].detach().clone()
         object_valid = inputs["object_valid_mask"].bool()
         history_valid = torch.arange(c.history_steps, device=env.device)[None] >= (
             c.history_steps - self.history_count[:, None]

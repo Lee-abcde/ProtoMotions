@@ -64,13 +64,27 @@ class LivePriorPolicy(nn.Module):
     explicitly notified so same-motion/same-time resets cannot be missed.
     """
 
-    def __init__(self, model, env, task, temperature=0.0):
+    def __init__(
+        self,
+        model,
+        env,
+        task,
+        temperature=0.0,
+        *,
+        reference_body_ids=None,
+        full_object_reference=False,
+    ):
         super().__init__()
         self.prior = model
         self.env, self.task, self.temperature = env, task, temperature
         self.config = model.posterior.config
         self.conditions = PriorConditioning(
-            env, task, model.config, self.config.num_objects
+            env,
+            task,
+            model.config,
+            self.config.num_objects,
+            reference_body_ids=reference_body_ids,
+            full_object_reference=full_object_reference,
         )
         self.initialized = False
         self.pending_resets = torch.zeros(
