@@ -83,6 +83,16 @@ def parser():
     p.add_argument("--num-envs", type=int, default=1024)
     p.add_argument("--rollout-steps", type=int, default=32)
     p.add_argument("--batch-size", type=int, default=4096)
+    p.add_argument(
+        "--hoi-num-envs",
+        type=int,
+        help="Envs per HOI rank; defaults to --num-envs",
+    )
+    p.add_argument(
+        "--hoi-batch-size",
+        type=int,
+        help="Minibatch per HOI rank; defaults to --batch-size",
+    )
     p.add_argument("--mini-epochs", type=int, default=6)
     p.add_argument("--iterations", type=int, default=100000000)
     p.add_argument("--learning-rate", type=float, default=2e-5)
@@ -133,6 +143,21 @@ def rollout_probability(iteration, start, ramp, maximum):
     return maximum * min(1.0, (iteration - start) / max(ramp, 1))
 
 
+def task_layout(args, task):
+    """Per-rank env count and minibatch size; HOI ranks may override both."""
+    if task == "hoi":
+        return (
+            args.hoi_num_envs or args.num_envs,
+            args.hoi_batch_size or args.batch_size,
+        )
+    return args.num_envs, args.batch_size
+
+
+def minibatch_count(args, task):
+    num_envs, batch_size = task_layout(args, task)
+    return -(-num_envs * args.rollout_steps // batch_size)
+
+
 def prior_preflight(args, world_size):
     for name in (
         "num_envs",
@@ -143,6 +168,9 @@ def prior_preflight(args, world_size):
         "save_every",
     ):
         if getattr(args, name) < 1:
+            raise ValueError(f"--{name.replace('_', '-')} must be positive")
+    for name in ("hoi_num_envs", "hoi_batch_size"):
+        if getattr(args, name) is not None and getattr(args, name) < 1:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
     if args.eval_every < 0 or args.learning_rate <= 0 or args.gradient_clip <= 0:
         raise ValueError("Invalid evaluation interval, learning rate, or gradient clip")
@@ -155,6 +183,10 @@ def prior_preflight(args, world_size):
     ):
         raise ValueError("Invalid prior rollout schedule")
     manifest, configs = preflight(args, world_size)
+    # DDP synchronizes every optimizer step, so all ranks must take as many.
+    counts = {t: minibatch_count(args, t) for t in {s.task for s in manifest.sources}}
+    if len(set(counts.values())) > 1:
+        raise ValueError(f"Ranks need equal minibatches per epoch, got {counts}")
     saved = torch.load(
         args.checkpoint, map_location="cpu", weights_only=False, mmap=True
     )
@@ -199,6 +231,8 @@ def training_contract(args, pc, world_size, filter_digest, mc, frozen_state):
         "num_envs",
         "rollout_steps",
         "batch_size",
+        "hoi_num_envs",
+        "hoi_batch_size",
         "mini_epochs",
         "learning_rate",
         "gradient_clip",
@@ -374,6 +408,9 @@ def run(args):
             ujitso_cache_budget_mb=args.ujitso_cache_budget_mb,
         )
     )
+    num_envs, batch_size = task_layout(
+        args, manifest.sources[manifest.assignment(rank, world_size)[0]].task
+    )
     try:
         env, obs, assigned, source_ids, local_ids, _ = collective_call(
             lambda: build_environment(
@@ -381,7 +418,7 @@ def run(args):
                 configs,
                 rank,
                 world_size,
-                args.num_envs,
+                num_envs,
                 device,
                 launcher.app,
                 psi=args.student_psi != "off",
@@ -536,15 +573,13 @@ def run(args):
                 counts, source_is_hoi, manifest.hoi_weight
             )
             n = len(ids)
-            minibatches = (n + args.batch_size - 1) // args.batch_size
+            minibatches = (n + batch_size - 1) // batch_size
             logs = torch.zeros(len(manifest.sources), 3, device=device)
             model.train()
             # TF32 changes only the update numerics, not the FP32 labels above.
             with matmul_tf32(args.train_tf32):
                 for _ in range(args.mini_epochs):
-                    for selection in torch.randperm(n, device=device).split(
-                        args.batch_size
-                    ):
+                    for selection in torch.randperm(n, device=device).split(batch_size):
                         logits = ddp({k: v[selection] for k, v in batch.items()})
                         ce = model.categorical_loss(logits, target[selection])
                         loss = weighted_sample_loss(
@@ -657,6 +692,10 @@ def main():
                     "valid": True,
                     "prior": asdict(pc),
                     "posterior": asdict(mc),
+                    "layout": {
+                        t: dict(zip(("num_envs", "batch_size"), task_layout(args, t)))
+                        for t in sorted({s.task for s in manifest.sources})
+                    },
                     "assignments": {
                         r: [
                             manifest.sources[i].id
