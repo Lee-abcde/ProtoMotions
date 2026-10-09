@@ -15,6 +15,7 @@ import random
 import runpy
 import sys
 import traceback
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
@@ -106,6 +107,11 @@ def parser():
         "--student-psi", choices=("teacher", "empty", "off"), default="teacher"
     )
     p.add_argument(
+        "--train-tf32",
+        action="store_true",
+        help="TF32 tensor-core matmuls for prior updates; rollout labels stay FP32",
+    )
+    p.add_argument(
         "--hoi-teacher-filter",
         help="Reuse stage-one filter; defaults to checkpoint directory when present",
     )
@@ -164,6 +170,17 @@ def prior_preflight(args, world_size):
     return manifest, configs, saved, model_config, pc
 
 
+@contextmanager
+def matmul_tf32(enabled):
+    """Scope TF32 to the update phase; the frozen posterior labels stay FP32."""
+    previous = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = enabled
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous
+
+
 def posterior_contract(model_config, state_dict):
     """Identify the frozen motor, including normalization buffers, without paths."""
     digest = hashlib.sha256()
@@ -189,6 +206,7 @@ def training_contract(args, pc, world_size, filter_digest, mc, frozen_state):
         "prior_rollout_ramp_iterations",
         "prior_rollout_max_prob",
         "student_psi",
+        "train_tf32",
     )
     return {
         **{k: getattr(args, k) for k in keys},
@@ -521,38 +539,42 @@ def run(args):
             minibatches = (n + args.batch_size - 1) // args.batch_size
             logs = torch.zeros(len(manifest.sources), 3, device=device)
             model.train()
-            for _ in range(args.mini_epochs):
-                for selection in torch.randperm(n, device=device).split(
-                    args.batch_size
-                ):
-                    logits = ddp({k: v[selection] for k, v in batch.items()})
-                    ce = model.categorical_loss(logits, target[selection])
-                    loss = weighted_sample_loss(
-                        ce, ids[selection], counts, weights, world_size, minibatches
-                    )
-                    finite = torch.isfinite(loss).int()
-                    dist.all_reduce(finite, op=dist.ReduceOp.MIN)
-                    if not finite:
-                        raise FloatingPointError("Non-finite prior loss")
-                    optimizer.zero_grad(set_to_none=True)
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        (p for p in model.parameters() if p.requires_grad),
-                        args.gradient_clip,
-                        error_if_nonfinite=True,
-                    )
-                    optimizer.step()
-                    with torch.no_grad():
-                        accuracy = (
-                            (logits.argmax(-1) == target[selection]).float().mean(-1)
+            # TF32 changes only the update numerics, not the FP32 labels above.
+            with matmul_tf32(args.train_tf32):
+                for _ in range(args.mini_epochs):
+                    for selection in torch.randperm(n, device=device).split(
+                        args.batch_size
+                    ):
+                        logits = ddp({k: v[selection] for k, v in batch.items()})
+                        ce = model.categorical_loss(logits, target[selection])
+                        loss = weighted_sample_loss(
+                            ce, ids[selection], counts, weights, world_size, minibatches
                         )
-                        logs.index_add_(
-                            0,
-                            ids[selection],
-                            torch.stack(
-                                (ce.detach(), accuracy, torch.ones_like(ce)), -1
-                            ),
+                        finite = torch.isfinite(loss).int()
+                        dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+                        if not finite:
+                            raise FloatingPointError("Non-finite prior loss")
+                        optimizer.zero_grad(set_to_none=True)
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(
+                            (p for p in model.parameters() if p.requires_grad),
+                            args.gradient_clip,
+                            error_if_nonfinite=True,
                         )
+                        optimizer.step()
+                        with torch.no_grad():
+                            accuracy = (
+                                (logits.argmax(-1) == target[selection])
+                                .float()
+                                .mean(-1)
+                            )
+                            logs.index_add_(
+                                0,
+                                ids[selection],
+                                torch.stack(
+                                    (ce.detach(), accuracy, torch.ones_like(ce)), -1
+                                ),
+                            )
             dist.all_reduce(logs)
             reset_counts = gather_objects(
                 {"rank": rank, "task": task, "resets": resets}
