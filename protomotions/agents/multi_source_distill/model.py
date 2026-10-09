@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import MISSING, dataclass, fields
 
 import torch
 import torch.distributed as dist
@@ -34,6 +34,29 @@ class JointModelConfig:
     decoder_widths: tuple[int, ...] = (1024, 1024, 1024, 1024, 1024, 1024)
     commitment_cost: float = 0.25
     dead_code_threshold: int = 2
+    # Lower bound on the std that divides each normalized input. Without it a
+    # near-constant feature (e.g. SMPL-X finger actions during locomotion) is
+    # rescaled by 1/std, so tiny deviations reach the network as large inputs.
+    normalizer_min_std: float = 0.0
+
+
+def joint_model_config_from_dict(stored: dict) -> JointModelConfig:
+    """Rebuild a saved config; fields added after it was saved take their defaults."""
+    names = {f.name for f in fields(JointModelConfig)}
+    unknown = set(stored) - names
+    if unknown:
+        raise ValueError(f"Unknown joint model config fields: {sorted(unknown)}")
+    defaults = {
+        f.name: f.default for f in fields(JointModelConfig) if f.default is not MISSING
+    }
+    values = {**defaults, **stored}
+    return JointModelConfig(
+        obs_dims=dict(values.pop("obs_dims")),
+        **{
+            key: tuple(value) if isinstance(value, list) else value
+            for key, value in values.items()
+        },
+    )
 
 
 def model_config_from_layouts(
@@ -70,8 +93,11 @@ def model_config_from_layouts(
 class MaskedNormalizer(nn.Module):
     """Explicit, collective-free forward; synchronize moments only at update boundaries."""
 
-    def __init__(self, width: int):
+    def __init__(self, width: int, min_std: float = 0.0):
         super().__init__()
+        if min_std < 0:
+            raise ValueError("normalizer_min_std must be nonnegative")
+        self.min_std = float(min_std)
         self.register_buffer("mean", torch.zeros(width, dtype=torch.float64))
         self.register_buffer("var", torch.ones(width, dtype=torch.float64))
         self.register_buffer("count", torch.zeros(width, dtype=torch.float64))
@@ -100,9 +126,8 @@ class MaskedNormalizer(nn.Module):
 
     def forward(self, values: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
         values = torch.where(valid.bool(), values, 0)
-        result = (
-            (values - self.mean.float()) / (self.var.float() + 1e-5).sqrt()
-        ).clamp(-5, 5)
+        std = (self.var.float() + 1e-5).sqrt().clamp_min(self.min_std)
+        result = ((values - self.mean.float()) / std).clamp(-5, 5)
         return torch.where(valid.bool(), result, 0)
 
 
@@ -137,7 +162,7 @@ class JointPVQModel(nn.Module):
             )
         dims = config.obs_dims
         self.normalizers = nn.ModuleDict(
-            {k: MaskedNormalizer(dims[k]) for k in OBS_KEYS}
+            {k: MaskedNormalizer(dims[k], config.normalizer_min_std) for k in OBS_KEYS}
         )
         shared = dims["max_coords_obs"] + dims["previous_actions"]
         self.loco_encoder = make_mlp(

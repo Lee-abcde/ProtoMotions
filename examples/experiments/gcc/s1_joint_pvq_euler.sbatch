@@ -38,6 +38,9 @@ ROLLOUT_STEPS="${ROLLOUT_STEPS:-32}"
 # Adam learning rate. A changed value cannot --resume an existing run
 # (training settings are checked), so give it a new RUN_NAME.
 LEARNING_RATE="${LEARNING_RATE:-2e-5}"
+# Floor on the student input normalizer std; 0 keeps the original behavior.
+# Like LEARNING_RATE it is part of the run, so a new value needs a new RUN_NAME.
+NORMALIZER_MIN_STD="${NORMALIZER_MIN_STD:-0}"
 # Effectively unlimited. A run ends on the SLURM wall clock and continues from
 # last.ckpt on the next submission, so the iteration count must not cap it.
 ITERATIONS="${ITERATIONS:-100000000}"
@@ -57,7 +60,7 @@ HOI_TEACHER_FILTER="${HOI_TEACHER_FILTER:-}"
 USE_WANDB="${USE_WANDB:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-physical_animation}"
 WANDB_MODE="${WANDB_MODE:-online}"
-export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS LEARNING_RATE ITERATIONS EVAL_EVERY
+export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS LEARNING_RATE NORMALIZER_MIN_STD ITERATIONS EVAL_EVERY
 export STUDENT_PSI EVALUATE_TEACHERS HOI_TEACHER_FILTER
 export USE_WANDB WANDB_PROJECT WANDB_MODE
 # Follows sbatch --ntasks-per-node overrides, so a smaller smoke run needs no edit.
@@ -171,6 +174,7 @@ python -u -m protomotions.train_multi_source_distill \
   --batch-size "$BATCH_SIZE" \
   --rollout-steps "$ROLLOUT_STEPS" \
   --learning-rate "$LEARNING_RATE" \
+  --normalizer-min-std "$NORMALIZER_MIN_STD" \
   --iterations "$ITERATIONS" \
   --save-every 50 \
   --eval-every "$EVAL_EVERY" \

@@ -24,6 +24,7 @@ import os
 import sys
 import traceback
 from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,6 +43,7 @@ from protomotions.agents.multi_source_distill.config import (  # noqa: E402
 from protomotions.agents.multi_source_distill.model import (  # noqa: E402
     JointModelConfig,
     JointPVQModel,
+    joint_model_config_from_dict,
 )
 
 
@@ -144,15 +146,10 @@ def model_config_from_checkpoint(saved: dict) -> JointModelConfig:
     if saved.get("format") != "hoi_loco_pvq_v1":
         raise ValueError("Expected a joint PVQ checkpoint, not an individual tracker")
     stored = saved["model_config"]
-    config = JointModelConfig(
-        obs_dims=dict(stored["obs_dims"]),
-        **{
-            key: tuple(value) if isinstance(value, list) else value
-            for key, value in stored.items()
-            if key != "obs_dims"
-        },
-    )
-    if canonical(stored) != canonical(config):
+    config = joint_model_config_from_dict(stored)
+    # Fields saved by the checkpoint must survive the rebuild unchanged.
+    rebuilt = asdict(config)
+    if canonical(stored) != canonical({key: rebuilt[key] for key in stored}):
         raise ValueError("Checkpoint model config does not round-trip")
     return config
 

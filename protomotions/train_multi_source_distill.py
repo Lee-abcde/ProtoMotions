@@ -21,7 +21,7 @@ import socket
 import subprocess
 import sys
 import traceback
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -44,6 +44,7 @@ from protomotions.agents.multi_source_distill.data import complete_observations
 from protomotions.agents.multi_source_distill.model import (
     OBS_KEYS,
     JointPVQModel,
+    joint_model_config_from_dict,
     model_config_from_layouts,
     task_balanced_source_weights,
     weighted_sample_loss,
@@ -107,6 +108,12 @@ def parser():
     p.add_argument("--mini-epochs", type=int, default=6)
     p.add_argument("--learning-rate", type=float, default=2e-5)
     p.add_argument("--gradient-clip", type=float, default=50.0)
+    p.add_argument(
+        "--normalizer-min-std",
+        type=float,
+        default=0.0,
+        help="Floor on the std of every student input normalizer; 0 keeps the old behavior",
+    )
     p.add_argument("--save-every", type=int, default=100)
     p.add_argument("--eval-every", type=int, default=100)
     p.add_argument(
@@ -473,7 +480,8 @@ def restore_checkpoint(
     saved = torch.load(path, map_location="cpu", weights_only=False)
     if saved.get("format") != "hoi_loco_pvq_v1":
         raise ValueError("Expected a joint PVQ checkpoint, not an individual tracker")
-    if canonical(saved["model_config"]) != canonical(asdict(model_config)):
+    saved_config = asdict(joint_model_config_from_dict(saved["model_config"]))
+    if canonical(saved_config) != canonical(asdict(model_config)):
         raise ValueError("Student input layout or architecture differs from checkpoint")
     if warm_start:
         validate_warm_start_contract(saved, manifest, contract)
@@ -791,10 +799,13 @@ def run(args):
         }
         local_objects = env.scene_lib.num_objects_per_scene if task == "hoi" else 0
         layouts = gather_objects((local_dims, local_objects))
-        model_config = model_config_from_layouts(
-            layouts,
-            env.robot_config.number_of_actions,
-            {source.task for source in manifest.sources},
+        model_config = replace(
+            model_config_from_layouts(
+                layouts,
+                env.robot_config.number_of_actions,
+                {source.task for source in manifest.sources},
+            ),
+            normalizer_min_std=args.normalizer_min_std,
         )
         model = JointPVQModel(model_config).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -1373,6 +1384,8 @@ def main():
         raise ValueError("Choose resume or warm-start, not both")
     if args.evaluate_only and not (args.resume or args.warm_start):
         raise ValueError("--evaluate-only requires --resume or --warm-start")
+    if args.normalizer_min_std < 0:
+        raise ValueError("normalizer-min-std must be nonnegative")
     if args.eval_every < 0 or args.learning_rate <= 0 or args.gradient_clip <= 0:
         raise ValueError(
             "Require eval-every >= 0 and positive learning-rate/gradient-clip"
