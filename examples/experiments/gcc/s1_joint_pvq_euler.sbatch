@@ -41,6 +41,10 @@ LEARNING_RATE="${LEARNING_RATE:-2e-5}"
 # Floor on the student input normalizer std; 0 keeps the original behavior.
 # Like LEARNING_RATE it is part of the run, so a new value needs a new RUN_NAME.
 NORMALIZER_MIN_STD="${NORMALIZER_MIN_STD:-0}"
+# Normalize the quantized code before the decoder, like the SMPL PULSE-input
+# trunk. It changes the model, so a new value needs a new RUN_NAME; resuming a
+# run started before this default (e.g. joint_pvq_v1) needs NORMALIZE_LATENT=0.
+NORMALIZE_LATENT="${NORMALIZE_LATENT:-1}"
 # Effectively unlimited. A run ends on the SLURM wall clock and continues from
 # last.ckpt on the next submission, so the iteration count must not cap it.
 ITERATIONS="${ITERATIONS:-100000000}"
@@ -60,7 +64,7 @@ HOI_TEACHER_FILTER="${HOI_TEACHER_FILTER:-}"
 USE_WANDB="${USE_WANDB:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-physical_animation}"
 WANDB_MODE="${WANDB_MODE:-online}"
-export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS LEARNING_RATE NORMALIZER_MIN_STD ITERATIONS EVAL_EVERY
+export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS LEARNING_RATE NORMALIZER_MIN_STD NORMALIZE_LATENT ITERATIONS EVAL_EVERY
 export STUDENT_PSI EVALUATE_TEACHERS HOI_TEACHER_FILTER
 export USE_WANDB WANDB_PROJECT WANDB_MODE
 # Follows sbatch --ntasks-per-node overrides, so a smaller smoke run needs no edit.
@@ -147,6 +151,11 @@ if [[ -n "$HOI_TEACHER_FILTER" ]]; then
   filter_args=(--hoi-teacher-filter "$HOI_TEACHER_FILTER")
 fi
 
+latent_args=(--normalize-latent)
+if [[ "$NORMALIZE_LATENT" == "0" ]]; then
+  latent_args=(--no-normalize-latent)
+fi
+
 teacher_eval_args=()
 if [[ "$EVALUATE_TEACHERS" == "1" ]]; then
   teacher_eval_args=(--evaluate-teachers)
@@ -184,6 +193,7 @@ python -u -m protomotions.train_multi_source_distill \
   --ujitso-cache-budget-mb 1024 \
   --timeout-minutes 180 \
   "${filter_args[@]}" \
+  "${latent_args[@]}" \
   "${teacher_eval_args[@]}" \
   "${wandb_args[@]}" \
   "${resume_args[@]}"

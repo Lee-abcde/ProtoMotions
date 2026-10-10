@@ -66,6 +66,8 @@ args=(
 )
 if [[ -n "${HOI_TEACHER_FILTER:-}" ]]; then args+=(--hoi-teacher-filter "$HOI_TEACHER_FILTER"); fi
 if [[ "${EVALUATE_TEACHERS:-0}" == 1 ]]; then args+=(--evaluate-teachers); fi
+# Runs started before latent normalization became the default resume with NORMALIZE_LATENT=0.
+if [[ "${NORMALIZE_LATENT:-1}" == 0 ]]; then args+=(--no-normalize-latent); fi
 if [[ "${USE_WANDB:-0}" == 1 ]]; then args+=(--use-wandb --wandb-project "${WANDB_PROJECT:-physical_animation}"); fi
 if [[ -n "${RESUME:-}" && -n "${WARM_START:-}" ]]; then
     echo "Set RESUME or WARM_START, not both" >&2

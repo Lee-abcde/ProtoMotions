@@ -114,6 +114,13 @@ def parser():
         default=0.0,
         help="Floor on the std of every student input normalizer; 0 keeps the old behavior",
     )
+    p.add_argument(
+        "--normalize-latent",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Normalize the quantized code before the decoder (running mean/std); "
+        "--no-normalize-latent resumes runs started without it",
+    )
     p.add_argument("--save-every", type=int, default=100)
     p.add_argument("--eval-every", type=int, default=100)
     p.add_argument(
@@ -806,6 +813,7 @@ def run(args):
                 {source.task for source in manifest.sources},
             ),
             normalizer_min_std=args.normalizer_min_std,
+            normalize_latent=args.normalize_latent,
         )
         model = JointPVQModel(model_config).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -1150,6 +1158,7 @@ def run(args):
             expert_actions = torch.cat(actions)
             ids = torch.cat(identities)
             model.update_normalizers(batch, task)
+            model.update_latent_normalizer(batch, task)
             counts = torch.bincount(ids, minlength=len(manifest.sources)).float()
             local_counts = counts.clone()
             dist.all_reduce(counts)

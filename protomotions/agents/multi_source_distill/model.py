@@ -38,6 +38,10 @@ class JointModelConfig:
     # near-constant feature (e.g. SMPL-X finger actions during locomotion) is
     # rescaled by 1/std, so tiny deviations reach the network as large inputs.
     normalizer_min_std: float = 0.0
+    # Normalize the quantized code (running mean/std) before the decoder, as the
+    # SMPL PULSE-input trunk does. Raw codes are ~0.05 in scale next to unit-scale
+    # state inputs, which starves the latent pathway of gradient early on.
+    normalize_latent: bool = False
 
 
 def joint_model_config_from_dict(stored: dict) -> JointModelConfig:
@@ -196,6 +200,32 @@ class JointPVQModel(nn.Module):
         )
         # Predict raw teacher actions. The environment applies tanh(gain * action);
         # another tanh here would prevent matching unbounded teacher means.
+        if config.normalize_latent:
+            self.latent_normalizer = MaskedNormalizer(config.latent_dim)
+
+    def _decoder_latent(self, quantized: torch.Tensor) -> torch.Tensor:
+        if not self.config.normalize_latent:
+            return quantized
+        valid = torch.ones(
+            quantized.shape[0], 1, dtype=torch.bool, device=quantized.device
+        )
+        return self.latent_normalizer(quantized, valid)
+
+    @torch.no_grad()
+    def update_latent_normalizer(
+        self, obs: dict[str, torch.Tensor], task: str, chunk: int = 16384
+    ) -> None:
+        """Record code statistics on a rollout batch; a collective on every rank."""
+        if not self.config.normalize_latent:
+            return
+        codes = []
+        for start in range(0, obs["max_coords_obs"].shape[0], chunk):
+            part = {k: v[start : start + chunk] for k, v in obs.items()}
+            codes.append(self._encode(part, task)[0])
+        codes = torch.cat(codes)
+        self.latent_normalizer.update(
+            codes, torch.ones(codes.shape[0], 1, dtype=torch.bool, device=codes.device)
+        )
 
     def validity(
         self, obs: dict[str, torch.Tensor], key: str, task: str
@@ -216,9 +246,8 @@ class JointPVQModel(nn.Module):
         for key in OBS_KEYS:
             self.normalizers[key].update(obs[key], self.validity(obs, key, task))
 
-    def forward(
-        self, obs: dict[str, torch.Tensor], task: str
-    ) -> dict[str, torch.Tensor]:
+    def _encode(self, obs: dict[str, torch.Tensor], task: str):
+        """Normalized state inputs, the posterior latent and its product codes."""
         if task not in ("hoi", "locomotion"):
             raise ValueError(f"Unknown task {task}")
         normalized = {
@@ -251,6 +280,15 @@ class JointPVQModel(nn.Module):
             code_losses.append(code_loss)
             indices.append(index)
         quantized = torch.cat(chunks, -1)
+        return quantized, latent, normalized, state, commitments, code_losses, indices
+
+    def forward(
+        self, obs: dict[str, torch.Tensor], task: str
+    ) -> dict[str, torch.Tensor]:
+        quantized, latent, normalized, state, commitments, code_losses, indices = (
+            self._encode(obs, task)
+        )
+        quantized = self._decoder_latent(quantized)
         action = self.decoder(
             torch.cat(
                 state
@@ -289,6 +327,7 @@ class JointPVQModel(nn.Module):
         objects = self.normalizers["intermimic_object_obs"](
             obs["intermimic_object_obs"], obs["object_feature_mask"]
         )
+        latent = self._decoder_latent(latent)
         return self.decoder(
             torch.cat(state + [latent, objects, obs["object_valid_mask"].float()], -1)
         )
