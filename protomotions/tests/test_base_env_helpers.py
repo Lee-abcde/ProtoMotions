@@ -457,6 +457,7 @@ def _make_env(
     env.reset_buf = torch.ones(num_envs, dtype=torch.bool)
     env.terminate_buf = torch.ones(num_envs, dtype=torch.bool)
     env.progress_buf = torch.zeros(num_envs, dtype=torch.long)
+    env._replay_motion_on_reset = False
     env.respawn_root_offset = torch.zeros(num_envs, 3)
     env.odom_scale = torch.ones(num_envs)
     env.odom_yaw_cos_sin = torch.zeros(num_envs, 2)
@@ -808,8 +809,9 @@ def test_base_env_processing_helpers_update_buffers_and_logs():
     assert torch.equal(env.extras["termination/fell"], torch.tensor([0.0, 1.0, 0.0]))
 
     BaseEnv.on_epoch_end(env, current_epoch=4)
+    env.reset_buf[:] = False
     BaseEnv.user_reset(env)
-    assert torch.equal(env.progress_buf, torch.full((3,), 100000000000))
+    assert env.reset_buf.all()
 
 
 def test_base_env_initialize_observations_populates_all_envs():
@@ -1593,3 +1595,31 @@ def test_apply_motion_weights_to_scene_weights_loads_expected_checkpoint(tmp_pat
         )
         is None
     )
+
+
+def test_user_reset_marks_envs_done_and_replays_current_motion():
+    env = _make_env(motions=2)
+    env.motion_manager = _MotionManager()
+    env.reset_buf[:] = False
+    env_ids = torch.arange(3)
+
+    BaseEnv.user_reset(env)
+
+    # The R key surfaces as an ordinary done instead of resetting inside step().
+    assert env.reset_buf.all()
+    assert env.motion_manager.sample_calls == []
+
+    # The caller's done-path reset (with resampling allowed) keeps the motion
+    # and restarts it from t=0.
+    ref_env_ids, ids, times = BaseEnv._get_ref_reset_envs(
+        env, env_ids, force_default_mask=None
+    )
+    assert torch.equal(ref_env_ids, env_ids)
+    assert env.motion_manager.sample_calls == []
+    assert torch.equal(ids, torch.tensor([0, 1, 0]))
+    assert torch.equal(times, torch.zeros(3))
+    assert env._replay_motion_on_reset is False
+
+    # The replay applies once; later episode ends resample as usual.
+    BaseEnv._get_ref_reset_envs(env, env_ids, force_default_mask=None)
+    assert torch.equal(env.motion_manager.sample_calls[-1], env_ids)

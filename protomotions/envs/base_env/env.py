@@ -271,6 +271,8 @@ class BaseEnv:
 
         self._key_bindings = self.simulator.user_interface.scope("env")
         self._key_bindings.register("R", "reset", "Reset all environments")
+        # Set by the R key: the next reset replays current motions from t=0.
+        self._replay_motion_on_reset = False
         self.control_manager = ControlManager(self.config.control_components, self)
 
         visualization_markers = self.create_visualization_markers(
@@ -844,16 +846,9 @@ class BaseEnv:
         )
 
     def user_reset(self):
-        """Force environments to reset on next check (triggered by user input)."""
-        if self.motion_manager is not None:
-            env_ids = torch.arange(
-                self.num_envs, device=self.device, dtype=torch.long
-            )
-            self.motion_manager.motion_times[env_ids] = 0.0
-            self.reset(env_ids, disable_motion_resample=True)
-            return
-
-        self.progress_buf[:] = 100000000000
+        """Mark all envs done (R key); the next reset replays current motions from t=0."""
+        self.reset_buf[:] = True
+        self._replay_motion_on_reset = self.motion_manager is not None
 
     def compute_observations(self, env_ids=None, context: EnvContext = None):
         """Compute observations for specified environments.
@@ -1658,6 +1653,9 @@ class BaseEnv:
             motion_ids: Motion IDs for ref resets (or None)
             motion_times: Motion times for ref resets (or None)
         """
+        replay = self._replay_motion_on_reset
+        self._replay_motion_on_reset = False
+
         # No motions - no ref resets
         if self.motion_lib.num_motions() == 0:
             empty_ids = torch.tensor([], device=self.device, dtype=torch.long)
@@ -1672,7 +1670,9 @@ class BaseEnv:
             ref_env_ids = env_ids
 
         if len(ref_env_ids) > 0:
-            if not disable_motion_resample:
+            if replay:
+                self.motion_manager.motion_times[ref_env_ids] = 0.0
+            elif not disable_motion_resample:
                 self.motion_manager.sample_motions(ref_env_ids)
             motion_ids = self.motion_manager.motion_ids[ref_env_ids]
             motion_times = self.motion_manager.motion_times[ref_env_ids]
