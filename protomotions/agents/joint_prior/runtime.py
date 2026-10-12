@@ -35,7 +35,15 @@ def load_prior_checkpoint(path, device="cpu"):
 
 
 def save_prior_checkpoint(
-    path, model, optimizer, iteration, manifest, contract, training_config, rank_states
+    path,
+    model,
+    optimizer,
+    iteration,
+    manifest,
+    contract,
+    training_config,
+    rank_states,
+    best_evaluation=None,
 ):
     """Self-contained prior and frozen motor policy; atomic optimizer checkpoint."""
     saved = {
@@ -49,6 +57,7 @@ def save_prior_checkpoint(
         "training_config": training_config,
         "optimizer": optimizer.state_dict(),
         "rank_states": rank_states,
+        "best_evaluation": best_evaluation,
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,6 +82,7 @@ class LivePriorPolicy(nn.Module):
         *,
         reference_body_ids=None,
         full_object_reference=False,
+        random_source=None,
     ):
         super().__init__()
         self.prior = model
@@ -85,6 +95,7 @@ class LivePriorPolicy(nn.Module):
             self.config.num_objects,
             reference_body_ids=reference_body_ids,
             full_object_reference=full_object_reference,
+            random_source=random_source,
         )
         self.initialized = False
         self.pending_resets = torch.zeros(

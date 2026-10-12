@@ -13,6 +13,7 @@ import json
 import os
 import random
 import runpy
+import shutil
 import sys
 import traceback
 from contextlib import contextmanager
@@ -26,9 +27,15 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
 from protomotions.agents.joint_prior.conditioning import PriorConditioning
+from protomotions.agents.joint_prior.evaluation import (
+    FILTER_FILENAME,
+    PROTOCOL,
+    evaluate_prior_sources,
+    evaluation_settings,
+    filtered_summaries,
+)
 from protomotions.agents.joint_prior.model import JointPriorModel
 from protomotions.agents.joint_prior.runtime import (
-    LivePriorPolicy,
     load_prior_checkpoint,
     save_prior_checkpoint,
 )
@@ -100,16 +107,14 @@ def parser():
     p.add_argument("--gradient-clip", type=float, default=50.0)
     p.add_argument("--save-every", type=int, default=100)
     p.add_argument(
-        "--snapshot-every",
-        type=int,
-        default=1000,
-        help="Also keep epoch_<iteration>.ckpt every N iterations; 0 disables",
-    )
-    p.add_argument(
         "--eval-every",
         type=int,
-        default=0,
-        help="Full-reference tracking diagnostic; 0 disables",
+        default=1000,
+        help="Joint-PVQ evaluation under fixed sparse conditions, best checkpoint "
+        "selection and epoch_<iteration>.ckpt snapshot; 0 disables",
+    )
+    p.add_argument(
+        "--eval-seed", type=int, default=0, help="Fixed evaluation condition seed"
     )
     p.add_argument("--prior-rollout-start-iteration", type=int, default=500)
     p.add_argument("--prior-rollout-ramp-iterations", type=int, default=9500)
@@ -160,8 +165,6 @@ def prior_preflight(args, world_size):
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
     if args.eval_every < 0 or args.learning_rate <= 0 or args.gradient_clip <= 0:
         raise ValueError("Invalid evaluation interval, learning rate, or gradient clip")
-    if args.snapshot_every < 0:
-        raise ValueError("--snapshot-every must be non-negative")
     if (
         not 0 <= args.prior_rollout_max_prob <= 1
         or min(args.prior_rollout_start_iteration, args.prior_rollout_ramp_iterations)
@@ -262,32 +265,14 @@ def validate_resume(saved, manifest, contract, training):
         raise ValueError("Resume rank layout differs")
 
 
-def evaluation_report(iteration, records, filter_document):
+def evaluation_report(iteration, records, filter_document, settings=None):
     """Use stage-one source-local filtering while retaining raw diagnostics."""
-    from protomotions.agents.multi_source_distill.runtime import summarize_evaluation
-
-    excluded = {
-        (source_id, motion["local_motion_id"])
-        for source_id, entry in (filter_document or {}).get("sources", {}).items()
-        for motion in entry["motions"]
-        if motion["excluded"]
-    }
-    filtered = [
-        record
-        for record in records
-        if (record["source_id"], record["local_motion_id"]) not in excluded
-    ]
-    summary = summarize_evaluation(records)
     return {
         "iteration": iteration,
         "policy": "prior",
-        "protocol": "full_reference_tracking_under_sparse_conditions",
-        "summary": summary,
-        "filtered_summary": (
-            summarize_evaluation(filtered) if len(filtered) != len(records) else summary
-        ),
-        # Like stage one, this counts excluded records, not retained records.
-        "filtered_record_count": len(records) - len(filtered),
+        "protocol": PROTOCOL,
+        "evaluation_settings": settings,
+        **filtered_summaries(records, filter_document),
         "motions": records,
     }
 
@@ -313,9 +298,9 @@ def publish_report(path, report, wandb_run=None, kind=None, append=False):
 def run(args):
     from protomotions.agents.multi_source_distill.runtime import (
         build_environment,
-        evaluate_sources,
         launch_isaaclab,
         object_mask,
+        selection_score,
     )
 
     rank, world_size = dist.get_rank(), dist.get_world_size()
@@ -370,6 +355,18 @@ def run(args):
         posterior.load_state_dict(frozen["model"], strict=True)
         model = JointPriorModel(posterior, pc).to(device)
     del frozen
+
+    def keep_filter_copy():
+        # Single-source inference finds the filter beside the prior checkpoints.
+        copy = output / FILTER_FILENAME
+        if (
+            rank == 0
+            and filter_document is not None
+            and not (copy.exists() and copy.samefile(filter_path))
+        ):
+            shutil.copyfile(filter_path, copy)
+
+    collective_call(keep_filter_copy)
     optimizer = torch.optim.Adam(
         (p for p in model.parameters() if p.requires_grad), lr=args.learning_rate
     )
@@ -377,6 +374,25 @@ def run(args):
     if saved is not None:
         optimizer.load_state_dict(saved["optimizer"])
         start = saved["iteration"]
+    eval_settings = (
+        collective_call(
+            lambda: {
+                source.id: evaluation_settings(
+                    configs, (index,), source.task, pc, args.eval_seed
+                )
+                for index, source in enumerate(manifest.sources)
+            }
+        )
+        if args.eval_every
+        else None
+    )
+    best_evaluation = saved.get("best_evaluation") if saved is not None else None
+    if (
+        eval_settings is not None
+        and best_evaluation is not None
+        and best_evaluation.get("settings") != eval_settings
+    ):
+        best_evaluation = None
     ddp = DistributedDataParallel(
         model, device_ids=[device.index], broadcast_buffers=False
     )
@@ -477,10 +493,7 @@ def run(args):
                     iteration,
                 )
 
-        def is_snapshot_iteration(iteration):
-            return args.snapshot_every > 0 and iteration % args.snapshot_every == 0
-
-        def save(iteration):
+        def save(iteration, *, evaluated=False, new_best=False):
             collective_call(lambda: save_psi(iteration))
             states = gather_objects(
                 {
@@ -497,8 +510,11 @@ def run(args):
                     return
                 checkpoint_names = ["last.ckpt"]
                 # One epoch corresponds to one outer rollout/training iteration.
-                if is_snapshot_iteration(iteration):
+                # Snapshots are kept exactly at evaluated iterations.
+                if evaluated:
                     checkpoint_names.append(f"epoch_{iteration}.ckpt")
+                if new_best:
+                    checkpoint_names.append("score_based.ckpt")
                 for checkpoint_name in checkpoint_names:
                     save_prior_checkpoint(
                         output / checkpoint_name,
@@ -509,6 +525,7 @@ def run(args):
                         contract,
                         training,
                         states,
+                        best_evaluation=best_evaluation,
                     )
 
             collective_call(write_checkpoints)
@@ -612,11 +629,12 @@ def run(args):
             publish_report(
                 output / "metrics.jsonl", report, wandb_run, "training", append=True
             )
-            if args.eval_every and iteration % args.eval_every == 0:
-                policy = LivePriorPolicy(model, env, task)
+            evaluated = bool(args.eval_every and iteration % args.eval_every == 0)
+            new_best = False
+            if evaluated:
                 records = collective_call(
-                    lambda policy=policy: evaluate_sources(
-                        policy,
+                    lambda: evaluate_prior_sources(
+                        model,
                         env,
                         task,
                         configs,
@@ -626,14 +644,31 @@ def run(args):
                         manifest,
                         output,
                         rank,
+                        seed=args.eval_seed,
                     )
                 )
                 records = [r for group in gather_objects(records) for r in group]
                 report = collective_call(
                     lambda records=records, iteration=iteration: evaluation_report(
-                        iteration, records, filter_document
+                        iteration, records, filter_document, eval_settings
                     )
                 )
+                score = selection_score(report["filtered_summary"])
+                new_best = score is not None and (
+                    best_evaluation is None or score > best_evaluation["score"]
+                )
+                if new_best:
+                    best_evaluation = {
+                        "score": score,
+                        "iteration": iteration,
+                        "settings": eval_settings,
+                    }
+                report["selection"] = {"score": score}
+                if best_evaluation is not None:
+                    report["selection"].update(
+                        best_score=best_evaluation["score"],
+                        best_iteration=best_evaluation["iteration"],
+                    )
                 publish_report(
                     output / f"eval_prior_{iteration}.json",
                     report,
@@ -645,10 +680,10 @@ def run(args):
                 conditioning.reset(torch.arange(env.num_envs, device=device))
             if (
                 iteration % args.save_every == 0
-                or is_snapshot_iteration(iteration)
                 or iteration == args.iterations
+                or evaluated
             ):
-                save(iteration)
+                save(iteration, evaluated=evaluated, new_best=new_best)
     except BaseException:
         # Isaac Sim tears the process down inside app.close() below, which can
         # end the interpreter before it reports the active exception: the rank

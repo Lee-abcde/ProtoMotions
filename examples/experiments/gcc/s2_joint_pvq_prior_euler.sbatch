@@ -36,10 +36,9 @@ PRIOR_ROLLOUT_START="${PRIOR_ROLLOUT_START:-500}"
 PRIOR_ROLLOUT_RAMP="${PRIOR_ROLLOUT_RAMP:-9500}"
 PRIOR_ROLLOUT_MAX_PROB="${PRIOR_ROLLOUT_MAX_PROB:-0.95}"
 SAVE_EVERY="${SAVE_EVERY:-50}"
-SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-1000}"
 MINI_EPOCHS="${MINI_EPOCHS:-6}"
 export POSTERIOR_FILE EXPERIMENT_PATH PRIOR_ROLLOUT_START PRIOR_ROLLOUT_RAMP
-export PRIOR_ROLLOUT_MAX_PROB SAVE_EVERY SNAPSHOT_EVERY MINI_EPOCHS
+export PRIOR_ROLLOUT_MAX_PROB SAVE_EVERY MINI_EPOCHS
 SOURCES="${SOURCES:-examples/experiments/gcc/s1_joint_pvq_sources_euler.yaml}"
 export SOURCES
 CONTAINER_ENV="${CONTAINER_ENV:-/opt/IsaacLab_new/.venv/bin/activate}"
@@ -53,8 +52,10 @@ ROLLOUT_STEPS="${ROLLOUT_STEPS:-32}"
 # Effectively unlimited. A run ends on the SLURM wall clock and continues from
 # last.ckpt on the next submission, so the iteration count must not cap it.
 ITERATIONS="${ITERATIONS:-100000000}"
-# Full-reference tracking diagnostic under sparse goals; disabled by default.
-EVAL_EVERY="${EVAL_EVERY:-0}"
+# Joint-PVQ evaluation under fixed sparse conditions, best-checkpoint selection
+# and the epoch_<iteration>.ckpt snapshot all share this interval; 0 disables.
+EVAL_EVERY="${EVAL_EVERY:-1000}"
+EVAL_SEED="${EVAL_SEED:-0}"
 # HOI physical state initialization: teacher (seed from each teacher's
 # env_<motion>.ckpt PSI buffer; a subject whose file is missing or corrupt
 # starts empty), empty (student PSI only) or off (raw reference).
@@ -66,7 +67,7 @@ HOI_TEACHER_FILTER="${HOI_TEACHER_FILTER:-}"
 USE_WANDB="${USE_WANDB:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-physical_animation}"
 WANDB_MODE="${WANDB_MODE:-online}"
-export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS ITERATIONS EVAL_EVERY
+export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS ITERATIONS EVAL_EVERY EVAL_SEED
 export STUDENT_PSI HOI_TEACHER_FILTER
 export USE_WANDB WANDB_PROJECT WANDB_MODE
 # Follows sbatch --ntasks-per-node overrides, so a smaller smoke run needs no edit.
@@ -171,12 +172,11 @@ python -u -m protomotions.train_joint_prior \
   --rollout-steps "$ROLLOUT_STEPS" \
   --iterations "$ITERATIONS" \
   --save-every "$SAVE_EVERY" \
-  --snapshot-every "$SNAPSHOT_EVERY" \
   --mini-epochs "$MINI_EPOCHS" \
   --prior-rollout-start-iteration "$PRIOR_ROLLOUT_START" \
   --prior-rollout-ramp-iterations "$PRIOR_ROLLOUT_RAMP" \
   --prior-rollout-max-prob "$PRIOR_ROLLOUT_MAX_PROB" \
-  --eval-every "$EVAL_EVERY" \
+  --eval-every "$EVAL_EVERY" --eval-seed "$EVAL_SEED" \
   --student-psi "$STUDENT_PSI" \
   --kit-log-dir "/workspace/output/$RUN_NAME/kit_logs" \
   --ujitso-cache-dir /tmp/protomotions_ujitso \
@@ -195,7 +195,7 @@ INNER
 echo "Euler preflight: code, data, checkpoints, action contract, and rank assignment"
 mkdir -p "$NODE_TMP_ROOT/overlay_preflight/upper" "$NODE_TMP_ROOT/overlay_preflight/work"
 apptainer exec --overlay "$NODE_TMP_ROOT/overlay_preflight" "${container_args[@]}" "$CONTAINER" bash -lc \
-  'set -euo pipefail; source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_joint_prior --checkpoint "/workspace/joint_pvq/$POSTERIOR_FILE" --experiment-path "$EXPERIMENT_PATH" --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS" --num-envs "$NUM_ENVS" --batch-size "$BATCH_SIZE" --rollout-steps "$ROLLOUT_STEPS" --iterations "$ITERATIONS" --save-every "$SAVE_EVERY" --snapshot-every "$SNAPSHOT_EVERY" --mini-epochs "$MINI_EPOCHS" --eval-every "$EVAL_EVERY" --student-psi "$STUDENT_PSI" --prior-rollout-start-iteration "$PRIOR_ROLLOUT_START" --prior-rollout-ramp-iterations "$PRIOR_ROLLOUT_RAMP" --prior-rollout-max-prob "$PRIOR_ROLLOUT_MAX_PROB"'
+  'set -euo pipefail; source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; python -m protomotions.train_joint_prior --checkpoint "/workspace/joint_pvq/$POSTERIOR_FILE" --experiment-path "$EXPERIMENT_PATH" --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS" --num-envs "$NUM_ENVS" --batch-size "$BATCH_SIZE" --rollout-steps "$ROLLOUT_STEPS" --iterations "$ITERATIONS" --save-every "$SAVE_EVERY" --mini-epochs "$MINI_EPOCHS" --eval-every "$EVAL_EVERY" --eval-seed "$EVAL_SEED" --student-psi "$STUDENT_PSI" --prior-rollout-start-iteration "$PRIOR_ROLLOUT_START" --prior-rollout-ramp-iterations "$PRIOR_ROLLOUT_RAMP" --prior-rollout-max-prob "$PRIOR_ROLLOUT_MAX_PROB"'
 
 echo "Starting $PREFLIGHT_RANKS-rank training in $RUN_DIR"
 # Each task computes its own overlay, so SLURM_PROCID must expand inside srun.

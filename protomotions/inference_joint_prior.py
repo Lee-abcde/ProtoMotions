@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Single-source viewer and complete-motion diagnostic for a joint prior."""
+"""Single-source viewer and joint-PVQ evaluation for a joint prior."""
 
 import argparse
 import json
@@ -59,7 +59,15 @@ def parser():
     p.add_argument(
         "--evaluate",
         action="store_true",
-        help="Run the full-motion tracking diagnostic",
+        help="Joint-PVQ evaluation (teacher criteria) under fixed sparse conditions",
+    )
+    p.add_argument(
+        "--eval-seed", type=int, default=0, help="Fixed evaluation condition seed"
+    )
+    p.add_argument(
+        "--hoi-teacher-filter",
+        help="HOI teacher filter used in training, for filtered_summary; defaults "
+        "to the copy beside the checkpoint and must match the training digest",
     )
     p.add_argument("--output-dir")
     p.add_argument("--device", default="cuda:0")
@@ -77,13 +85,21 @@ def run(args):
     from protomotions.agents.multi_source_distill.runtime import (
         EvaluationAgent,
         build_environment,
-        evaluate_sources,
         launch_isaaclab,
-        summarize_evaluation,
     )
 
     if args.temperature < 0:
         raise ValueError("temperature must be non-negative")
+    if args.evaluate and (
+        args.temperature != 0
+        or args.reference_body_ids is not None
+        or args.full_object_reference
+        or args.motion_id is not None
+    ):
+        raise ValueError(
+            "--evaluate uses fixed random masks, all motions and temperature=0; "
+            "viewer condition/motion overrides are not supported"
+        )
     manifest = load_manifest(args.distillation_sources)
     index = resolve_source(manifest, args.source)
     source = manifest.sources[index]
@@ -104,6 +120,15 @@ def run(args):
     if args.full_object_reference:
         print(
             "All valid object targets visible, including the long horizon.", flush=True
+        )
+    if args.evaluate:
+        from protomotions.agents.joint_prior.evaluation import (
+            resolve_evaluation_filter,
+        )
+
+        # Resolve before launching the simulator so a missing filter fails fast.
+        filter_document, filter_path = resolve_evaluation_filter(
+            args.hoi_teacher_filter, args.checkpoint, saved, manifest, source.task
         )
     cfg = load_source_config(source, evaluate=args.evaluate)
     validate_source_against_checkpoint(saved, source, cfg)
@@ -168,8 +193,15 @@ def run(args):
                         policy.conditions.get_reference_markers
                     )
         if args.evaluate:
-            records = evaluate_sources(
-                policy,
+            from protomotions.agents.joint_prior.evaluation import (
+                PROTOCOL,
+                evaluate_prior_sources,
+                evaluation_settings,
+                filtered_summaries,
+            )
+
+            records = evaluate_prior_sources(
+                model,
                 env,
                 source.task,
                 configs,
@@ -179,20 +211,42 @@ def run(args):
                 manifest,
                 output,
                 slot,
+                seed=args.eval_seed,
             )
             report = {
-                "protocol": "full_reference_tracking_under_sparse_conditions",
-                "reference_body_ids": body_ids,
-                "full_object_reference": args.full_object_reference,
-                "reference_future_steps": model.config.future_steps,
-                "summary": summarize_evaluation(records),
+                "protocol": PROTOCOL,
+                "checkpoint": str(Path(args.checkpoint).resolve()),
+                "iteration": saved.get("iteration"),
+                "evaluation_settings": evaluation_settings(
+                    configs, assigned, source.task, model.config, args.eval_seed
+                ),
+                "hoi_teacher_filter": str(filter_path) if filter_path else None,
+                **filtered_summaries(records, filter_document),
                 "motions": records,
             }
             output.mkdir(parents=True, exist_ok=True)
-            (output / f"eval_prior_{source.id}.json").write_text(
-                json.dumps(report, indent=2)
+            shard_suffix = (
+                f"_shard_{source.motion_file_shard_indices[slot]}"
+                if source.task == "locomotion" and source.motion_file_shard_indices
+                else ""
             )
-            print(json.dumps(report["summary"], indent=2))
+            (
+                output
+                / f"eval_prior_{source.id}{shard_suffix}_seed_{args.eval_seed}.json"
+            ).write_text(json.dumps(report, indent=2))
+            print(
+                json.dumps(
+                    {
+                        key: report[key]
+                        for key in (
+                            "summary",
+                            "filtered_summary",
+                            "filtered_record_count",
+                        )
+                    },
+                    indent=2,
+                )
+            )
             return
         agent = EvaluationAgent(policy, env, source.task, output, source_ids)
         evaluator = build_evaluator(agent, env, env_cfg["agent"].evaluator)

@@ -87,6 +87,7 @@ class PriorConditioning:
         *,
         reference_body_ids: tuple[int, ...] | None = None,
         full_object_reference: bool = False,
+        random_source=None,
     ):
         self.env, self.task, self.config = env, task, config
         self.num_objects = num_objects
@@ -96,6 +97,7 @@ class PriorConditioning:
             reference_body_ids = tuple(sorted(set(reference_body_ids)))
         self.reference_body_ids = reference_body_ids
         self.full_object_reference = full_object_reference
+        self.random_source = random_source
         b, h, j = env.num_envs, config.history_steps, config.num_bodies
         device = env.device
         self.human_history = torch.zeros(b, h, j, 13, device=device)
@@ -138,12 +140,26 @@ class PriorConditioning:
         )
 
     def _sample_long_time(self, env_ids):
-        offsets = torch.randint(
-            1, self.config.max_long_horizon + 1, (len(env_ids),), device=self.env.device
-        )
+        if self.random_source is None:
+            offsets = torch.randint(
+                1,
+                self.config.max_long_horizon + 1,
+                (len(env_ids),),
+                device=self.env.device,
+            )
+        else:
+            offsets = (
+                self.random_source((len(env_ids),), env_ids, 30)
+                * self.config.max_long_horizon
+            ).long() + 1
         self.long_target_time[env_ids] = (
             self.env.motion_manager.motion_times[env_ids] + offsets * self._motion_dt()
         )
+
+    def _random(self, values, env_ids, stream):
+        if self.random_source is None:
+            return torch.rand_like(values, dtype=torch.float)
+        return self.random_source(values.shape, env_ids, stream)
 
     @torch.no_grad()
     def reset(self, env_ids):
@@ -153,11 +169,13 @@ class PriorConditioning:
         self.human_history[env_ids, ..., 6] = 1
         self.object_history[env_ids, ..., 6] = 1
         self._sample_long_time(env_ids)
-        for mask, prob in (
-            (self.human_visible, self.config.human_visible_prob),
-            (self.object_visible, self.config.object_visible_prob),
+        for stream, (mask, prob) in enumerate(
+            (
+                (self.human_visible, self.config.human_visible_prob),
+                (self.object_visible, self.config.object_visible_prob),
+            )
         ):
-            mask[env_ids] = torch.rand_like(mask[env_ids], dtype=torch.float) < prob
+            mask[env_ids] = self._random(mask[env_ids], env_ids, 10 + stream) < prob
         self._apply_reference_body_selection()
 
     @torch.no_grad()
@@ -179,16 +197,19 @@ class PriorConditioning:
             <= self.env.motion_manager.motion_times + 0.5 * self._motion_dt()
         )
         self._sample_long_time(reached.nonzero().flatten())
-        for mask, prob in (
-            (self.human_visible, self.config.human_visible_prob),
-            (self.object_visible, self.config.object_visible_prob),
+        env_ids = torch.arange(self.env.num_envs, device=self.env.device)
+        for stream, (mask, prob) in enumerate(
+            (
+                (self.human_visible, self.config.human_visible_prob),
+                (self.object_visible, self.config.object_visible_prob),
+            )
         ):
             refresh = (
-                torch.rand_like(mask, dtype=torch.float)
+                self._random(mask, env_ids, 20 + stream)
                 < self.config.mask_resample_prob
             )
             refresh[:, -1] |= reached[:, None]
-            sampled = torch.rand_like(mask, dtype=torch.float) < prob
+            sampled = self._random(mask, env_ids, 10 + stream) < prob
             mask.copy_(torch.where(refresh, sampled, mask))
         self._apply_reference_body_selection()
 
