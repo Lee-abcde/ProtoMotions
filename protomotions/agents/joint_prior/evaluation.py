@@ -87,6 +87,7 @@ def evaluation_settings(configs, assigned, task, prior_config, seed):
         "human_visible_prob": prior_config.human_visible_prob,
         "object_visible_prob": prior_config.object_visible_prob,
         "mask_resample_prob": prior_config.mask_resample_prob,
+        "human_horizon_visible_prob": prior_config.human_horizon_visible_prob,
         "future_steps": list(prior_config.future_steps),
         "max_long_horizon": prior_config.max_long_horizon,
         "criteria": criteria,

@@ -89,6 +89,10 @@ def test_settings_record_every_teacher_criterion():
     criteria = settings["criteria"][0]
     assert set(criteria) == {"human_error", "root_height"}
     assert criteria["human_error"]["params"] == {"key_body_ids": [0], "threshold": 0.37}
+    assert settings["human_horizon_visible_prob"] == 1.0
+    masked = JointPriorConfig(num_bodies=2, human_horizon_visible_prob=0.5)
+    settings = evaluation_settings(configs, (0,), "hoi", masked, 3)
+    assert settings["human_horizon_visible_prob"] == 0.5
 
 
 @pytest.mark.parametrize("visible", [0.0, 1.0])

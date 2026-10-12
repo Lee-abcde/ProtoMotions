@@ -27,6 +27,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
 from protomotions.agents.joint_prior.conditioning import PriorConditioning
+from protomotions.agents.joint_prior.config import JointPriorConfig
 from protomotions.agents.joint_prior.evaluation import (
     FILTER_FILENAME,
     PROTOCOL,
@@ -258,6 +259,12 @@ def validate_resume(saved, manifest, contract, training):
     if not contract_matches(embedded, training["posterior"]):
         raise ValueError("Resume frozen posterior differs from --checkpoint")
     saved_training = dict(saved["training_config"])
+    if "prior_config" in saved_training:
+        # Fill fields added later with their defaults: contract_matches skips
+        # keys only one side has, which would hide a changed new mask setting.
+        saved_training["prior_config"] = asdict(
+            JointPriorConfig(**saved_training["prior_config"])
+        )
     saved_training.setdefault("posterior", embedded)
     if not contract_matches(saved_training, training):
         raise ValueError("Resume training settings differ")

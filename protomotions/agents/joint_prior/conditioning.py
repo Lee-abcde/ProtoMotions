@@ -112,6 +112,11 @@ class PriorConditioning:
         self.object_visible = torch.zeros(
             b, horizons, num_objects, dtype=torch.bool, device=device
         )
+        # Horizon-level human gate, [B, H, 1] so it shares the per-body mask
+        # sampling; the observed human mask is human_visible AND this.
+        self.human_horizon_visible = torch.ones(
+            b, horizons, 1, dtype=torch.bool, device=device
+        )
         self.long_target_time = torch.zeros(b, device=device)
         self.last_human = self.last_object = None
         self.next_reference_positions = None
@@ -121,13 +126,18 @@ class PriorConditioning:
         """Return next-step world targets and their actual prior visibility mask."""
         if self.next_reference_positions is None:
             return None
-        return self.next_reference_positions, self.human_visible[:, 0]
+        return self.next_reference_positions, self.human_mask()[:, 0]
+
+    def human_mask(self):
+        """Per-body visibility after hiding whole human horizons."""
+        return self.human_visible & self.human_horizon_visible
 
     def _apply_reference_body_selection(self):
         """Apply independent human and object inference visibility overrides."""
         if self.reference_body_ids is not None:
             self.human_visible.zero_()
             self.human_visible[:, :-1, list(self.reference_body_ids)] = True
+            self.human_horizon_visible.fill_(True)
             self.object_visible.zero_()
         if self.full_object_reference:
             # observe() still excludes absent object slots via object_valid_mask.
@@ -156,6 +166,17 @@ class PriorConditioning:
             self.env.motion_manager.motion_times[env_ids] + offsets * self._motion_dt()
         )
 
+    def _masks(self):
+        """Visibility masks and probabilities; all share one sampling schedule.
+
+        Order fixes the condition-random stream IDs (10 + index, 20 + index).
+        """
+        return (
+            (self.human_visible, self.config.human_visible_prob),
+            (self.object_visible, self.config.object_visible_prob),
+            (self.human_horizon_visible, self.config.human_horizon_visible_prob),
+        )
+
     def _random(self, values, env_ids, stream):
         if self.random_source is None:
             return torch.rand_like(values, dtype=torch.float)
@@ -169,12 +190,7 @@ class PriorConditioning:
         self.human_history[env_ids, ..., 6] = 1
         self.object_history[env_ids, ..., 6] = 1
         self._sample_long_time(env_ids)
-        for stream, (mask, prob) in enumerate(
-            (
-                (self.human_visible, self.config.human_visible_prob),
-                (self.object_visible, self.config.object_visible_prob),
-            )
-        ):
+        for stream, (mask, prob) in enumerate(self._masks()):
             mask[env_ids] = self._random(mask[env_ids], env_ids, 10 + stream) < prob
         self._apply_reference_body_selection()
 
@@ -198,12 +214,7 @@ class PriorConditioning:
         )
         self._sample_long_time(reached.nonzero().flatten())
         env_ids = torch.arange(self.env.num_envs, device=self.env.device)
-        for stream, (mask, prob) in enumerate(
-            (
-                (self.human_visible, self.config.human_visible_prob),
-                (self.object_visible, self.config.object_visible_prob),
-            )
-        ):
+        for stream, (mask, prob) in enumerate(self._masks()):
             refresh = (
                 self._random(mask, env_ids, 20 + stream)
                 < self.config.mask_resample_prob
@@ -324,7 +335,7 @@ class PriorConditioning:
         add(
             "human_reference",
             reference_residual(future_human, human, root_rot),
-            self.human_visible,
+            self.human_mask(),
             times[..., None],
         )
         obj_state = torch.cat((inputs["intermimic_object_obs"], contacts), -1)[:, None]

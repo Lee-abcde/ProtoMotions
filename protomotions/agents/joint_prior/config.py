@@ -16,6 +16,9 @@ class JointPriorConfig:
     max_long_horizon: int = 128
     human_visible_prob: float = 0.1
     object_visible_prob: float = 0.5
+    # Probability that a horizon shows human targets at all; when it does, each
+    # body is still drawn with human_visible_prob. 1 keeps per-body-only masks.
+    human_horizon_visible_prob: float = 1.0
     mask_resample_prob: float = 0.01
     token_dim: int = 512
     num_layers: int = 4
@@ -45,6 +48,7 @@ class JointPriorConfig:
         for p in (
             self.human_visible_prob,
             self.object_visible_prob,
+            self.human_horizon_visible_prob,
             self.mask_resample_prob,
         ):
             if not 0 <= p <= 1:

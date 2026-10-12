@@ -11,4 +11,6 @@ from protomotions.agents.joint_prior.config import JointPriorConfig
 
 
 def prior_config(num_bodies: int) -> JointPriorConfig:
-    return JointPriorConfig(num_bodies=num_bodies)
+    # Show human targets in only half of the horizons, so the prior also
+    # learns from horizons without human goals.
+    return JointPriorConfig(num_bodies=num_bodies, human_horizon_visible_prob=0.5)

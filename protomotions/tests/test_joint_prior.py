@@ -317,6 +317,75 @@ def test_snapshot_half_step_tolerance_scales_with_motion_clock(speed_scale):
         assert not mask[1].any()
 
 
+def test_horizon_mask_hides_whole_human_horizons():
+    env, posterior = environment(), motor()
+    observer = PriorConditioning(
+        env, "hoi", config(human_visible_prob=1.0, human_horizon_visible_prob=1.0), 1
+    )
+    assert observer.observe(inputs(posterior, "hoi"))["human_reference_valid"].all()
+    observer = PriorConditioning(
+        env,
+        "hoi",
+        config(
+            human_visible_prob=1.0,
+            object_visible_prob=1.0,
+            human_horizon_visible_prob=0.0,
+        ),
+        1,
+    )
+    out = observer.observe(inputs(posterior, "hoi"))
+    # Every human horizon is hidden while object targets stay independent.
+    assert not out["human_reference_valid"].any()
+    assert out["object_reference_valid"].all()
+    assert observer.human_visible.all()
+    observer.advance()
+    assert not observer.observe(inputs(posterior, "hoi"))["human_reference_valid"].any()
+    # Viewer body selection overrides the horizon gate.
+    viewer = PriorConditioning(
+        env,
+        "hoi",
+        config(human_horizon_visible_prob=0.0),
+        1,
+        reference_body_ids=(1,),
+    )
+    valid = viewer.observe(inputs(posterior, "hoi"))["human_reference_valid"]
+    assert valid[:, :-1, 1].all() and not valid[:, :, 0].any()
+
+
+def test_horizon_gate_follows_the_per_body_refresh_schedule():
+    class Draws:
+        gate = 0.1  # Stream 12 draws the horizon gate; < 0.5 shows the horizon.
+
+        def __call__(self, shape, env_ids, stream):
+            return torch.full(shape, self.gate if stream == 12 else 0.5)
+
+    env, posterior = environment(), motor()
+    draws = Draws()
+    observer = PriorConditioning(
+        env,
+        "hoi",
+        config(human_horizon_visible_prob=0.5, mask_resample_prob=0.0),
+        1,
+        random_source=draws,
+    )
+    assert observer.human_horizon_visible.shape == (2, 5, 1)
+    assert observer.human_horizon_visible.all()
+    draws.gate = 0.9
+    observer.observe(inputs(posterior, "hoi"))
+    observer.long_target_time.fill_(1e9)
+    observer.advance()
+    assert observer.human_horizon_visible.all()  # No refresh without arrival.
+    observer.observe(inputs(posterior, "hoi"))
+    observer.long_target_time[0] = env.motion_manager.motion_times[0]
+    observer.advance()
+    # Only the arrived env's long horizon is resampled, like the per-body masks.
+    gate = observer.human_horizon_visible[..., 0]
+    assert not gate[0, -1] and gate[0, :-1].all() and gate[1].all()
+    observer.reset(torch.tensor([1]))
+    assert not observer.human_horizon_visible[1].any()
+    assert gate[0, :-1].all()
+
+
 def test_reference_time_clamping_and_spawn_alignment():
     env, posterior = environment(), motor()
     env.motion_manager.motion_times[:] = 9.95
@@ -555,6 +624,14 @@ def test_prior_checkpoint_roundtrip_and_resume_contract(tmp_path, legacy):
     changed["posterior"]["model_config"]["num_objects"] += 1
     with pytest.raises(ValueError, match="frozen posterior"):
         validate_resume(saved, manifest, [], changed)
+    # A mask field newer than the checkpoint takes its default when compared.
+    old = deepcopy(saved)
+    old["training_config"]["prior_config"].pop("human_horizon_visible_prob")
+    validate_resume(old, manifest, [], training)
+    masked = deepcopy(training)
+    masked["prior_config"]["human_horizon_visible_prob"] = 0.5
+    with pytest.raises(ValueError, match="settings"):
+        validate_resume(old, manifest, [], masked)
     # Also verify the embedded weights, rather than trusting contract metadata.
     key = next(
         k
