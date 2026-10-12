@@ -364,11 +364,9 @@ class WandbRun:
 
         output_dir = Path(output_dir)
         id_file = output_dir / "wandb_id.txt"
-        run_id = (
-            id_file.read_text().strip()
-            if id_file.is_file()
-            else wandb.util.generate_id()
-        )
+        # A new run lets wandb choose its id: wandb.util.generate_id is gone in
+        # wandb 0.30.
+        run_id = id_file.read_text().strip() if id_file.is_file() else None
         if mode is not None:
             # wandb caches the settings of the first init, so the retry has to
             # ask for offline explicitly rather than through the environment.
@@ -382,7 +380,7 @@ class WandbRun:
             resume="allow",
             config={k: v for k, v in vars(args).items() if k != "wandb_project"},
         )
-        id_file.write_text(run_id)
+        id_file.write_text(self.run.id)
 
     @classmethod
     def start(cls, args, output_dir, rank):
