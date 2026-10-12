@@ -150,7 +150,9 @@ def excluded_pooled_ids(
         if not 0 <= local_id < len(motions):
             raise ValueError(f"{source.id}: filter has no motion {local_id}")
         decision = motions[local_id]
-        if decision["motion_name"] != motion_names[pooled_id]:
+        # Packed motion files store the packing machine's absolute clip paths,
+        # so the same data packed elsewhere differs only before the clip name.
+        if Path(decision["motion_name"]).name != Path(motion_names[pooled_id]).name:
             raise ValueError(f"{source.id}/{local_id}: motion name changed")
         counts[source.id] += 1
         if decision["excluded"]:
