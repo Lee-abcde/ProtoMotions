@@ -1,16 +1,20 @@
 #!/bin/bash
 #SBATCH --job-name=joint_prior
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=8
-#SBATCH --gpus=rtx_4090:8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus=rtx_4090:4
 #SBATCH --cpus-per-task=8
-#SBATCH --mem-per-cpu=4G
+# The locomotion rank keeps the full AMASS-X frames in host RAM and peaks near
+# 35 GB, above the 32 GB that 4G per CPU gives one task.
+#SBATCH --mem-per-cpu=6G
 #SBATCH --tmp=80G
 #SBATCH --time=24:00:00
 # Absolute so the log lands next to the run outputs; the directory must exist.
 #SBATCH --output=/cluster/scratch/lijingy/joint_pvq_results/joint_prior_%j.log
 #SBATCH --error=/cluster/scratch/lijingy/joint_pvq_results/joint_prior_%j.log
 
+# Stage two (joint prior) on four RTX 4090s: one locomotion rank with the full
+# AMASS-X dataset plus three HOI ranks with the 15 OMOMO subjects.
 set -euo pipefail
 
 : "${CONTAINER:?Submit with --export=ALL,CONTAINER=/cluster/scratch/lijingy/<image>.sif}"
@@ -27,10 +31,12 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/cluster/scratch/lijingy/joint_pvq_results}"
 # Teacher run directories (each holds score_based.ckpt + resolved_configs.pt).
 HOI_TEACHER_DIR="${HOI_TEACHER_DIR:-/cluster/scratch/lijingy/HOI_smplx}"
 LOCO_TEACHER_DIR="${LOCO_TEACHER_DIR:-/cluster/scratch/lijingy/smplx_results}"
-# The frozen stage-one run is mounted separately and read-only.
-POSTERIOR_DIR="${POSTERIOR_DIR:-$OUTPUT_ROOT/joint_pvq_v1}"
-POSTERIOR_FILE="${POSTERIOR_FILE:-score_based.ckpt}"
-RUN_NAME="${RUN_NAME:-joint_pvq_prior_v1}"
+# The frozen stage-one run is mounted separately and read-only. Resume checks
+# the posterior's weights, so POSTERIOR_FILE must be a copy that no training
+# run overwrites (score_based_frozen_v2.ckpt is joint_pvq_v1_normlatent frozen).
+POSTERIOR_DIR="${POSTERIOR_DIR:-$OUTPUT_ROOT/joint_pvq_v1_normlatent}"
+POSTERIOR_FILE="${POSTERIOR_FILE:-score_based_frozen_v2.ckpt}"
+RUN_NAME="${RUN_NAME:-joint_prior_fullamass_4gpu_v1}"
 EXPERIMENT_PATH="${EXPERIMENT_PATH:-examples/experiments/gcc/s2_joint_pvq_prior.py}"
 PRIOR_ROLLOUT_START="${PRIOR_ROLLOUT_START:-500}"
 PRIOR_ROLLOUT_RAMP="${PRIOR_ROLLOUT_RAMP:-9500}"
@@ -39,7 +45,7 @@ SAVE_EVERY="${SAVE_EVERY:-50}"
 MINI_EPOCHS="${MINI_EPOCHS:-6}"
 export POSTERIOR_FILE EXPERIMENT_PATH PRIOR_ROLLOUT_START PRIOR_ROLLOUT_RAMP
 export PRIOR_ROLLOUT_MAX_PROB SAVE_EVERY MINI_EPOCHS
-SOURCES="${SOURCES:-examples/experiments/gcc/s1_joint_pvq_sources_euler.yaml}"
+SOURCES="${SOURCES:-examples/experiments/gcc/s1_joint_pvq_sources_euler_4gpu.yaml}"
 export SOURCES
 CONTAINER_ENV="${CONTAINER_ENV:-/opt/IsaacLab_new/.venv/bin/activate}"
 NUM_ENVS="${NUM_ENVS:-1024}"
@@ -48,11 +54,16 @@ NUM_ENVS="${NUM_ENVS:-1024}"
 # self-attention over 4096 sequences needs more than that. This is a per-rank
 # minibatch size, so adding GPUs does not shrink it.
 BATCH_SIZE="${BATCH_SIZE:-2048}"
-# Optional HOI-rank overrides of NUM_ENVS/BATCH_SIZE, to balance rollout time
-# between locomotion and HOI ranks. Every rank must take as many minibatches
-# per epoch: NUM_ENVS/BATCH_SIZE == HOI_NUM_ENVS/HOI_BATCH_SIZE (preflight checks).
-HOI_NUM_ENVS="${HOI_NUM_ENVS:-}"
-HOI_BATCH_SIZE="${HOI_BATCH_SIZE:-}"
+# HOI-rank layout. From the Euler layout sweeps (jobs 17565910, 17568084): an
+# HOI env steps slower than a locomotion env, and the prior update runs in
+# lockstep at the pace of the largest per-rank batch, so more locomotion envs
+# only lengthen the update. 768 HOI envs instead shorten the HOI rollout and
+# leave the locomotion rank waiting ~2.8 s per iteration (~24.5 s with TF32).
+# Every rank must take as many minibatches per epoch:
+# NUM_ENVS/BATCH_SIZE == HOI_NUM_ENVS/HOI_BATCH_SIZE (preflight checks). The
+# layout is in the training contract; keep it when resuming.
+HOI_NUM_ENVS="${HOI_NUM_ENVS:-768}"
+HOI_BATCH_SIZE="${HOI_BATCH_SIZE:-1536}"
 ROLLOUT_STEPS="${ROLLOUT_STEPS:-32}"
 # Effectively unlimited. A run ends on the SLURM wall clock and continues from
 # last.ckpt on the next submission, so the iteration count must not cap it.
@@ -67,13 +78,13 @@ EVAL_SEED="${EVAL_SEED:-0}"
 STUDENT_PSI="${STUDENT_PSI:-teacher}"
 # Optional container path; otherwise reuse the frozen posterior's filter if present.
 HOI_TEACHER_FILTER="${HOI_TEACHER_FILTER:-}"
-# 1 keeps the locomotion motion frames in host RAM. A single rank loading the
-# full AMASS-X file (~18.5 GiB as GPU tensors) needs it on a 24 GB RTX 4090;
-# that rank then peaks near 35 GB of host RAM, so submit with --mem-per-cpu=6G.
-LOCO_FRAMES_ON_CPU="${LOCO_FRAMES_ON_CPU:-0}"
-# 1 runs prior updates with TF32 tensor-core matmuls (rollout labels stay FP32).
-# It is part of the training contract, so a run keeps the value it started with.
-TRAIN_TF32="${TRAIN_TF32:-0}"
+# 1 keeps the locomotion motion frames in host RAM: a single rank loading the
+# full AMASS-X file (~18.5 GiB as GPU tensors) needs it on a 24 GB RTX 4090.
+LOCO_FRAMES_ON_CPU="${LOCO_FRAMES_ON_CPU:-1}"
+# 1 runs prior updates with TF32 tensor-core matmuls (rollout labels stay FP32):
+# ~17% shorter updates with matching losses in the sweep. It is part of the
+# training contract, so a run keeps the value it started with.
+TRAIN_TF32="${TRAIN_TF32:-1}"
 # Weights & Biases: USE_WANDB=1 enables it. Online like train_slurm.py, with
 # credentials from ~/.netrc on the cluster; set WANDB_MODE=offline to defer upload.
 USE_WANDB="${USE_WANDB:-0}"
@@ -86,7 +97,7 @@ export USE_WANDB WANDB_PROJECT WANDB_MODE
 # Follows sbatch --ntasks-per-node overrides, so a smaller smoke run needs no edit.
 # Deliberately not the name torch uses for its own rank count: exporting that one
 # makes the training ranks expect a torchrun launch and demand RANK/LOCAL_RANK.
-PREFLIGHT_RANKS="${SLURM_NTASKS:-8}"
+PREFLIGHT_RANKS="${SLURM_NTASKS:-4}"
 export PREFLIGHT_RANKS
 
 for path in "$CONTAINER" "$PROTOMOTIONS_DIR" "$DATA_DIR" "$OMOMO_OBJECTS_DIR" \
