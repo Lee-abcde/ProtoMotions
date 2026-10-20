@@ -5,6 +5,7 @@
 
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -13,7 +14,10 @@ from protomotions.agents.joint_prior.runtime import (
     LivePriorPolicy,
     load_prior_checkpoint,
 )
-from protomotions.agents.multi_source_distill.config import load_manifest
+from protomotions.agents.multi_source_distill.config import (
+    SourceManifest,
+    load_manifest,
+)
 from protomotions.inference_multi_source_distill import (
     build_evaluator,
     load_source_config,
@@ -34,7 +38,13 @@ def parser():
     p.add_argument(
         "--num-envs", type=int, help="Defaults to the object-curriculum minimum"
     )
-    p.add_argument("--shard-index", type=int)
+    motion_source = p.add_mutually_exclusive_group()
+    motion_source.add_argument("--shard-index", type=int)
+    motion_source.add_argument(
+        "--motion-file",
+        help="Override the selected source with one motion file (relative to cwd); "
+        "disables its manifest shard selection",
+    )
     p.add_argument("--motion-id", type=int)
     p.add_argument(
         "--reference-body-ids",
@@ -81,6 +91,29 @@ def parser():
     return p
 
 
+def override_motion_file(
+    manifest: SourceManifest, source_index: int, motion_file: str
+) -> SourceManifest:
+    """Replace one source's motion file without changing the on-disk manifest."""
+    path = Path(motion_file).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    sources = list(manifest.sources)
+    source = sources[source_index]
+    sources[source_index] = replace(
+        source, motion_file=str(path), motion_file_shard_indices=()
+    )
+    manifest = replace(
+        manifest,
+        sources=tuple(sources),
+        locomotion_num_ranks=(
+            1 if source.task == "locomotion" else manifest.locomotion_num_ranks
+        ),
+    )
+    manifest.validate()
+    return manifest
+
+
 def run(args):
     from protomotions.agents.multi_source_distill.runtime import (
         EvaluationAgent,
@@ -102,6 +135,8 @@ def run(args):
         )
     manifest = load_manifest(args.distillation_sources)
     index = resolve_source(manifest, args.source)
+    if args.motion_file is not None:
+        manifest = override_motion_file(manifest, index, args.motion_file)
     source = manifest.sources[index]
     model, saved = load_prior_checkpoint(args.checkpoint, args.device)
     model.eval()
