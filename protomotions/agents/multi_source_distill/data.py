@@ -30,6 +30,8 @@ def merge_motion_libraries(
         raise ValueError(
             "Pooled motion libraries must use the same interpolation semantics"
         )
+    if len({str(lib.frame_device) for lib in libraries}) != 1:
+        raise ValueError("Pooled motion libraries must keep frames on one device")
     device = libraries[0].device
     counts = [lib.num_motions() for lib in libraries]
     if any(n == 0 for n in counts):
@@ -46,7 +48,11 @@ def merge_motion_libraries(
         offsets.append(offsets[-1] + n)
     if len(libraries) == 1:
         return libraries[0], source_ids, local_ids, offsets
-    merged = MotionLib(MotionLibConfig(motion_file=None), device=device)
+    merged = MotionLib(
+        MotionLibConfig(motion_file=None),
+        device=device,
+        frame_device=libraries[0].frame_device,
+    )
     merged.get_motion_state_use_blend = libraries[0].get_motion_state_use_blend
     merged.motion_file = "multi_source"
     special = {

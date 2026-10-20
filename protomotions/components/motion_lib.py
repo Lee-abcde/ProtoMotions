@@ -54,6 +54,15 @@ _motion_field_mapping = {
     "dps": "dof_pos",
 }
 
+# Per-frame tensors indexed by global frame; ``frame_device`` may keep them off the GPU.
+_FRAME_FIELDS = (
+    *_motion_field_mapping,
+    "lrs",
+    "contacts",
+    "rigid_body_contact_labels",
+    "object_contact_labels",
+)
+
 
 class MotionFileSwitchMode(str, Enum):
     """How distributed motion shards advance during training."""
@@ -302,6 +311,7 @@ class MotionLib:
         config: "MotionLibConfig",
         device: str = "cpu",
         shard_cycle: int = 0,
+        frame_device: Optional[str] = None,
     ):
         """Initialize MotionLib from config.
 
@@ -311,11 +321,15 @@ class MotionLib:
         Args:
             config: MotionLibConfig (always required, motion_file can be None for empty)
             device: PyTorch device
+            frame_device: Device holding the per-frame tensors; defaults to
+                ``device``. ``"cpu"`` keeps a dataset larger than GPU memory in
+                host RAM; queries then copy only the selected frames to ``device``.
         """
         super().__init__()
 
         self.config = config
         self.device = device
+        self.frame_device = device if frame_device is None else frame_device
         self.motion_file_shard_cycle = shard_cycle
         self.motion_file_shard_index: Optional[int] = None
 
@@ -341,8 +355,25 @@ class MotionLib:
                 "Loading motions from yaml/npy file or Directory of motions which is slower"
             )
             self._load_motions(motion_file)
+            self._place_frames()
 
         self.motion_file = motion_file
+
+    def _place_frames(self):
+        """Keep per-frame tensors on ``frame_device`` and all others on ``device``."""
+        if str(self.frame_device) == str(self.device):
+            return
+        for name, value in list(vars(self).items()):
+            if isinstance(value, torch.Tensor):
+                target = self.frame_device if name in _FRAME_FIELDS else self.device
+                setattr(self, name, value.to(target))
+
+    def _frames(self, field_data: torch.Tensor, frame_indices: torch.Tensor):
+        """Select global frames from a per-frame tensor and return them on ``device``."""
+        if field_data.device == frame_indices.device:
+            return _select_exact_frame(field_data, frame_indices)
+        selected = field_data[frame_indices.to(field_data.device)]
+        return selected.to(self.device)
 
     def _create_empty(self):
         """Create an empty motion library with no motions."""
@@ -678,10 +709,10 @@ class MotionLib:
         for lib_field, motion_attr in _motion_field_mapping.items():
             field_data = getattr(self, lib_field)
             if field_data is not None:
-                motion_data[motion_attr] = _select_exact_frame(field_data, fl)
+                motion_data[motion_attr] = self._frames(field_data, fl)
 
         if self.lrs is not None:
-            local_rigid_body_rot = _select_exact_frame(self.lrs, fl)
+            local_rigid_body_rot = self._frames(self.lrs, fl)
         else:
             local_rigid_body_rot = None
 
@@ -691,17 +722,15 @@ class MotionLib:
         )
         motion_state.local_rigid_body_rot = local_rigid_body_rot
         motion_state.rigid_body_contacts = (
-            _select_exact_frame(self.contacts, fl)
-            if self.contacts is not None
-            else None
+            self._frames(self.contacts, fl) if self.contacts is not None else None
         )
         motion_state.rigid_body_contact_labels = (
-            self.rigid_body_contact_labels[fl].clone()
+            self._frames(self.rigid_body_contact_labels, fl).clone()
             if self.rigid_body_contact_labels is not None
             else None
         )
         motion_state.object_contact_labels = (
-            self.object_contact_labels[fl].clone()
+            self._frames(self.object_contact_labels, fl).clone()
             if self.object_contact_labels is not None
             else None
         )
@@ -1427,8 +1456,9 @@ class MotionLib:
             file_path: Path to the motion library file
         """
         print(f"Loading motion library from {file_path}")
+        # Loading straight to frame_device avoids staging a host-RAM library on the GPU.
         loaded_data = torch.load(
-            file_path, map_location=self.device, weights_only=False
+            file_path, map_location=self.frame_device, weights_only=False
         )
 
         # Pre-initialize all fields to None so missing fields (e.g. contacts
@@ -1439,6 +1469,8 @@ class MotionLib:
 
         for field in loaded_data:
             setattr(self, field, loaded_data[field])
+        del loaded_data
+        self._place_frames()
         self._text_embedding_lookup = None
         self._override_text_embedding = None
         self._override_text_label = None
@@ -1516,7 +1548,9 @@ class MotionLib:
 
         # Create uniform kernel for moving average
         kernel = (
-            torch.ones(1, 1, window_size, device=self.device, dtype=torch.float32)
+            torch.ones(
+                1, 1, window_size, device=self.contacts.device, dtype=torch.float32
+            )
             / window_size
         )
         padding = window_size // 2
@@ -1569,9 +1603,10 @@ class MotionLib:
             target_xy: Target x,y position as tensor [2]. If None, uses (0.0, 0.0)
         """
         if target_xy is None:
-            target_xy = torch.zeros(2, device=self.device)
+            target_xy = torch.zeros(2, device=self.gts.device)
+        target_xy = target_xy.to(self.gts.device)
 
-            # Process each motion individually
+        # Process each motion individually
         for motion_idx in range(self.num_motions()):
             # Get the range for this motion (convert tensors to integers)
             start_idx = self.length_starts[motion_idx].item()
@@ -1586,7 +1621,7 @@ class MotionLib:
 
             # Calculate translation needed (only in x,y, keep z unchanged)
             translation_xy = target_xy - current_xy  # [2]
-            translation = torch.zeros(3, device=self.device)
+            translation = torch.zeros(3, device=self.gts.device)
             translation[:2] = translation_xy
 
             self.gts[start_idx:end_idx, :, :] += translation.reshape(1, 1, 3)

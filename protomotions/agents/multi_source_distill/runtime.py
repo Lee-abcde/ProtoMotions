@@ -139,6 +139,7 @@ def build_environment(
     psi=False,
     equal_motion_sampling=False,
     scene_motion_weights=None,
+    locomotion_frames_on_cpu=False,
 ):
     """Build one simulator per rank from the corresponding frozen teacher config.
 
@@ -151,6 +152,8 @@ def build_environment(
     resumed rank's pooled motion weights; an HOI rank with an object curriculum
     then sizes its per-object-type env quotas from them, as the HOI tracker
     does on resume. Without them every object type gets an equal share.
+    ``locomotion_frames_on_cpu`` keeps the locomotion clips' per-frame tensors
+    in host RAM, so a full dataset fits next to the simulator on a 24 GB GPU.
     """
     from protomotions.components.motion_lib import MotionLib
     from protomotions.components.scene_lib import ReplicationMethod, SceneLib
@@ -182,7 +185,10 @@ def build_environment(
 
         mc.motion_file_switch_mode = MotionFileSwitchMode.FIXED
         mc.motion_file_shard_indices = None
-        libraries.append(MotionLib(mc, device=device))
+        on_cpu = locomotion_frames_on_cpu and manifest.sources[i].task == "locomotion"
+        libraries.append(
+            MotionLib(mc, device=device, frame_device="cpu" if on_cpu else None)
+        )
     motion_lib, source_ids, local_ids, offsets = merge_motion_libraries(
         libraries, list(assigned), [manifest.sources[i].weight for i in assigned]
     )
