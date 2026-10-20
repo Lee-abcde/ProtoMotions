@@ -20,7 +20,9 @@ import re
 import socket
 import subprocess
 import sys
+import time
 import traceback
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import timedelta
 from pathlib import Path
@@ -28,6 +30,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.distributed as dist
+from rich.progress import track
 from torch.nn.parallel import DistributedDataParallel
 
 from protomotions.agents.multi_source_distill.config import (
@@ -37,6 +40,7 @@ from protomotions.agents.multi_source_distill.config import (
     load_teacher_configs,
     manifest_state,
     reference_offsets,
+    saved_manifest_state,
     teacher_contract,
 )
 from protomotions.agents.multi_source_distill.curriculum import MotionSamplingCurriculum
@@ -46,7 +50,7 @@ from protomotions.agents.multi_source_distill.model import (
     JointPVQModel,
     joint_model_config_from_dict,
     model_config_from_layouts,
-    task_balanced_source_weights,
+    source_loss_weights,
     weighted_sample_loss,
 )
 from protomotions.agents.multi_source_distill.psi import (
@@ -102,6 +106,17 @@ def parser():
         help="Minibatch per HOI rank; defaults to --batch-size",
     )
     p.add_argument("--rollout-steps", type=int, default=32)
+    p.add_argument(
+        "--locomotion-frames-on-cpu",
+        action="store_true",
+        help="Keep locomotion motion frames in host RAM, e.g. a full AMASS-X "
+        "dataset on one 24 GB GPU; only the queried frames are copied over",
+    )
+    p.add_argument(
+        "--train-tf32",
+        action="store_true",
+        help="TF32 tensor-core matmuls for student updates; rollouts stay FP32",
+    )
     # Effectively unlimited: a run is bounded by the SLURM wall clock and picked
     # up again by --resume, so the iteration count should not end it.
     p.add_argument("--iterations", type=int, default=100000000)
@@ -198,6 +213,64 @@ def task_layout(args, task):
             getattr(args, "hoi_batch_size", None) or args.batch_size,
         )
     return args.num_envs, args.batch_size
+
+
+def progress(sequence, description, rank, total=None):
+    """Rank-zero progress bar, matching the PPO agents' collect/train lines."""
+    return track(sequence, description=description, total=total, disable=rank != 0)
+
+
+@contextmanager
+def matmul_tf32(enabled):
+    """Scope TF32 to the update phase; rollouts and teacher labels stay FP32."""
+    previous = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = enabled
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous
+
+
+def elapsed(start, device):
+    """Seconds since ``start``, after the GPU work queued on ``device`` finishes."""
+    if torch.device(device).type == "cuda":
+        torch.cuda.synchronize(device)
+    return time.perf_counter() - start
+
+
+def collection_timing(ranks, train_seconds):
+    """Each rank's rollout time, the slowest one, and the synchronized update.
+
+    Rollouts run without collectives, so faster ranks wait for the slowest at
+    the first all-reduce after collection; the update runs in lockstep.
+    """
+    collect = {f"rank{r['rank']}_{r['task']}": r["collect_seconds"] for r in ranks}
+    return {
+        "collect_seconds": collect,
+        "collect_max_seconds": max(collect.values()),
+        "train_seconds": train_seconds,
+    }
+
+
+def timing_line(iteration, ranks, train_seconds):
+    """e.g. ``Epoch 5: collect r0 loco 17.1s | r1 hoi 21.4s (max r1) | train 1.1s``."""
+    names = {"locomotion": "loco"}
+    slowest = max(ranks, key=lambda r: r["collect_seconds"])
+    collect = " | ".join(
+        f"r{r['rank']} {names.get(r['task'], r['task'])} {r['collect_seconds']:.1f}s"
+        for r in ranks
+    )
+    return (
+        f"Epoch {iteration}: collect {collect} (max r{slowest['rank']}) "
+        f"| train {train_seconds:.1f}s"
+    )
+
+
+def shuffled_minibatches(total, batch_size, mini_epochs, device):
+    """Yield ``(mini_epoch, indices)`` with a fresh permutation per mini-epoch."""
+    for mini_epoch in range(mini_epochs):
+        for indices in torch.randperm(total, device=device).split(batch_size):
+            yield mini_epoch, indices
 
 
 def minibatch_count(args, task):
@@ -497,7 +570,7 @@ def restore_checkpoint(
                 "or score_based.ckpt, or load it with --warm-start"
             )
         if (
-            saved["manifest"] != manifest_state(manifest)
+            saved_manifest_state(saved["manifest"]) != manifest_state(manifest)
             or saved["teacher_contract"] != contract
         ):
             raise ValueError(
@@ -729,6 +802,7 @@ def run(args):
                 psi=psi_enabled(args),
                 equal_motion_sampling=not args.evaluate_only,
                 scene_motion_weights=scene_motion_weights,
+                locomotion_frames_on_cpu=args.locomotion_frames_on_cpu,
             )
         )
         print(
@@ -832,6 +906,10 @@ def run(args):
         for name in ("hoi_num_envs", "hoi_batch_size"):
             if getattr(args, name) is not None:
                 training_config[name] = getattr(args, name)
+        # Only when on, so runs started before the switch still resume; TF32
+        # changes the update numerics, so a run keeps the value it started with.
+        if args.train_tf32:
+            training_config["train_tf32"] = True
         training_config["hoi_teacher_filter_digest"] = filter_digest
         start = 0
         saved = None
@@ -1130,8 +1208,13 @@ def run(args):
             collected, actions, identities = [], [], []
             resets = physical_resets = 0
             model.train()
+            collect_start = time.perf_counter()
             with torch.no_grad():
-                for _ in range(args.rollout_steps):
+                for _ in progress(
+                    range(args.rollout_steps),
+                    f"Epoch {iteration}, collecting data...",
+                    rank,
+                ):
                     inputs = complete_observations(
                         obs, task, model_config, object_mask(env, task)
                     )
@@ -1149,6 +1232,7 @@ def run(args):
                         physical_resets += int(
                             psi_control._last_physical_reset_mask[reset_ids].sum()
                         )
+            collect_seconds = elapsed(collect_start, device)
             batch = {
                 key: torch.cat([step[key] for step in collected])
                 for key in collected[0]
@@ -1168,8 +1252,8 @@ def run(args):
                 raise ValueError(
                     f"No rollout samples for {missing}; increase num-envs/rollout-steps or allocate more HOI ranks"
                 )
-            target_weights = task_balanced_source_weights(
-                counts, source_is_hoi, manifest.hoi_weight
+            target_weights = source_loss_weights(
+                counts, source_is_hoi, manifest.hoi_weight, manifest.loss_balance
             )
             total = len(ids)
             batch_size = task_layout(args, task)[1]
@@ -1181,9 +1265,15 @@ def run(args):
                 model_config.num_embeddings,
                 device=device,
             )
-            for mini_epoch in range(args.mini_epochs):
-                order = torch.randperm(total, device=device)
-                for indices in order.split(batch_size):
+            train_start = time.perf_counter()
+            # TF32 changes only the update numerics, not the FP32 rollout above.
+            with matmul_tf32(args.train_tf32):
+                for mini_epoch, indices in progress(
+                    shuffled_minibatches(total, batch_size, args.mini_epochs, device),
+                    f"Epoch {iteration}, training...",
+                    rank,
+                    total=args.mini_epochs * minibatches,
+                ):
                     inputs = {k: v[indices] for k, v in batch.items()}
                     out = ddp(inputs, task)
                     bc = (out["action"] - expert_actions[indices]).square().mean(-1)
@@ -1217,12 +1307,14 @@ def run(args):
                                     minlength=model_config.num_embeddings,
                                 )
                             )
+            train_seconds = elapsed(train_start, device)
             if iteration % args.revive_every == 0:
                 model.revive_codes(out["latent"], optimizer)
             rank_metrics = gather_objects(
                 {
                     "rank": rank,
                     "task": task,
+                    "collect_seconds": round(collect_seconds, 3),
                     "shard_index": manifest.sources[
                         assigned[0]
                     ].motion_file_shard_indices[rank]
@@ -1264,6 +1356,7 @@ def run(args):
                 report = {
                     "iteration": iteration,
                     "ranks": rank_metrics,
+                    "timing": collection_timing(rank_metrics, round(train_seconds, 3)),
                     "sources": {
                         s.id: {
                             "bc_loss": float(logs[i, 0] / counts[i]),
@@ -1292,7 +1385,7 @@ def run(args):
                         / max(1, sum(r["resets"] for r in psi_ranks)),
                         "sources": psi_sources,
                     }
-                print(json.dumps(report), flush=True)
+                print(timing_line(iteration, rank_metrics, train_seconds), flush=True)
                 if wandb_run is not None:
                     wandb_run.log_training(report)
             collective_call(

@@ -15,8 +15,8 @@ import random
 import runpy
 import shutil
 import sys
+import time
 import traceback
-from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
@@ -43,12 +43,13 @@ from protomotions.agents.joint_prior.runtime import (
 from protomotions.agents.multi_source_distill.config import (
     contract_matches,
     manifest_state,
+    saved_manifest_state,
     teacher_contract,
 )
 from protomotions.agents.multi_source_distill.data import complete_observations
 from protomotions.agents.multi_source_distill.model import (
     JointPVQModel,
-    task_balanced_source_weights,
+    source_loss_weights,
     weighted_sample_loss,
 )
 from protomotions.agents.multi_source_distill.psi import (
@@ -69,13 +70,19 @@ from protomotions.inference_multi_source_distill import (
 )
 from protomotions.train_multi_source_distill import (
     WandbRun,
+    collection_timing,
     collective_call,
     configure_distributed_environment,
     distributed_hardware_preflight,
+    elapsed,
     gather_objects,
     local_cuda_device,
+    matmul_tf32,
     preflight,
+    progress,
+    shuffled_minibatches,
     task_layout,
+    timing_line,
     write_report,
 )
 
@@ -101,6 +108,12 @@ def parser():
         "--hoi-batch-size",
         type=int,
         help="Minibatch per HOI rank; defaults to --batch-size",
+    )
+    p.add_argument(
+        "--locomotion-frames-on-cpu",
+        action="store_true",
+        help="Keep locomotion motion frames in host RAM, e.g. a full AMASS-X "
+        "dataset on one 24 GB GPU; only the queried frames are copied over",
     )
     p.add_argument("--mini-epochs", type=int, default=6)
     p.add_argument("--iterations", type=int, default=100000000)
@@ -188,17 +201,6 @@ def prior_preflight(args, world_size):
     return manifest, configs, saved, model_config, pc
 
 
-@contextmanager
-def matmul_tf32(enabled):
-    """Scope TF32 to the update phase; the frozen posterior labels stay FP32."""
-    previous = torch.backends.cuda.matmul.allow_tf32
-    torch.backends.cuda.matmul.allow_tf32 = enabled
-    try:
-        yield
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = previous
-
-
 def posterior_contract(model_config, state_dict):
     """Identify the frozen motor, including normalization buffers, without paths."""
     digest = hashlib.sha256()
@@ -242,7 +244,9 @@ def validate_resume(saved, manifest, contract, training):
     # config dataclass gained a field has no entry for it while the freshly
     # built one carries that field's default, and an unrelated code update then
     # breaks resume on an otherwise identical setup.
-    if not contract_matches(saved["manifest"], manifest_state(manifest)):
+    if not contract_matches(
+        saved_manifest_state(saved["manifest"]), manifest_state(manifest)
+    ):
         raise ValueError("Resume source manifest differs")
     if not contract_matches(saved["teacher_contract"], contract):
         raise ValueError("Resume tracker configuration differs")
@@ -291,8 +295,6 @@ def publish_report(path, report, wandb_run=None, kind=None, append=False):
         if dist.get_rank() != 0:
             return
         write_report(path, report, append=append)
-        if append:
-            print(json.dumps(report), flush=True)
         if wandb_run is not None:
             if kind == "training":
                 wandb_run.log_training(report)
@@ -428,6 +430,7 @@ def run(args):
                 launcher.app,
                 psi=args.student_psi != "off",
                 equal_motion_sampling=True,
+                locomotion_frames_on_cpu=args.locomotion_frames_on_cpu,
             )
         )
         task = manifest.sources[assigned[0]].task
@@ -548,8 +551,13 @@ def run(args):
             )
             prior_envs = torch.rand(env.num_envs, device=device) < probability
             resets = 0
+            collect_start = time.perf_counter()
             with torch.no_grad():
-                for _ in range(args.rollout_steps):
+                for _ in progress(
+                    range(args.rollout_steps),
+                    f"Epoch {iteration}, collecting data...",
+                    rank,
+                ):
                     inputs = complete_observations(
                         obs, task, mc, object_mask(env, task)
                     )
@@ -570,55 +578,65 @@ def run(args):
                         torch.rand(len(reset_ids), device=device) < probability
                     )
                     resets += len(reset_ids)
+            collect_seconds = elapsed(collect_start, device)
             batch = {k: torch.cat([b[k] for b in batches]) for k in batches[0]}
             target, ids = torch.cat(labels), torch.cat(sources)
             model.update_normalizers(batch)
             counts = torch.bincount(ids, minlength=len(manifest.sources)).float()
             dist.all_reduce(counts)
-            weights = task_balanced_source_weights(
-                counts, source_is_hoi, manifest.hoi_weight
+            weights = source_loss_weights(
+                counts, source_is_hoi, manifest.hoi_weight, manifest.loss_balance
             )
             n = len(ids)
             minibatches = (n + batch_size - 1) // batch_size
             logs = torch.zeros(len(manifest.sources), 3, device=device)
             model.train()
             # TF32 changes only the update numerics, not the FP32 labels above.
+            train_start = time.perf_counter()
             with matmul_tf32(args.train_tf32):
-                for _ in range(args.mini_epochs):
-                    for selection in torch.randperm(n, device=device).split(batch_size):
-                        logits = ddp({k: v[selection] for k, v in batch.items()})
-                        ce = model.categorical_loss(logits, target[selection])
-                        loss = weighted_sample_loss(
-                            ce, ids[selection], counts, weights, world_size, minibatches
+                for _, selection in progress(
+                    shuffled_minibatches(n, batch_size, args.mini_epochs, device),
+                    f"Epoch {iteration}, training...",
+                    rank,
+                    total=args.mini_epochs * minibatches,
+                ):
+                    logits = ddp({k: v[selection] for k, v in batch.items()})
+                    ce = model.categorical_loss(logits, target[selection])
+                    loss = weighted_sample_loss(
+                        ce, ids[selection], counts, weights, world_size, minibatches
+                    )
+                    finite = torch.isfinite(loss).int()
+                    dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+                    if not finite:
+                        raise FloatingPointError("Non-finite prior loss")
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        (p for p in model.parameters() if p.requires_grad),
+                        args.gradient_clip,
+                        error_if_nonfinite=True,
+                    )
+                    optimizer.step()
+                    with torch.no_grad():
+                        accuracy = (
+                            (logits.argmax(-1) == target[selection]).float().mean(-1)
                         )
-                        finite = torch.isfinite(loss).int()
-                        dist.all_reduce(finite, op=dist.ReduceOp.MIN)
-                        if not finite:
-                            raise FloatingPointError("Non-finite prior loss")
-                        optimizer.zero_grad(set_to_none=True)
-                        loss.backward()
-                        torch.nn.utils.clip_grad_norm_(
-                            (p for p in model.parameters() if p.requires_grad),
-                            args.gradient_clip,
-                            error_if_nonfinite=True,
+                        logs.index_add_(
+                            0,
+                            ids[selection],
+                            torch.stack(
+                                (ce.detach(), accuracy, torch.ones_like(ce)), -1
+                            ),
                         )
-                        optimizer.step()
-                        with torch.no_grad():
-                            accuracy = (
-                                (logits.argmax(-1) == target[selection])
-                                .float()
-                                .mean(-1)
-                            )
-                            logs.index_add_(
-                                0,
-                                ids[selection],
-                                torch.stack(
-                                    (ce.detach(), accuracy, torch.ones_like(ce)), -1
-                                ),
-                            )
+            train_seconds = elapsed(train_start, device)
             dist.all_reduce(logs)
             reset_counts = gather_objects(
-                {"rank": rank, "task": task, "resets": resets}
+                {
+                    "rank": rank,
+                    "task": task,
+                    "resets": resets,
+                    "collect_seconds": round(collect_seconds, 3),
+                }
             )
             report = {
                 "iteration": iteration,
@@ -632,7 +650,10 @@ def run(args):
                     for i, s in enumerate(manifest.sources)
                 },
                 "ranks": reset_counts,
+                "timing": collection_timing(reset_counts, round(train_seconds, 3)),
             }
+            if rank == 0:
+                print(timing_line(iteration, reset_counts, train_seconds), flush=True)
             publish_report(
                 output / "metrics.jsonl", report, wandb_run, "training", append=True
             )

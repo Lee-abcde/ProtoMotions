@@ -395,6 +395,23 @@ def task_balanced_source_weights(
     return weights
 
 
+def source_loss_weights(
+    global_counts: torch.Tensor,
+    source_is_hoi: torch.Tensor,
+    hoi_weight: float,
+    loss_balance: str = "task",
+) -> torch.Tensor:
+    """Per-source loss mass under the manifest's ``loss_balance`` mode."""
+    if loss_balance == "task":
+        return task_balanced_source_weights(global_counts, source_is_hoi, hoi_weight)
+    if loss_balance != "sample":
+        raise ValueError(f"Unknown loss_balance: {loss_balance}")
+    total = global_counts.sum()
+    if total <= 0:
+        raise ValueError("Need at least one rollout sample")
+    return global_counts / total
+
+
 def weighted_sample_loss(
     per_sample: torch.Tensor,
     source_ids: torch.Tensor,

@@ -30,8 +30,15 @@ class SourceManifest:
     sources: tuple[DistillationSource, ...]
     locomotion_num_ranks: int = 4
     hoi_weight: float = 0.5
+    # "task": hoi_weight : 1 - hoi_weight between tasks; "sample": every rollout
+    # sample weighs the same, so the task split follows the GPU layout.
+    loss_balance: str = "task"
 
     def validate(self) -> None:
+        if self.loss_balance not in ("task", "sample"):
+            raise ValueError(
+                f"loss_balance must be task or sample: {self.loss_balance}"
+            )
         if self.locomotion_num_ranks < 0 or not 0 <= self.hoi_weight <= 1:
             raise ValueError(
                 "Require locomotion_num_ranks >= 0 and 0 <= hoi_weight <= 1"
@@ -381,3 +388,8 @@ def validate_teacher_configs(manifest: SourceManifest, configs: list[dict]) -> N
 
 def manifest_state(manifest: SourceManifest) -> dict:
     return canonical(asdict(manifest))
+
+
+def saved_manifest_state(state: dict) -> dict:
+    """A checkpoint's manifest; those saved before ``loss_balance`` were task-balanced."""
+    return {"loss_balance": "task", **state}

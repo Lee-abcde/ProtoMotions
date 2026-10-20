@@ -13,11 +13,14 @@ from protomotions.agents.multi_source_distill.config import (
     DistillationSource,
     SourceManifest,
     load_manifest,
+    manifest_state,
+    saved_manifest_state,
 )
 from protomotions.agents.multi_source_distill.data import complete_observations
 from protomotions.agents.multi_source_distill.model import (
     JointPVQModel,
     model_config_from_layouts,
+    source_loss_weights,
     task_balanced_source_weights,
 )
 
@@ -110,3 +113,33 @@ def test_joint_layout_is_preserved_and_missing_active_modalities_rejected():
     assert hoi_config.obs_dims["mimic_target_poses"] == 1
     with pytest.raises(ValueError, match="intermimic_target_obs"):
         model_config_from_layouts([(loco, 0)], 3, {"hoi", "locomotion"})
+
+
+def test_sample_loss_balance_weights_every_sample_equally():
+    counts = torch.tensor([32768.0, 24576.0, 24576.0, 24576.0])
+    is_hoi = torch.tensor([False, True, True, True])
+    weights = source_loss_weights(counts, is_hoi, 0.5, "sample")
+    torch.testing.assert_close(weights / counts, torch.full((4,), 1 / 106496))
+    # Task balance with hoi_weight set to the HOI sample share is the same split.
+    torch.testing.assert_close(weights, source_loss_weights(counts, is_hoi, 9 / 13))
+    torch.testing.assert_close(
+        source_loss_weights(counts, is_hoi, 0.5),
+        torch.tensor([0.5, 1 / 6, 1 / 6, 1 / 6]),
+    )
+
+
+def test_loss_balance_defaults_to_task_and_rejects_unknown_modes():
+    assert loco_manifest().loss_balance == "task"
+    replace(loco_manifest(), loss_balance="sample").validate()
+    with pytest.raises(ValueError, match="loss_balance"):
+        replace(loco_manifest(), loss_balance="uniform").validate()
+
+
+def test_manifests_saved_before_loss_balance_still_resume():
+    manifest = loco_manifest()
+    old = manifest_state(manifest)
+    del old["loss_balance"]
+    assert saved_manifest_state(old) == manifest_state(manifest)
+    sample = manifest_state(replace(manifest, loss_balance="sample"))
+    assert saved_manifest_state(old) != sample
+    assert saved_manifest_state(sample) == sample
