@@ -1,15 +1,18 @@
-# 4-GPU validation variant of s1_joint_pvq_sources_euler.yaml: 2 locomotion ranks
-# (AMASS-X shards 0 and 1, i.e. half the dataset) and 2 HOI ranks.
+# 4-GPU training: one rank loads the full AMASS-X dataset; three ranks train HOI.
+# Motion libraries remain fixed throughout training (no shard switching).
 # Paths are inside the Apptainer mounts from s1_joint_pvq_euler.sbatch.
 # OMOMO: 15 subjects (sub11 and sub14 excluded), each with its own v8_29 tracker.
 # HOI sources are assigned round-robin to the HOI ranks in the order listed.
-locomotion_num_ranks: 2
+locomotion_num_ranks: 1
 hoi_weight: 0.5
+# task: split the loss hoi_weight : 1 - hoi_weight between tasks.
+# sample: every rollout sample weighs the same (hoi_weight is then unused), so the
+# task split follows the layout, e.g. HOI 9/13 at 1024 loco / 3 x 768 HOI envs.
+loss_balance: task
 sources:
   - id: amassx
     task: locomotion
-    motion_file: /workspace/protomotion_data/amassx_shards/amassx_slurmrank.pt
-    motion_file_shard_indices: [0, 1]
+    motion_file: /workspace/protomotion_data/amassx/amass_smplx_train.pt
     teacher_checkpoint: /workspace/loco_teachers/gcc_s0_loco_tracker_amassx_v1/score_based.ckpt
     weight: 1.0
   - id: omomo_sub1

@@ -34,6 +34,11 @@ export SOURCES
 CONTAINER_ENV="${CONTAINER_ENV:-/opt/IsaacLab_new/.venv/bin/activate}"
 NUM_ENVS="${NUM_ENVS:-2048}"
 BATCH_SIZE="${BATCH_SIZE:-4096}"
+# Optional HOI-rank overrides of NUM_ENVS/BATCH_SIZE, to balance rollout time
+# between locomotion and HOI ranks. Every rank must take as many minibatches
+# per epoch: NUM_ENVS/BATCH_SIZE == HOI_NUM_ENVS/HOI_BATCH_SIZE (preflight checks).
+HOI_NUM_ENVS="${HOI_NUM_ENVS:-}"
+HOI_BATCH_SIZE="${HOI_BATCH_SIZE:-}"
 ROLLOUT_STEPS="${ROLLOUT_STEPS:-32}"
 # Adam learning rate. A changed value cannot --resume an existing run
 # (training settings are checked), so give it a new RUN_NAME.
@@ -59,13 +64,22 @@ STUDENT_PSI="${STUDENT_PSI:-teacher}"
 EVALUATE_TEACHERS="${EVALUATE_TEACHERS:-0}"
 # Optional override; the Python entry point chooses the run's default table.
 HOI_TEACHER_FILTER="${HOI_TEACHER_FILTER:-}"
+# 1 keeps the locomotion motion frames in host RAM. A single rank loading the
+# full AMASS-X file (~18.5 GiB as GPU tensors) needs it on a 24 GB RTX 4090;
+# that rank then peaks near 35 GB of host RAM, so submit with --mem-per-cpu=6G.
+LOCO_FRAMES_ON_CPU="${LOCO_FRAMES_ON_CPU:-0}"
+# 1 runs student updates with TF32 tensor-core matmuls (rollouts stay FP32).
+# The codebook distances are matmuls too, so near-tied codes can flip; compare
+# against an FP32 run first. A run keeps the value it started with.
+TRAIN_TF32="${TRAIN_TF32:-0}"
 # Weights & Biases: USE_WANDB=1 enables it. Online like train_slurm.py, with
 # credentials from ~/.netrc on the cluster; set WANDB_MODE=offline to defer upload.
 USE_WANDB="${USE_WANDB:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-physical_animation}"
 WANDB_MODE="${WANDB_MODE:-online}"
 export CONTAINER_ENV RUN_NAME NUM_ENVS BATCH_SIZE ROLLOUT_STEPS LEARNING_RATE NORMALIZER_MIN_STD NORMALIZE_LATENT ITERATIONS EVAL_EVERY
-export STUDENT_PSI EVALUATE_TEACHERS HOI_TEACHER_FILTER
+export HOI_NUM_ENVS HOI_BATCH_SIZE
+export STUDENT_PSI EVALUATE_TEACHERS HOI_TEACHER_FILTER LOCO_FRAMES_ON_CPU TRAIN_TF32
 export USE_WANDB WANDB_PROJECT WANDB_MODE
 # Follows sbatch --ntasks-per-node overrides, so a smaller smoke run needs no edit.
 # Deliberately not the name torch uses for its own rank count: exporting that one
@@ -161,6 +175,22 @@ if [[ "$EVALUATE_TEACHERS" == "1" ]]; then
   teacher_eval_args=(--evaluate-teachers)
 fi
 
+hoi_layout_args=()
+if [[ -n "$HOI_NUM_ENVS" ]]; then
+  hoi_layout_args+=(--hoi-num-envs "$HOI_NUM_ENVS")
+fi
+if [[ -n "$HOI_BATCH_SIZE" ]]; then
+  hoi_layout_args+=(--hoi-batch-size "$HOI_BATCH_SIZE")
+fi
+
+speed_args=()
+if [[ "$LOCO_FRAMES_ON_CPU" == "1" ]]; then
+  speed_args=(--locomotion-frames-on-cpu)
+fi
+if [[ "$TRAIN_TF32" == "1" ]]; then
+  speed_args+=(--train-tf32)
+fi
+
 wandb_args=()
 if [[ "$USE_WANDB" == "1" ]]; then
   export WANDB_DIR="/workspace/output/$RUN_NAME"
@@ -195,6 +225,8 @@ python -u -m protomotions.train_multi_source_distill \
   "${filter_args[@]}" \
   "${latent_args[@]}" \
   "${teacher_eval_args[@]}" \
+  "${hoi_layout_args[@]}" \
+  "${speed_args[@]}" \
   "${wandb_args[@]}" \
   "${resume_args[@]}"
 status=$?
@@ -207,7 +239,7 @@ INNER
 echo "Euler preflight: code, data, checkpoints, action contract, and rank assignment"
 mkdir -p "$NODE_TMP_ROOT/overlay_preflight/upper" "$NODE_TMP_ROOT/overlay_preflight/work"
 apptainer exec --overlay "$NODE_TMP_ROOT/overlay_preflight" "${container_args[@]}" "$CONTAINER" bash -lc \
-  'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; resume_args=(); filter_args=(); if [[ -f "/workspace/output/$RUN_NAME/last.ckpt" ]]; then resume_args=(--resume "/workspace/output/$RUN_NAME/last.ckpt"); fi; if [[ -n "$HOI_TEACHER_FILTER" ]]; then filter_args=(--hoi-teacher-filter "$HOI_TEACHER_FILTER"); fi; python -m protomotions.train_multi_source_distill --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS" "${filter_args[@]}" --student-psi "$STUDENT_PSI" "${resume_args[@]}"'
+  'source "$CONTAINER_ENV"; export PYTHONPATH=/workspace/ProtoMotions:${PYTHONPATH:-}; cd /workspace/ProtoMotions; resume_args=(); filter_args=(); if [[ -f "/workspace/output/$RUN_NAME/last.ckpt" ]]; then resume_args=(--resume "/workspace/output/$RUN_NAME/last.ckpt"); fi; if [[ -n "$HOI_TEACHER_FILTER" ]]; then filter_args=(--hoi-teacher-filter "$HOI_TEACHER_FILTER"); fi; hoi_layout_args=(); if [[ -n "$HOI_NUM_ENVS" ]]; then hoi_layout_args+=(--hoi-num-envs "$HOI_NUM_ENVS"); fi; if [[ -n "$HOI_BATCH_SIZE" ]]; then hoi_layout_args+=(--hoi-batch-size "$HOI_BATCH_SIZE"); fi; python -m protomotions.train_multi_source_distill --distillation-sources "$SOURCES" --check-config-only --world-size "$PREFLIGHT_RANKS" --num-envs "$NUM_ENVS" --batch-size "$BATCH_SIZE" --rollout-steps "$ROLLOUT_STEPS" "${hoi_layout_args[@]}" "${filter_args[@]}" --student-psi "$STUDENT_PSI" "${resume_args[@]}"'
 
 echo "Starting $PREFLIGHT_RANKS-rank training in $RUN_DIR"
 # Each task computes its own overlay, so SLURM_PROCID must expand inside srun.
