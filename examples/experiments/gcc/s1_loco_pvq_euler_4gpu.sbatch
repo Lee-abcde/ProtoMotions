@@ -15,5 +15,10 @@ export PROTOMOTIONS_DIR="${PROTOMOTIONS_DIR:-/cluster/home/lijingy/ProtoMotions}
 export INCLUDE_HOI=0
 export SOURCES="${SOURCES:-examples/experiments/gcc/s1_loco_pvq_sources_euler_4gpu.yaml}"
 export RUN_NAME="${RUN_NAME:-joint_pvq_loco_4gpu_v1}"
+# Each rank loads one AMASS-X shard, which fits on the GPU; keep the layout this
+# job used before the joint defaults moved to the four-GPU locomotion + HOI split.
+export NUM_ENVS="${NUM_ENVS:-2048}"
+export BATCH_SIZE="${BATCH_SIZE:-4096}"
+export LOCO_FRAMES_ON_CPU="${LOCO_FRAMES_ON_CPU:-0}"
 export USE_WANDB="${USE_WANDB:-1}"
 exec bash "$PROTOMOTIONS_DIR/examples/experiments/gcc/s1_joint_pvq_euler.sbatch"

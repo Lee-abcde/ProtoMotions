@@ -1,16 +1,20 @@
 #!/bin/bash
 #SBATCH --job-name=joint_pvq
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=8
-#SBATCH --gpus=rtx_4090:8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus=rtx_4090:4
 #SBATCH --cpus-per-task=8
-#SBATCH --mem-per-cpu=4G
+# The locomotion rank keeps the full AMASS-X frames in host RAM and peaks near
+# 33 GiB, above the 32 GB that 4G per CPU gives one task.
+#SBATCH --mem-per-cpu=6G
 #SBATCH --tmp=80G
 #SBATCH --time=24:00:00
 # Absolute so the log lands next to the run outputs; the directory must exist.
 #SBATCH --output=/cluster/scratch/lijingy/joint_pvq_results/joint_pvq_%j.log
 #SBATCH --error=/cluster/scratch/lijingy/joint_pvq_results/joint_pvq_%j.log
 
+# Stage one (joint Product-VQ posterior) on four RTX 4090s: one locomotion rank
+# with the full AMASS-X dataset plus three HOI ranks with the 15 OMOMO subjects.
 set -euo pipefail
 
 : "${CONTAINER:?Submit with --export=ALL,CONTAINER=/cluster/scratch/lijingy/<image>.sif}"
@@ -28,17 +32,22 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/cluster/scratch/lijingy/joint_pvq_results}"
 # Teacher run directories (each holds score_based.ckpt + resolved_configs.pt).
 HOI_TEACHER_DIR="${HOI_TEACHER_DIR:-/cluster/scratch/lijingy/HOI_smplx}"
 LOCO_TEACHER_DIR="${LOCO_TEACHER_DIR:-/cluster/scratch/lijingy/smplx_results}"
-RUN_NAME="${RUN_NAME:-joint_pvq_v1}"
-SOURCES="${SOURCES:-examples/experiments/gcc/s1_joint_pvq_sources_euler.yaml}"
+RUN_NAME="${RUN_NAME:-joint_pvq_fullamass_4gpu_v1}"
+SOURCES="${SOURCES:-examples/experiments/gcc/s1_joint_pvq_sources_euler_4gpu.yaml}"
 export SOURCES
 CONTAINER_ENV="${CONTAINER_ENV:-/opt/IsaacLab_new/.venv/bin/activate}"
-NUM_ENVS="${NUM_ENVS:-2048}"
-BATCH_SIZE="${BATCH_SIZE:-4096}"
-# Optional HOI-rank overrides of NUM_ENVS/BATCH_SIZE, to balance rollout time
-# between locomotion and HOI ranks. Every rank must take as many minibatches
-# per epoch: NUM_ENVS/BATCH_SIZE == HOI_NUM_ENVS/HOI_BATCH_SIZE (preflight checks).
-HOI_NUM_ENVS="${HOI_NUM_ENVS:-}"
-HOI_BATCH_SIZE="${HOI_BATCH_SIZE:-}"
+# NUM_ENVS/BATCH_SIZE apply to locomotion ranks, HOI_NUM_ENVS/HOI_BATCH_SIZE to
+# HOI ranks. From the Euler layout sweeps (jobs 17616572, 17622101): a locomotion
+# env steps much faster than an HOI env and the student update takes ~1.5 s, so
+# 2.5x the HOI envs on the locomotion rank fills its wait for the HOI ranks (both
+# collect in ~15-16 s, ~18 s per iteration) at 14.8-17.2 GB per GPU. More HOI
+# envs lengthen the iteration more than they add samples. Every rank must take
+# as many minibatches per epoch: NUM_ENVS/BATCH_SIZE == HOI_NUM_ENVS/HOI_BATCH_SIZE
+# (preflight checks). The layout is in the training contract; keep it when resuming.
+NUM_ENVS="${NUM_ENVS:-2560}"
+BATCH_SIZE="${BATCH_SIZE:-10240}"
+HOI_NUM_ENVS="${HOI_NUM_ENVS:-1024}"
+HOI_BATCH_SIZE="${HOI_BATCH_SIZE:-4096}"
 ROLLOUT_STEPS="${ROLLOUT_STEPS:-32}"
 # Adam learning rate. A changed value cannot --resume an existing run
 # (training settings are checked), so give it a new RUN_NAME.
@@ -64,10 +73,9 @@ STUDENT_PSI="${STUDENT_PSI:-teacher}"
 EVALUATE_TEACHERS="${EVALUATE_TEACHERS:-0}"
 # Optional override; the Python entry point chooses the run's default table.
 HOI_TEACHER_FILTER="${HOI_TEACHER_FILTER:-}"
-# 1 keeps the locomotion motion frames in host RAM. A single rank loading the
-# full AMASS-X file (~18.5 GiB as GPU tensors) needs it on a 24 GB RTX 4090;
-# that rank then peaks near 35 GB of host RAM, so submit with --mem-per-cpu=6G.
-LOCO_FRAMES_ON_CPU="${LOCO_FRAMES_ON_CPU:-0}"
+# 1 keeps the locomotion motion frames in host RAM: a single rank loading the
+# full AMASS-X file (~18.5 GiB as GPU tensors) needs it on a 24 GB RTX 4090.
+LOCO_FRAMES_ON_CPU="${LOCO_FRAMES_ON_CPU:-1}"
 # 1 runs student updates with TF32 tensor-core matmuls (rollouts stay FP32).
 # The codebook distances are matmuls too, so near-tied codes can flip; compare
 # against an FP32 run first. A run keeps the value it started with.
@@ -84,7 +92,7 @@ export USE_WANDB WANDB_PROJECT WANDB_MODE
 # Follows sbatch --ntasks-per-node overrides, so a smaller smoke run needs no edit.
 # Deliberately not the name torch uses for its own rank count: exporting that one
 # makes the training ranks expect a torchrun launch and demand RANK/LOCAL_RANK.
-PREFLIGHT_RANKS="${SLURM_NTASKS:-8}"
+PREFLIGHT_RANKS="${SLURM_NTASKS:-4}"
 export PREFLIGHT_RANKS
 
 required_paths=("$CONTAINER" "$PROTOMOTIONS_DIR" "$DATA_DIR" "$LOCO_TEACHER_DIR")

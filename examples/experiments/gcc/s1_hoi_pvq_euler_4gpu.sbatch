@@ -13,4 +13,8 @@
 export RUN_NAME="${RUN_NAME:-hoi_pvq_v1}"
 export EVALUATE_TEACHERS="${EVALUATE_TEACHERS:-0}"
 export SOURCES="${SOURCES:-examples/experiments/gcc/s1_hoi_pvq_sources_euler_4gpu.yaml}"
+# Every rank is an HOI rank; keep the layout this job used before the joint
+# defaults moved to the four-GPU locomotion + HOI split.
+export HOI_NUM_ENVS="${HOI_NUM_ENVS:-2048}"
+export HOI_BATCH_SIZE="${HOI_BATCH_SIZE:-4096}"
 source "${PROTOMOTIONS_DIR:-/cluster/home/lijingy/ProtoMotions}/examples/experiments/gcc/s1_joint_pvq_euler.sbatch"
