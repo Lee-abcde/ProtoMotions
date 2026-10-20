@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """CPU regression tests; no simulator, GPU, or motion assets required."""
@@ -49,6 +49,7 @@ from protomotions.train_joint_prior import (
     parser,
     posterior_contract,
     publish_report,
+    resolve_sampling,
     rollout_probability,
     training_contract,
     validate_resume,
@@ -56,7 +57,7 @@ from protomotions.train_joint_prior import (
 from protomotions.train_multi_source_distill import WandbRun
 
 
-def motor():
+def motor(num_quantizers=2):
     return JointPVQModel(
         JointModelConfig(
             obs_dims={
@@ -68,7 +69,7 @@ def motor():
             },
             num_actions=3,
             latent_dim=8,
-            num_quantizers=2,
+            num_quantizers=num_quantizers,
             num_embeddings=8,
             encoder_widths=(16,),
             decoder_widths=(16,),
@@ -76,11 +77,11 @@ def motor():
     )
 
 
-def config(**kwargs):
+def config(num_layers=1, **kwargs):
     return JointPriorConfig(
         num_bodies=2,
         token_dim=16,
-        num_layers=1,
+        num_layers=num_layers,
         num_heads=2,
         feedforward_dim=32,
         **kwargs,
@@ -148,9 +149,8 @@ def environment():
         ),
         motion_lib=FakeMotionLib(),
         scene_lib=FakeSceneLib(),
-        get_spawn_to_ref_pose_offset_with_terrain_height_correction=lambda pos, **kwargs: (
-            torch.zeros_like(pos)
-        ),
+        get_spawn_to_ref_pose_offset_with_terrain_height_correction=lambda pos,
+        **kwargs: (torch.zeros_like(pos)),
     )
 
 
@@ -174,10 +174,16 @@ def test_code_lookup_matches_original_decoder_and_does_not_need_reference(task):
 
 
 @pytest.mark.parametrize("task", ["locomotion", "hoi"])
-def test_masked_values_cannot_leak_and_only_prior_trains(task):
+@pytest.mark.parametrize("autoregressive", [False, True])
+def test_masked_values_cannot_leak_and_only_prior_trains(task, autoregressive):
     torch.manual_seed(3)
     model = JointPriorModel(
-        motor(), config(human_visible_prob=0.0, object_visible_prob=0.0)
+        motor(),
+        config(
+            human_visible_prob=0.0,
+            object_visible_prob=0.0,
+            codebook_autoregressive=autoregressive,
+        ),
     )
     obs = inputs(model.posterior, task)
     conditions = PriorConditioning(environment(), task, model.config, 1).observe(obs)
@@ -187,22 +193,28 @@ def test_masked_values_cannot_leak_and_only_prior_trains(task):
     model.train()
     assert not model.posterior.training
     model.update_normalizers(conditions)
-    before = model(conditions).detach()
+    labels = model.posterior(obs, task)["indices"]
+    before = model(conditions, labels).detach()
     dirty = {k: v.clone() for k, v in conditions.items()}
     for key in model.encoders:
         dirty[key][~expand_feature_mask(dirty[key], dirty[key + "_valid"])] = float(
             "nan"
         )
-    torch.testing.assert_close(model(dirty), before)
+    torch.testing.assert_close(model(dirty, labels), before)
     assert before.shape == (2, 2, 8)
-    labels = model.posterior(obs, task)["indices"]
     optimizer = torch.optim.Adam(
         [p for p in model.parameters() if p.requires_grad], lr=0.001
     )
-    loss = model.categorical_loss(model(conditions), labels).mean()
+    loss = model.categorical_loss(model(conditions, labels), labels).mean()
     loss.backward()
     assert torch.isfinite(loss)
-    assert model.head.weight.grad.abs().sum() > 0
+    heads = model.code_heads if autoregressive else [model.head]
+    for head in heads:
+        assert head.weight.grad.abs().sum() > 0
+    for parameter in model.parameters():
+        if parameter.requires_grad:
+            assert parameter.grad is not None
+            assert torch.isfinite(parameter.grad).all()
     assert all(p.grad is None for p in model.posterior.parameters())
     optimizer.step()
     for key, value in frozen.items():
@@ -389,8 +401,8 @@ def test_horizon_gate_follows_the_per_body_refresh_schedule():
 def test_reference_time_clamping_and_spawn_alignment():
     env, posterior = environment(), motor()
     env.motion_manager.motion_times[:] = 9.95
-    env.get_spawn_to_ref_pose_offset_with_terrain_height_correction = lambda pos, **kw: (
-        torch.ones_like(pos)
+    env.get_spawn_to_ref_pose_offset_with_terrain_height_correction = (
+        lambda pos, **kw: (torch.ones_like(pos))
     )
     observer = PriorConditioning(
         env, "hoi", config(human_visible_prob=1, object_visible_prob=1), 1
@@ -565,8 +577,11 @@ def test_viewer_reset_key_inside_step_clears_history_and_snapshot(
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-def test_prior_checkpoint_roundtrip_and_resume_contract(tmp_path, legacy):
-    model = JointPriorModel(motor(), config())
+@pytest.mark.parametrize("autoregressive", [False, True])
+def test_prior_checkpoint_roundtrip_and_resume_contract(
+    tmp_path, legacy, autoregressive
+):
+    model = JointPriorModel(motor(), config(codebook_autoregressive=autoregressive))
     optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad])
     manifest = SourceManifest(
         (
@@ -578,6 +593,7 @@ def test_prior_checkpoint_roundtrip_and_resume_contract(tmp_path, legacy):
     args = parser().parse_args(
         ["--checkpoint", "motor.ckpt", "--distillation-sources", "sources.yaml"]
     )
+    resolve_sampling(args, None)
     training = training_contract(
         args,
         model.config,
@@ -595,7 +611,48 @@ def test_prior_checkpoint_roundtrip_and_resume_contract(tmp_path, legacy):
     )
     restored, saved = load_prior_checkpoint(path)
     validate_resume(saved, manifest, [], training)
+    assert restored.config.codebook_autoregressive == autoregressive
+    obs = inputs(model.posterior, "locomotion")
+    conditions = PriorConditioning(
+        environment(), "locomotion", model.config, 1
+    ).observe(obs)
+    torch.testing.assert_close(
+        restored.generate_indices(conditions, temperature=0),
+        model.generate_indices(conditions, temperature=0),
+    )
+    changed_mode = deepcopy(training)
+    changed_mode["prior_config"]["codebook_autoregressive"] = not autoregressive
+    with pytest.raises(ValueError, match="settings"):
+        validate_resume(saved, manifest, [], changed_mode)
+    if not autoregressive:
+        # Pre-AR checkpoints have neither the flag nor any new model parameters.
+        old = deepcopy(saved)
+        old["prior_config"].pop("codebook_autoregressive")
+        old["training_config"]["prior_config"].pop("codebook_autoregressive")
+        legacy_path = tmp_path / "legacy.ckpt"
+        torch.save(old, legacy_path)
+        old_model, old_saved = load_prior_checkpoint(legacy_path)
+        assert not old_model.config.codebook_autoregressive
+        validate_resume(old_saved, manifest, [], training)
+        with pytest.raises(ValueError, match="settings"):
+            validate_resume(old_saved, manifest, [], changed_mode)
+        torch.testing.assert_close(
+            old_model.generate_indices(conditions, temperature=0),
+            model.generate_indices(conditions, temperature=0),
+        )
     assert saved["iteration"] == 12
+    assert saved["training_config"]["temperature"] == 1.0
+    changed_temperature = deepcopy(training)
+    changed_temperature["temperature"] = 0.5
+    with pytest.raises(ValueError, match="settings"):
+        validate_resume(saved, manifest, [], changed_temperature)
+    old_sampling = deepcopy(saved)
+    old_sampling["training_config"].pop("temperature")
+    with pytest.raises(ValueError, match="settings"):
+        validate_resume(old_sampling, manifest, [], training)
+    greedy_training = deepcopy(training)
+    greedy_training["temperature"] = 0.0
+    validate_resume(old_sampling, manifest, [], greedy_training)
     for key, value in model.state_dict().items():
         torch.testing.assert_close(value, restored.state_dict()[key])
     changed = deepcopy(training)
@@ -779,8 +836,9 @@ def test_report_io_failure_reaches_every_rank(tmp_path):
 
 
 @pytest.mark.parametrize("task", ["locomotion", "hoi"])
-def test_compact_masks_match_dense_outputs_moments_and_gradients(task):
-    model = JointPriorModel(motor(), config())
+@pytest.mark.parametrize("autoregressive", [False, True])
+def test_compact_masks_match_dense_outputs_moments_and_gradients(task, autoregressive):
+    model = JointPriorModel(motor(), config(codebook_autoregressive=autoregressive))
     dense_model = deepcopy(model)
     obs = inputs(model.posterior, task)
     compact = PriorConditioning(environment(), task, model.config, 1).observe(obs)
@@ -805,8 +863,9 @@ def test_compact_masks_match_dense_outputs_moments_and_gradients(task):
         torch.testing.assert_close(
             value, dense_model.normalizers.state_dict()[key], rtol=0, atol=0
         )
-    logits = model(compact)
-    expected = dense_model(dense)
+    labels = model.posterior(obs, task)["indices"]
+    logits = model(compact, labels)
+    expected = dense_model(dense, labels)
     torch.testing.assert_close(logits, expected, rtol=0, atol=0)
     logits.sum().backward()
     expected.sum().backward()
@@ -817,16 +876,25 @@ def test_compact_masks_match_dense_outputs_moments_and_gradients(task):
 
 @pytest.mark.parametrize("task", ["locomotion", "hoi"])
 @pytest.mark.parametrize("selected", [[False, False], [True, False], [True, True]])
-def test_rollout_only_runs_prior_for_selected_environments(task, selected):
-    model = JointPriorModel(motor(), config()).eval()
+@pytest.mark.parametrize("autoregressive", [False, True])
+def test_rollout_only_runs_prior_for_selected_environments(
+    task, selected, autoregressive
+):
+    model = JointPriorModel(
+        motor(), config(codebook_autoregressive=autoregressive)
+    ).eval()
     obs = inputs(model.posterior, task)
     conditions = PriorConditioning(environment(), task, model.config, 1).observe(obs)
     posterior_actions = model.posterior(obs, task)["action"]
     original = posterior_actions.clone()
     mask = torch.tensor(selected)
-    expected = torch.where(mask[:, None], model.act(obs, conditions), posterior_actions)
+    expected = torch.where(
+        mask[:, None], model.act(obs, conditions, temperature=0), posterior_actions
+    )
     with patch.object(model, "act", wraps=model.act) as act:
-        actual = model.rollout_actions(obs, conditions, posterior_actions, mask)
+        actual = model.rollout_actions(
+            obs, conditions, posterior_actions, mask, temperature=0
+        )
         if any(selected):
             act.assert_called_once()
             sliced_inputs, sliced_conditions = act.call_args.args
@@ -849,7 +917,7 @@ def test_rollout_schedule():
     assert rollout_probability(501, 500, 0, 0.95) == 0.95
 
 
-def _distributed_prior_worker(rank, rendezvous, directory):
+def _distributed_prior_worker(rank, rendezvous, directory, autoregressive):
     torch.set_num_threads(1)
     dist.init_process_group(
         "gloo",
@@ -861,7 +929,12 @@ def _distributed_prior_worker(rank, rendezvous, directory):
     try:
         torch.manual_seed(7)
         model = JointPriorModel(
-            motor(), config(human_visible_prob=1, object_visible_prob=1)
+            motor(),
+            config(
+                human_visible_prob=1,
+                object_visible_prob=1,
+                codebook_autoregressive=autoregressive,
+            ),
         )
         ddp = DistributedDataParallel(model, broadcast_buffers=False)
         task = "locomotion" if rank == 0 else "hoi"
@@ -878,7 +951,7 @@ def _distributed_prior_worker(rank, rendezvous, directory):
         )
         # Two backward passes catch DDP's unused-parameter errors on the next iteration.
         for _ in range(2):
-            logits = ddp(conditions)
+            logits = ddp(conditions, target_indices=labels)
             losses = model.categorical_loss(logits, labels)
             loss = weighted_sample_loss(
                 losses, torch.full((2,), rank), counts, weights, 2
@@ -892,10 +965,11 @@ def _distributed_prior_worker(rank, rendezvous, directory):
 
 
 @pytest.mark.skipif(not dist.is_gloo_available(), reason="Requires CPU Gloo")
-def test_joint_prior_distributed_modalities_stay_synchronized(tmp_path):
+@pytest.mark.parametrize("autoregressive", [False, True])
+def test_joint_prior_distributed_modalities_stay_synchronized(tmp_path, autoregressive):
     mp.spawn(
         _distributed_prior_worker,
-        args=(f"file://{tmp_path}/rendezvous", str(tmp_path)),
+        args=(f"file://{tmp_path}/rendezvous", str(tmp_path), autoregressive),
         nprocs=2,
         join=True,
     )

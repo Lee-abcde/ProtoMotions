@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Stage-two joint prior training; uses the stage-one manifest and tracker envs.
@@ -10,6 +10,7 @@ labels actual rollout states; only the shared categorical Transformer is updated
 import argparse
 import hashlib
 import json
+import math
 import os
 import random
 import runpy
@@ -31,6 +32,7 @@ from protomotions.agents.joint_prior.config import JointPriorConfig
 from protomotions.agents.joint_prior.evaluation import (
     FILTER_FILENAME,
     PROTOCOL,
+    compatible_best_evaluation,
     evaluate_prior_sources,
     evaluation_settings,
     filtered_summaries,
@@ -130,6 +132,37 @@ def parser():
     p.add_argument(
         "--eval-seed", type=int, default=0, help="Fixed evaluation condition seed"
     )
+    p.add_argument(
+        "--eval-sampling-seed",
+        type=int,
+        default=0,
+        help="Fixed per-motion code sampling seed for the single evaluation trial",
+    )
+    p.add_argument(
+        "--temperature",
+        type=float,
+        help="Rollout code sampling temperature; 0 selects greedy. Defaults to 1 "
+        "for a new run and to the checkpoint's value (greedy before sampling "
+        "existed) with --resume",
+    )
+    p.add_argument(
+        "--eval-temperature",
+        type=float,
+        help="Evaluation and best-checkpoint temperature; defaults to --temperature. "
+        "Not part of the resume contract; a change only resets the best score",
+    )
+    p.add_argument(
+        "--top-p",
+        type=float,
+        help="Rollout nucleus sampling: sample each code only from the most "
+        "probable codes whose mass first exceeds this; 1 keeps all codes. "
+        "Defaults to 1 for a new run and to the checkpoint's value with --resume",
+    )
+    p.add_argument(
+        "--eval-top-p",
+        type=float,
+        help="Evaluation and best-checkpoint top-p; defaults to --top-p",
+    )
     p.add_argument("--prior-rollout-start-iteration", type=int, default=500)
     p.add_argument("--prior-rollout-ramp-iterations", type=int, default=9500)
     p.add_argument("--prior-rollout-max-prob", type=float, default=0.95)
@@ -164,6 +197,14 @@ def rollout_probability(iteration, start, ramp, maximum):
 
 
 def prior_preflight(args, world_size):
+    for name in ("temperature", "eval_temperature"):
+        value = getattr(args, name)
+        if value is not None and (not math.isfinite(value) or value < 0):
+            raise ValueError(f"--{name.replace('_', '-')} must be finite and >= 0")
+    for name in ("top_p", "eval_top_p"):
+        value = getattr(args, name)
+        if value is not None and not 0 < value <= 1:
+            raise ValueError(f"--{name.replace('_', '-')} must be in (0, 1]")
     for name in (
         "num_envs",
         "rollout_steps",
@@ -229,6 +270,8 @@ def training_contract(args, pc, world_size, filter_digest, mc, frozen_state):
         "prior_rollout_max_prob",
         "student_psi",
         "train_tf32",
+        "temperature",
+        "top_p",
     )
     return {
         **{k: getattr(args, k) for k in keys},
@@ -237,6 +280,24 @@ def training_contract(args, pc, world_size, filter_digest, mc, frozen_state):
         "filter_digest": filter_digest,
         "posterior": posterior_contract(asdict(mc), frozen_state),
     }
+
+
+def resolve_sampling(args, saved):
+    """Fill unset sampling settings; a resumed run keeps its own rollout behavior."""
+    saved_training = {} if saved is None else saved["training_config"]
+    if args.temperature is None:
+        args.temperature = (
+            1.0
+            if saved is None
+            # Runs saved before sampling existed rolled out greedily.
+            else saved_training.get("temperature", 0.0)
+        )
+    if args.top_p is None:
+        args.top_p = saved_training.get("top_p", 1.0)
+    if args.eval_temperature is None:
+        args.eval_temperature = args.temperature
+    if args.eval_top_p is None:
+        args.eval_top_p = args.top_p
 
 
 def validate_resume(saved, manifest, contract, training):
@@ -270,6 +331,10 @@ def validate_resume(saved, manifest, contract, training):
             JointPriorConfig(**saved_training["prior_config"])
         )
     saved_training.setdefault("posterior", embedded)
+    # Older runs used greedy rollout actions. Never silently change their
+    # behavior when resuming with the new sampling default.
+    saved_training.setdefault("temperature", 0.0)
+    saved_training.setdefault("top_p", 1.0)
     if not contract_matches(saved_training, training):
         raise ValueError("Resume training settings differ")
     if len(saved["rank_states"]) != training["world_size"]:
@@ -346,16 +411,18 @@ def run(args):
         )
     )
     filter_document, filter_digest = filter_pair
-    training = collective_call(
-        lambda frozen=frozen: training_contract(
-            args, pc, world_size, filter_digest, mc, frozen["model"]
-        )
-    )
     saved = None
     if args.resume:
         model, saved = collective_call(
             lambda: load_prior_checkpoint(args.resume, device)
         )
+    resolve_sampling(args, saved)
+    training = collective_call(
+        lambda frozen=frozen: training_contract(
+            args, pc, world_size, filter_digest, mc, frozen["model"]
+        )
+    )
+    if saved is not None:
         collective_call(
             lambda saved=saved: validate_resume(saved, manifest, contract, training)
         )
@@ -387,7 +454,14 @@ def run(args):
         collective_call(
             lambda: {
                 source.id: evaluation_settings(
-                    configs, (index,), source.task, pc, args.eval_seed
+                    configs,
+                    (index,),
+                    source.task,
+                    pc,
+                    args.eval_seed,
+                    temperature=args.eval_temperature,
+                    top_p=args.eval_top_p,
+                    sampling_seed=args.eval_sampling_seed,
                 )
                 for index, source in enumerate(manifest.sources)
             }
@@ -395,13 +469,9 @@ def run(args):
         if args.eval_every
         else None
     )
-    best_evaluation = saved.get("best_evaluation") if saved is not None else None
-    if (
-        eval_settings is not None
-        and best_evaluation is not None
-        and best_evaluation.get("settings") != eval_settings
-    ):
-        best_evaluation = None
+    best_evaluation = compatible_best_evaluation(
+        saved.get("best_evaluation") if saved is not None else None, eval_settings
+    )
     ddp = DistributedDataParallel(
         model, device_ids=[device.index], broadcast_buffers=False
     )
@@ -564,7 +634,12 @@ def run(args):
                     conditions = conditioning.observe(inputs)
                     targets = model.posterior(inputs, task)
                     actions = model.rollout_actions(
-                        inputs, conditions, targets["action"], prior_envs
+                        inputs,
+                        conditions,
+                        targets["action"],
+                        prior_envs,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
                     )
                     batches.append({k: v.clone() for k, v in conditions.items()})
                     labels.append(targets["indices"].clone())
@@ -600,7 +675,10 @@ def run(args):
                     rank,
                     total=args.mini_epochs * minibatches,
                 ):
-                    logits = ddp({k: v[selection] for k, v in batch.items()})
+                    logits = ddp(
+                        {k: v[selection] for k, v in batch.items()},
+                        target_indices=target[selection],
+                    )
                     ce = model.categorical_loss(logits, target[selection])
                     loss = weighted_sample_loss(
                         ce, ids[selection], counts, weights, world_size, minibatches
@@ -644,7 +722,14 @@ def run(args):
                 "sources": {
                     s.id: {
                         "ce": float(logs[i, 0] / logs[i, 2].clamp_min(1)),
-                        "code_accuracy": float(logs[i, 1] / logs[i, 2].clamp_min(1)),
+                        "joint_nll": float(
+                            mc.num_quantizers * logs[i, 0] / logs[i, 2].clamp_min(1)
+                        ),
+                        (
+                            "teacher_forced_code_accuracy"
+                            if pc.codebook_autoregressive
+                            else "code_accuracy"
+                        ): float(logs[i, 1] / logs[i, 2].clamp_min(1)),
                         "samples": int(counts[i]),
                     }
                     for i, s in enumerate(manifest.sources)
@@ -673,6 +758,9 @@ def run(args):
                         output,
                         rank,
                         seed=args.eval_seed,
+                        temperature=args.eval_temperature,
+                        top_p=args.eval_top_p,
+                        sampling_seed=args.eval_sampling_seed,
                     )
                 )
                 records = [r for group in gather_objects(records) for r in group]

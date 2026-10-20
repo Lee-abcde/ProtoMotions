@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Checkpoint and evaluator adapters using the existing joint-PVQ interfaces."""
@@ -78,16 +78,20 @@ class LivePriorPolicy(nn.Module):
         model,
         env,
         task,
-        temperature=0.0,
+        temperature=1.0,
         *,
+        top_p=1.0,
         reference_body_ids=None,
         full_object_reference=False,
         random_source=None,
+        sampling_random_source=None,
     ):
         super().__init__()
         self.prior = model
         self.env, self.task, self.temperature = env, task, temperature
+        self.top_p = top_p
         self.config = model.posterior.config
+        self.sampling_random_source = sampling_random_source
         self.conditions = PriorConditioning(
             env,
             task,
@@ -128,4 +132,18 @@ class LivePriorPolicy(nn.Module):
         if not self.initialized:
             self.pre_collect_step(0)
         conditions = self.conditions.observe(inputs)
-        return {"action": self.prior.act(inputs, conditions, self.temperature)}
+        uniforms = None
+        if self.temperature > 0 and self.sampling_random_source is not None:
+            env_ids = torch.arange(self.env.num_envs, device=self.env.device)
+            uniforms = self.sampling_random_source(
+                (self.env.num_envs, self.config.num_quantizers), env_ids, 0
+            )
+        return {
+            "action": self.prior.act(
+                inputs,
+                conditions,
+                self.temperature,
+                top_p=self.top_p,
+                sampling_uniforms=uniforms,
+            )
+        }

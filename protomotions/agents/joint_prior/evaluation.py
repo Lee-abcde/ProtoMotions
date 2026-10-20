@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Reproducible full-reference evaluation of the joint categorical prior.
@@ -19,7 +19,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-PROTOCOL = "joint_prior_full_reference_fixed_conditions_v1"
+PROTOCOL = "joint_prior_full_reference_fixed_conditions_v2"
+# v1 always decoded greedily with a non-autoregressive prior.
+LEGACY_PROTOCOL = "joint_prior_full_reference_fixed_conditions_v1"
+SAMPLING_ALGORITHM = "motion_uniform_cdf_v1"
 # Copy of the stage-one HOI teacher filter kept beside prior checkpoints.
 FILTER_FILENAME = "hoi_teacher_filter.json"
 
@@ -32,12 +35,16 @@ class MotionConditionRandom:
     is needed. Integer mixing provides uniform draws without global RNG state.
     """
 
-    def __init__(self, env, motion_keys, seed):
+    def __init__(self, env, motion_keys, seed, *, namespace=""):
         self.env = env
+        # Preserve existing condition schedules; code draws use a separate hash
+        # namespace even when their numeric seed equals the condition seed.
+        prefix = f"{namespace}:" if namespace else ""
         self.seeds = torch.tensor(
             [
                 int.from_bytes(
-                    hashlib.sha256(f"{seed}:{key}".encode()).digest()[:4], "little"
+                    hashlib.sha256(f"{prefix}{seed}:{key}".encode()).digest()[:4],
+                    "little",
                 )
                 for key in motion_keys
             ],
@@ -62,8 +69,22 @@ class MotionConditionRandom:
         return ((x >> 8).float() / 16777216.0).reshape(shape)
 
 
-def evaluation_settings(configs, assigned, task, prior_config, seed):
+def evaluation_settings(
+    configs,
+    assigned,
+    task,
+    prior_config,
+    seed,
+    *,
+    temperature=1.0,
+    top_p=1.0,
+    sampling_seed=0,
+):
     """Serializable protocol identity for reports and best-checkpoint selection."""
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError("temperature must be finite and non-negative")
+    if not 0 < top_p <= 1:
+        raise ValueError("top_p must be in (0, 1]")
     criteria = {
         index: {
             name: {
@@ -82,8 +103,16 @@ def evaluation_settings(configs, assigned, task, prior_config, seed):
     return {
         "protocol": PROTOCOL,
         "task": task,
-        "seed": seed,
-        "temperature": 0.0,
+        "seed": seed,  # Condition seed; keep the existing report field name.
+        "temperature": temperature,
+        "codebook_autoregressive": prior_config.codebook_autoregressive,
+        "decoding_strategy": "categorical" if temperature > 0 else "greedy",
+        # Greedy decoding draws nothing and truncates nothing, so neither its
+        # seed nor top_p may change the protocol identity.
+        "top_p": top_p if temperature > 0 else None,
+        "sampling_seed": sampling_seed if temperature > 0 else None,
+        "sampling_algorithm": SAMPLING_ALGORITHM if temperature > 0 else "greedy_v1",
+        "num_trials": 1,
         "human_visible_prob": prior_config.human_visible_prob,
         "object_visible_prob": prior_config.object_visible_prob,
         "mask_resample_prob": prior_config.mask_resample_prob,
@@ -96,6 +125,32 @@ def evaluation_settings(configs, assigned, task, prior_config, seed):
             for index in assigned
         },
     }
+
+
+def upgraded_settings(settings):
+    """Express v1 settings in v2 fields; v1 matches greedy non-AR v2 exactly."""
+    if not isinstance(settings, dict) or settings.get("protocol") != LEGACY_PROTOCOL:
+        return settings
+    return {
+        **settings,
+        "protocol": PROTOCOL,
+        "codebook_autoregressive": False,
+        "decoding_strategy": "greedy",
+        "top_p": None,
+        "sampling_seed": None,
+        "sampling_algorithm": "greedy_v1",
+        "num_trials": 1,
+    }
+
+
+def compatible_best_evaluation(best, settings):
+    """Discard best scores measured under a different evaluation protocol."""
+    if best is None or settings is None:
+        return best
+    saved = best.get("settings")
+    if isinstance(saved, dict):
+        saved = {key: upgraded_settings(value) for key, value in saved.items()}
+    return best if saved == settings else None
 
 
 def filtered_summaries(records, filter_document):
@@ -171,14 +226,19 @@ def evaluate_prior_sources(
     rank,
     *,
     seed=0,
+    temperature=1.0,
+    top_p=1.0,
+    sampling_seed=0,
 ):
-    """Stage-one evaluation of argmax prior actions under fixed sparse conditions.
+    """One evaluation of sampled prior actions under fixed sparse conditions.
 
     Preserves the caller's Python, NumPy and Torch RNG state and training mode.
     """
     from protomotions.agents.joint_prior.runtime import LivePriorPolicy
     from protomotions.agents.multi_source_distill.runtime import evaluate_sources
 
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError("temperature must be finite and non-negative")
     keys = []
     for source_index, local_id in zip(
         source_ids.cpu().tolist(), local_ids.cpu().tolist()
@@ -209,8 +269,12 @@ def evaluate_prior_sources(
                 model,
                 env,
                 task,
-                temperature=0.0,
+                temperature=temperature,
+                top_p=top_p,
                 random_source=MotionConditionRandom(env, keys, seed),
+                sampling_random_source=MotionConditionRandom(
+                    env, keys, sampling_seed, namespace=SAMPLING_ALGORITHM
+                ),
             )
             return evaluate_sources(
                 policy,

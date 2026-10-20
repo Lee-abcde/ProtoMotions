@@ -1,9 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """CPU joint-prior evaluation regressions; no simulator or motion assets."""
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -13,6 +14,7 @@ from protomotions.agents.joint_prior.conditioning import PriorConditioning
 from protomotions.agents.joint_prior.config import JointPriorConfig
 from protomotions.agents.joint_prior.evaluation import (
     PROTOCOL,
+    SAMPLING_ALGORITHM,
     MotionConditionRandom,
     evaluation_settings,
 )
@@ -86,6 +88,12 @@ def test_settings_record_every_teacher_criterion():
         configs, (0,), "hoi", JointPriorConfig(num_bodies=2), 3
     )
     assert settings["protocol"] == PROTOCOL and settings["seed"] == 3
+    assert settings["temperature"] == 1.0
+    assert settings["decoding_strategy"] == "categorical"
+    assert settings["sampling_seed"] == 0
+    assert settings["sampling_algorithm"] == SAMPLING_ALGORITHM
+    assert settings["codebook_autoregressive"] is False
+    assert settings["num_trials"] == 1
     criteria = settings["criteria"][0]
     assert set(criteria) == {"human_error", "root_height"}
     assert criteria["human_error"]["params"] == {"key_body_ids": [0], "threshold": 0.37}
@@ -96,7 +104,11 @@ def test_settings_record_every_teacher_criterion():
 
 
 @pytest.mark.parametrize("visible", [0.0, 1.0])
-def test_end_to_end_prior_rollout_is_repeatable_and_restores_state(tmp_path, visible):
+@pytest.mark.parametrize("autoregressive", [False, True])
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+def test_end_to_end_prior_rollout_is_repeatable_and_restores_state(
+    tmp_path, visible, autoregressive, temperature
+):
     # Hidden bodies are still scored: success is independent of visibility.
     import random
 
@@ -118,7 +130,12 @@ def test_end_to_end_prior_rollout_is_repeatable_and_restores_state(tmp_path, vis
 
     env = environment()
     model = JointPriorModel(
-        motor(), prior_config(human_visible_prob=visible, object_visible_prob=visible)
+        motor(),
+        prior_config(
+            human_visible_prob=visible,
+            object_visible_prob=visible,
+            codebook_autoregressive=autoregressive,
+        ),
     )
     model.train()
     env.motion_lib.motion_lengths = torch.tensor([0.4, 0.5])
@@ -167,8 +184,11 @@ def test_end_to_end_prior_rollout_is_repeatable_and_restores_state(tmp_path, vis
         update_state()
         return obs, {}
 
+    seen_actions = []
+
     def step(actions):
         assert torch.isfinite(actions).all()
+        seen_actions.append(actions.clone())
         env.progress_buf.add_(1)
         env.motion_manager.motion_times.add_(env.dt)
         update_state()
@@ -206,8 +226,28 @@ def test_end_to_end_prior_rollout_is_repeatable_and_restores_state(tmp_path, vis
         tmp_path,
         0,
     )
-    first = evaluate_prior_sources(*args, seed=9)
-    second = evaluate_prior_sources(*args, seed=9)
+    from protomotions.agents.multi_source_distill.runtime import evaluate_sources
+
+    with patch(
+        "protomotions.agents.multi_source_distill.runtime.evaluate_sources",
+        wraps=evaluate_sources,
+    ) as evaluate:
+        first = evaluate_prior_sources(
+            *args, seed=9, temperature=temperature, sampling_seed=17
+        )
+        evaluate.assert_called_once()
+        assert evaluate.call_args.kwargs.get("trials_per_motion", 1) == 1
+        policy = evaluate.call_args.args[0]
+        assert policy.temperature == temperature
+        assert policy.sampling_random_source is not None
+    first_actions = seen_actions.copy()
+    seen_actions.clear()
+    second = evaluate_prior_sources(
+        *args, seed=9, temperature=temperature, sampling_seed=17
+    )
+    assert len(first_actions) == len(seen_actions)
+    for left, right in zip(first_actions, seen_actions):
+        torch.testing.assert_close(left, right, rtol=0, atol=0)
     assert first == second
     assert [r["success"] for r in first] == [False, True]
     assert first[0]["failure_components"] == ["human_error"]

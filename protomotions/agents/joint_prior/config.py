@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ class JointPriorConfig:
     num_layers: int = 4
     num_heads: int = 4
     feedforward_dim: int = 1024
+    # False preserves the architecture of checkpoints written before AR support.
+    codebook_autoregressive: bool = False
 
     def __post_init__(self):
         if (

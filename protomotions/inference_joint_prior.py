@@ -1,10 +1,11 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Single-source viewer and joint-PVQ evaluation for a joint prior."""
 
 import argparse
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -75,6 +76,12 @@ def parser():
         "--eval-seed", type=int, default=0, help="Fixed evaluation condition seed"
     )
     p.add_argument(
+        "--eval-sampling-seed",
+        type=int,
+        default=0,
+        help="Fixed per-motion code sampling seed for the single evaluation trial",
+    )
+    p.add_argument(
         "--hoi-teacher-filter",
         help="HOI teacher filter used in training, for filtered_summary; defaults "
         "to the copy beside the checkpoint and must match the training digest",
@@ -85,8 +92,16 @@ def parser():
     p.add_argument(
         "--temperature",
         type=float,
-        default=0.0,
-        help="0: argmax; positive: sample categorical codes",
+        help="Code sampling temperature; 0 selects greedy (not the joint mode). "
+        "Defaults to 1 for autoregressive priors and 0 for factorized ones, "
+        "whose independent per-codebook draws ignore code correlations",
+    )
+    p.add_argument(
+        "--top-p",
+        type=float,
+        default=1.0,
+        help="Nucleus sampling: sample each code only from the most probable "
+        "codes whose mass first exceeds this; 1 keeps all codes",
     )
     return p
 
@@ -121,16 +136,19 @@ def run(args):
         launch_isaaclab,
     )
 
-    if args.temperature < 0:
-        raise ValueError("temperature must be non-negative")
+    if args.temperature is not None and (
+        not math.isfinite(args.temperature) or args.temperature < 0
+    ):
+        raise ValueError("temperature must be finite and non-negative")
+    if not 0 < args.top_p <= 1:
+        raise ValueError("top-p must be in (0, 1]")
     if args.evaluate and (
-        args.temperature != 0
-        or args.reference_body_ids is not None
+        args.reference_body_ids is not None
         or args.full_object_reference
         or args.motion_id is not None
     ):
         raise ValueError(
-            "--evaluate uses fixed random masks, all motions and temperature=0; "
+            "--evaluate uses fixed random masks and all motions; "
             "viewer condition/motion overrides are not supported"
         )
     manifest = load_manifest(args.distillation_sources)
@@ -140,6 +158,9 @@ def run(args):
     source = manifest.sources[index]
     model, saved = load_prior_checkpoint(args.checkpoint, args.device)
     model.eval()
+    if args.temperature is None:
+        args.temperature = 1.0 if model.config.codebook_autoregressive else 0.0
+        print(f"Code sampling temperature: {args.temperature}", flush=True)
     body_ids = args.reference_body_ids
     if body_ids is not None:
         if any(i < 0 or i >= model.config.num_bodies for i in body_ids):
@@ -216,6 +237,7 @@ def run(args):
             env,
             source.task,
             args.temperature,
+            top_p=args.top_p,
             reference_body_ids=body_ids,
             full_object_reference=args.full_object_reference,
         )
@@ -247,13 +269,23 @@ def run(args):
                 output,
                 slot,
                 seed=args.eval_seed,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                sampling_seed=args.eval_sampling_seed,
             )
             report = {
                 "protocol": PROTOCOL,
                 "checkpoint": str(Path(args.checkpoint).resolve()),
                 "iteration": saved.get("iteration"),
                 "evaluation_settings": evaluation_settings(
-                    configs, assigned, source.task, model.config, args.eval_seed
+                    configs,
+                    assigned,
+                    source.task,
+                    model.config,
+                    args.eval_seed,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    sampling_seed=args.eval_sampling_seed,
                 ),
                 "hoi_teacher_filter": str(filter_path) if filter_path else None,
                 **filtered_summaries(records, filter_document),
@@ -267,7 +299,16 @@ def run(args):
             )
             (
                 output
-                / f"eval_prior_{source.id}{shard_suffix}_seed_{args.eval_seed}.json"
+                / (
+                    f"eval_prior_{source.id}{shard_suffix}_v2_seed_{args.eval_seed}"
+                    + (
+                        f"_temperature_{args.temperature}"
+                        + (f"_top_p_{args.top_p}" if args.top_p < 1 else "")
+                        + f"_sampling_seed_{args.eval_sampling_seed}.json"
+                        if args.temperature > 0
+                        else "_greedy.json"
+                    )
+                )
             ).write_text(json.dumps(report, indent=2))
             print(
                 json.dumps(
