@@ -20,6 +20,12 @@ from protomotions.agents.evaluators.mimic_evaluator import (
     MimicEpisodeContext,
     MimicEvaluator,
 )
+from protomotions.envs.context_views import EnvContext
+from protomotions.envs.mdp_component import MdpComponent
+from protomotions.envs.terminations.tracking import (
+    mean_body_pos_error,
+    mean_body_rot_error,
+)
 
 
 class _Fabric:
@@ -176,6 +182,96 @@ def _evaluator(tmp_path, num_envs=2, **config_overrides):
     agent = _Agent(env, tmp_path)
     evaluator = MimicEvaluator(agent, _Fabric(), _config(**config_overrides))
     return evaluator
+
+
+def _tracking_components():
+    return {
+        "gt_error": MdpComponent(
+            mean_body_pos_error,
+            {
+                "current_rigid_body_pos": EnvContext.current.rigid_body_pos,
+                "ref_rigid_body_pos": EnvContext.mimic.ref_state.rigid_body_pos,
+            },
+            {"threshold": 0.5},
+            compile=False,
+        ),
+        "gr_error": MdpComponent(
+            mean_body_rot_error,
+            {
+                "current_rigid_body_rot": EnvContext.current.rigid_body_rot,
+                "ref_rigid_body_rot": EnvContext.mimic.ref_state.rigid_body_rot,
+            },
+            compile=False,
+        ),
+    }
+
+
+def test_mimic_reports_body_and_finger_errors_without_changing_success(tmp_path):
+    env = _Env(num_envs=2)
+    # Deliberately interleave fingers and body to exercise name-based indexing.
+    env.robot_config.kinematic_info.body_names = [
+        "L_Index1",
+        "Pelvis",
+        "R_Thumb3",
+        "L_Wrist",
+        "R_Wrist",
+    ]
+    current_pos = torch.zeros(2, 5, 3)
+    ref_pos = current_pos.clone()
+    ref_pos[:, [0, 2], 0] = 1.0
+    current_rot = torch.zeros(2, 5, 4)
+    current_rot[..., 3] = 1.0  # xyzw quaternion convention
+    ref_rot = current_rot.clone()
+    ref_rot[:, [0, 2], 2:] = 2**-0.5  # 90 degrees around z
+    env.context = SimpleNamespace(
+        current=SimpleNamespace(rigid_body_pos=current_pos, rigid_body_rot=current_rot),
+        mimic=SimpleNamespace(
+            ref_state=SimpleNamespace(rigid_body_pos=ref_pos, rigid_body_rot=ref_rot)
+        ),
+    )
+    config = _config(
+        evaluation_components=_tracking_components(), collect_trajectory_metrics=False
+    )
+    evaluator = MimicEvaluator(_Agent(env, tmp_path), _Fabric(), config)
+    assert set(config.evaluation_components) == {"gt_error", "gr_error"}
+    evaluator._init_eval_component_buffers(2)
+    ids = torch.arange(2)
+    evaluator._check_evaluation_failures(ids, ids)
+    # Second frame: only motion 1 fails overall, despite both having finger
+    # errors > 0.5 on the first frame.
+    ref_pos[1, :, 0] = 2.0
+    evaluator._check_evaluation_failures(ids, ids)
+    ref_pos[1, :, 0] = 4.0
+    evaluator._check_evaluation_failures(ids, ids)
+    metrics, score, count = evaluator.process_eval_results()
+
+    assert count == 2
+    assert score == pytest.approx(0.5)
+    assert metrics["eval/gt_error/failure_rate"] == pytest.approx(0.5)
+    assert metrics["eval/gt_error_fingers/mean"] == pytest.approx((1 + 7 / 3) / 2)
+    assert metrics["eval/gt_error_body/mean"] == pytest.approx(1.0)
+    assert metrics["eval/gt_error_fingers/max"] == pytest.approx(4.0)
+    assert metrics["eval/gt_error_body/min"] == pytest.approx(0.0)
+    assert metrics["eval/gr_error_fingers/mean"] == pytest.approx(torch.pi / 2)
+    assert metrics["eval/gr_error_body/mean"] == pytest.approx(0.0)
+    assert metrics["eval/gt_error/mean"] == pytest.approx((0.4 + 6.4 / 3) / 2)
+    assert metrics["eval/gr_error/mean"] == pytest.approx(torch.pi / 5)
+    assert metrics["eval/errors/until_failure/gt_error_fingers/mean"] == pytest.approx(
+        (1 + 1.5) / 2
+    )
+    assert not any(
+        key.endswith("/failure_rate") and ("_body/" in key or "_fingers/" in key)
+        for key in metrics
+    )
+
+
+@pytest.mark.parametrize("body_names", [[], ["Pelvis", "L_Wrist"], ["L_Index1"]])
+def test_mimic_skips_empty_body_groups(tmp_path, body_names):
+    env = _Env()
+    env.robot_config.kinematic_info.body_names = body_names
+    config = _config(evaluation_components=_tracking_components())
+    evaluator = MimicEvaluator(_Agent(env, tmp_path), _Fabric(), config)
+    assert set(evaluator.config.evaluation_components) == {"gt_error", "gr_error"}
 
 
 def _metric(num_motions=3, max_steps=4, features=2):

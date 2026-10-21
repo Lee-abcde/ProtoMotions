@@ -28,6 +28,8 @@ Includes:
 - Value functions for evaluation metrics
 """
 
+from typing import Optional
+
 import torch
 from torch import Tensor
 
@@ -41,16 +43,21 @@ from protomotions.utils.rotations import calc_heading_quat_inv, quat_diff_norm, 
 def mean_body_pos_error(
     current_rigid_body_pos: Tensor,
     ref_rigid_body_pos: Tensor,
+    body_ids: Optional[Tensor] = None,
 ) -> Tensor:
     """Mean body position error across all bodies.
 
     Args:
         current_rigid_body_pos: Current body positions [num_envs, num_bodies, 3].
         ref_rigid_body_pos: Reference body positions [num_envs, num_bodies, 3].
+        body_ids: Optional body indices to average; None includes all bodies.
 
     Returns:
         Mean position error per env [num_envs] in meters.
     """
+    if body_ids is not None:
+        current_rigid_body_pos = current_rigid_body_pos[:, body_ids]
+        ref_rigid_body_pos = ref_rigid_body_pos[:, body_ids]
     per_body_err = (ref_rigid_body_pos - current_rigid_body_pos).pow(2).sum(-1).sqrt()
     return per_body_err.mean(-1)
 
@@ -75,16 +82,21 @@ def max_body_pos_error(
 def mean_body_rot_error(
     current_rigid_body_rot: Tensor,
     ref_rigid_body_rot: Tensor,
+    body_ids: Optional[Tensor] = None,
 ) -> Tensor:
     """Mean body rotation error across all bodies.
 
     Args:
         current_rigid_body_rot: Current body rotations [num_envs, num_bodies, 4].
         ref_rigid_body_rot: Reference body rotations [num_envs, num_bodies, 4].
+        body_ids: Optional body indices to average; None includes all bodies.
 
     Returns:
         Mean rotation error per env [num_envs] in radians.
     """
+    if body_ids is not None:
+        current_rigid_body_rot = current_rigid_body_rot[:, body_ids]
+        ref_rigid_body_rot = ref_rigid_body_rot[:, body_ids]
     per_body_err = quat_diff_norm(current_rigid_body_rot, ref_rigid_body_rot, True)
     return per_body_err.mean(-1)
 

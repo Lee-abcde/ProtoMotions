@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import math
+from copy import copy
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -16,7 +17,12 @@ from protomotions.agents.evaluators.config import MimicEvaluatorConfig
 from protomotions.agents.evaluators.metrics import MotionMetrics
 from protomotions.agents.evaluators.jitter import StreamingJitter
 from protomotions.components.motion_lib import MotionLib
+from protomotions.envs.mdp_component import MdpComponent
 from protomotions.envs.motion_manager.mimic_motion_manager import MimicMotionManager
+from protomotions.envs.terminations.tracking import (
+    mean_body_pos_error,
+    mean_body_rot_error,
+)
 from protomotions.utils.motion_interpolation_utils import interpolate_quat
 
 logger = logging.getLogger(__name__)
@@ -35,6 +41,52 @@ class MimicEvaluator(BaseEvaluator):
 
     def __init__(self, agent: Any, fabric: Any, config: MimicEvaluatorConfig):
         super().__init__(agent, fabric, config)
+        self._add_body_group_evaluation_components()
+
+    def _add_body_group_evaluation_components(self) -> None:
+        """Split SMPL-X tracking errors into fingers and body (including wrists)."""
+        body_names = getattr(self.env.robot_config.kinematic_info, "body_names", ())
+        finger_names = {
+            f"{side}_{finger}{segment}"
+            for side in ("L", "R")
+            for finger in ("Thumb", "Index", "Middle", "Ring", "Pinky")
+            for segment in (1, 2, 3)
+        }
+        groups = {
+            "fingers": [i for i, name in enumerate(body_names) if name in finger_names],
+            "body": [
+                i for i, name in enumerate(body_names) if name not in finger_names
+            ],
+        }
+        if not all(groups.values()):
+            return
+
+        # Keep the checkpoint/agent config intact; these are reporting-only metrics.
+        self.config = copy(self.config)
+        self.config.evaluation_components = dict(self.config.evaluation_components)
+        for name, compute_func in (
+            ("gt_error", mean_body_pos_error),
+            ("gr_error", mean_body_rot_error),
+        ):
+            component = self.config.evaluation_components.get(name)
+            if component is None or component.compute_func is not compute_func:
+                continue
+            if component.static_params.get("body_ids") is not None:
+                continue
+            for group, indices in groups.items():
+                self.config.evaluation_components.setdefault(
+                    f"{name}_{group}",
+                    MdpComponent(
+                        compute_func=compute_func,
+                        dynamic_vars=dict(component.dynamic_vars),
+                        static_params={
+                            "body_ids": torch.tensor(
+                                indices, dtype=torch.long, device=self.device
+                            )
+                        },
+                        compile=component.compile,
+                    ),
+                )
 
     def _select_evaluation_actions(self, model_outs: Dict[str, Tensor]) -> Tensor:
         """Select the configured model output for full or interactive evaluation."""
