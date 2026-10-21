@@ -261,6 +261,15 @@ def create_parser():
         help="Repeat full evaluation this many times and report per-run plus averaged metrics.",
     )
     parser.add_argument(
+        "--eval-output",
+        type=str,
+        default=None,
+        help=(
+            "JSON output path for ordinary --full-eval (including --repeat-eval). "
+            "Defaults to a timestamped file under <checkpoint-dir>/evaluations/."
+        ),
+    )
+    parser.add_argument(
         "--best-trial-output",
         type=str,
         default=None,
@@ -409,6 +418,7 @@ AppLauncher = import_simulator_before_torch(args.simulator)
 
 # Now safe to import everything else including torch
 import json  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
 import logging  # noqa: E402
 import math  # noqa: E402
 import os  # noqa: E402
@@ -587,6 +597,51 @@ def _average_evaluation_logs(evaluation_runs: list[dict]) -> dict:
     for key in keys:
         averaged[key] = sum(run[key] for run in evaluation_runs) / len(evaluation_runs)
     return averaged
+
+
+def _save_evaluation_results(
+    args,
+    motion_file: str | None,
+    runs: list[dict],
+    metrics: dict,
+    score: float | None,
+    num_eval_items: int | None,
+) -> Path:
+    """Save full-precision aggregate metrics and individual evaluation runs."""
+    created_at = datetime.now(timezone.utc)
+    checkpoint = Path(args.checkpoint).expanduser().resolve()
+    output_path = (
+        Path(args.eval_output).expanduser()
+        if args.eval_output is not None
+        else checkpoint.parent
+        / "evaluations"
+        / (
+            f"{checkpoint.stem}_{Path(motion_file).stem if motion_file else 'motions'}_"
+            f"{created_at.strftime('%Y%m%dT%H%M%S_%fZ')}.json"
+        )
+    )
+    summary = {
+        "created_at": created_at.isoformat(),
+        "checkpoint": str(checkpoint),
+        "motion_file": str(Path(motion_file).expanduser().resolve())
+        if motion_file is not None
+        else None,
+        "simulator": args.simulator,
+        "num_envs": args.num_envs,
+        "repeat_eval": args.repeat_eval,
+        "overrides": args.overrides,
+        "cli_args": vars(args),
+        "metrics": metrics,
+        "overall_score": score,
+        "items_evaluated": num_eval_items,
+        "runs": runs,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as stream:
+        json.dump(summary, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    print(f"Evaluation results saved to: {output_path.resolve()}", flush=True)
+    return output_path
 
 
 def _motion_names_for_evaluation(motion_lib) -> list[str]:
@@ -1689,6 +1744,13 @@ def main():
 
     if args.repeat_eval < 1:
         raise ValueError("--repeat-eval must be at least 1.")
+    if args.eval_output is not None:
+        if not args.full_eval:
+            raise ValueError("--eval-output requires --full-eval.")
+        if args.parallel_trials_per_motion is not None:
+            raise ValueError(
+                "Use --best-trial-output for --parallel-trials-per-motion."
+            )
     if args.parallel_trials_per_motion is not None:
         if not args.full_eval:
             raise ValueError("--parallel-trials-per-motion requires --full-eval.")
@@ -2195,6 +2257,7 @@ def main():
 
             _validate_full_motion_coverage(agent.evaluator)
             evaluation_runs = []
+            run_results = []
             evaluated_scores = []
             eval_item_counts = []
 
@@ -2204,6 +2267,14 @@ def main():
                     agent.evaluator.evaluate()
                 )
                 evaluation_runs.append(evaluation_log)
+                run_results.append(
+                    {
+                        "run": run_idx,
+                        "metrics": evaluation_log,
+                        "overall_score": evaluated_score,
+                        "items_evaluated": num_eval_items,
+                    }
+                )
                 eval_item_counts.append(num_eval_items)
                 if evaluated_score is not None:
                     evaluated_scores.append(evaluated_score)
@@ -2227,6 +2298,14 @@ def main():
                 averaged_log,
                 averaged_score,
                 num_eval_items=total_eval_items,
+            )
+            _save_evaluation_results(
+                args,
+                motion_lib_config.motion_file,
+                run_results,
+                averaged_log,
+                averaged_score,
+                total_eval_items,
             )
         else:
             agent.evaluator.simple_test_policy(collect_metrics=True)

@@ -3,6 +3,7 @@
 
 """Script-level tests for inference_agent.py with runtime boundaries faked."""
 
+import json
 import runpy
 import sys
 from pathlib import Path
@@ -447,16 +448,21 @@ def test_inference_pretrained_override_parser_supports_multiple_modules(
     )
 
 
+@pytest.mark.parametrize("repeat_eval", [1, 2])
+@pytest.mark.parametrize("custom_output", [False, True])
 def test_inference_main_full_eval_switches_simulator_and_applies_cli_overrides(
     monkeypatch,
     tmp_path,
     capsys,
+    repeat_eval,
+    custom_output,
 ):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     checkpoint = run_dir / "last.ckpt"
     checkpoint.write_text("checkpoint")
     configs = _write_resolved_configs(run_dir)
+    output_path = tmp_path / "reports" / "evaluation.json"
     module = _load_inference_agent_globals(
         monkeypatch,
         checkpoint,
@@ -470,6 +476,9 @@ def test_inference_main_full_eval_switches_simulator_and_applies_cli_overrides(
             "override.motion",
             "--scenes-file",
             "none",
+            "--repeat-eval",
+            str(repeat_eval),
+            *(["--eval-output", str(output_path)] if custom_output else []),
             "--overrides",
             "env.foo=1",
         ],
@@ -568,6 +577,29 @@ def test_inference_main_full_eval_switches_simulator_and_applies_cli_overrides(
     output = capsys.readouterr().out
     assert "EVALUATION RESULTS" in output
     assert "Overall Score: 3.750000" in output
+    assert "Evaluation results saved to:" in output
+    if not custom_output:
+        saved_paths = list((run_dir / "evaluations").glob("last_override_*.json"))
+        assert len(saved_paths) == 1
+        output_path = saved_paths[0]
+    saved = json.loads(output_path.read_text())
+    assert saved["metrics"] == {"score/a": 1.25, "score/b": 2.5}
+    assert saved["overall_score"] == 3.75
+    assert saved["items_evaluated"] == 2 * repeat_eval
+    assert saved["checkpoint"] == str(checkpoint.resolve())
+    assert saved["motion_file"] == str(Path("override.motion").resolve())
+    assert saved["num_envs"] == 3
+    assert saved["overrides"] == ["env.foo=1"]
+    assert saved["repeat_eval"] == repeat_eval
+    assert saved["runs"] == [
+        {
+            "run": i,
+            "metrics": {"score/a": 1.25, "score/b": 2.5},
+            "overall_score": 3.75,
+            "items_evaluated": 2,
+        }
+        for i in range(1, repeat_eval + 1)
+    ]
     assert _FakeFabric.instances[0].kwargs["accelerator"] == "gpu"
     assert configs["simulator"].num_envs == 1
     build_call = next(call for call in calls if call[0] == "build_components")

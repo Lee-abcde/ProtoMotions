@@ -445,7 +445,15 @@ class MimicEvaluator(BaseEvaluator):
 
     def run_evaluation(self) -> None:
         """Run evaluation across multiple motions."""
-        for env_ids, motion_ids in self._build_eval_batches():
+        batches = self._build_eval_batches()
+        total_motions = sum(motion_ids.numel() for _, motion_ids in batches)
+        completed_motions = 0
+        for batch_idx, (env_ids, motion_ids) in enumerate(batches, start=1):
+            print(
+                f"Evaluating batch {batch_idx}/{len(batches)} "
+                f"({motion_ids.numel()} motions)",
+                flush=True,
+            )
             motion_lengths = self.motion_lib.get_motion_length(motion_ids)
             max_len = min(
                 (motion_lengths.max() / self.env.dt).floor().long().item(),
@@ -460,6 +468,13 @@ class MimicEvaluator(BaseEvaluator):
                 .clamp(max=self.config.max_eval_steps),
             )
             self.evaluate_episode(env_ids, max_len)
+            completed_motions += motion_ids.numel()
+            print(
+                f"Completed batch {batch_idx}/{len(batches)}: "
+                f"{completed_motions}/{total_motions} motions "
+                f"({100 * completed_motions / total_motions:.1f}%)",
+                flush=True,
+            )
 
     def _build_eval_batches(self):
         """Build list of (env_ids, motion_ids) batches to evaluate.
@@ -472,7 +487,6 @@ class MimicEvaluator(BaseEvaluator):
         )
 
         if fixed_motion_ids.numel() > 0:
-            print(f"Only evaluating fixed motions: {fixed_motion_ids}")
             return [(first_env_indices, fixed_motion_ids)]
 
         num_motions = self.motion_lib.num_motions()
@@ -485,10 +499,6 @@ class MimicEvaluator(BaseEvaluator):
             else None
         )
         if compatible_batches is not None:
-            print(
-                "Evaluating motions in "
-                f"{len(compatible_batches)} object-compatible batches"
-            )
             return compatible_batches
 
         batches = []
@@ -496,7 +506,6 @@ class MimicEvaluator(BaseEvaluator):
             end = min(start + self.num_envs, num_motions)
             motion_ids = torch.arange(start, end, device=self.device)
             env_ids = torch.arange(0, motion_ids.numel(), device=self.device)
-            print(f"Evaluating motions {start} to {end}, out of total {num_motions}")
             batches.append((env_ids, motion_ids))
         return batches
 
