@@ -421,6 +421,26 @@ class MimicEvaluator(BaseEvaluator):
         self.env.simulator.park_envs(inactive_env_ids)
         return inactive_env_ids
 
+    def _fill_idle_envs(self, active_env_ids: Tensor) -> Tensor:
+        """Restart the current motion from frame 0 on every env outside a batch.
+
+        At 2048 envs, a batch that parks over a thousand envs below the terrain
+        lets some robots reset in the same step lose ground contact and fall
+        through the floor. Fillers keep every env on the terrain instead. Each
+        idle env replays the motion it already holds, which is compatible with
+        its scene, and is never recorded because the evaluation hooks only see
+        ``active_env_ids``. ``cleanup_after_evaluation`` restores the
+        pre-evaluation motion and simulator state.
+
+        Returns:
+            Environment IDs that run a filler motion in this batch.
+        """
+        idle = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        idle[active_env_ids] = False
+        filler_env_ids = torch.nonzero(idle, as_tuple=False).flatten()
+        self.motion_manager.motion_times[filler_env_ids] = 0.0
+        return filler_env_ids
+
     def evaluate_episode(self, env_ids: torch.Tensor, max_steps: int) -> None:
         """Run a single episode batch, optionally with EMA action smoothing.
 
@@ -432,12 +452,13 @@ class MimicEvaluator(BaseEvaluator):
 
         self._on_episode_start(env_ids)
 
-        # Park envs that aren't part of this batch so they don't generate
-        # PhysX broadphase pairs / contacts during the eval. Pre-eval state is
-        # restored later in cleanup_after_evaluation via env.restore_state().
-        inactive_env_ids = self._park_inactive_envs(env_ids)
+        # Envs outside this batch run an unrecorded filler motion instead of
+        # being parked below the terrain.
+        filler_env_ids = self._fill_idle_envs(env_ids)
 
-        obs, _ = self.env.reset(env_ids, **self._get_reset_kwargs())
+        obs, _ = self.env.reset(
+            torch.cat([env_ids, filler_env_ids]), **self._get_reset_kwargs()
+        )
         self.agent.pre_collect_step(0)
         obs = self.agent.add_agent_info_to_obs(obs)
         obs_td = self.agent.obs_dict_to_tensordict(obs)
@@ -454,15 +475,6 @@ class MimicEvaluator(BaseEvaluator):
         for step_idx in range(max_steps):
             model_outs = self.agent.model(obs_td)
             actions = self._select_evaluation_actions(model_outs)
-
-            # Parked environments remain part of the vectorized PhysX scene
-            # and advance on every env.step(). Do not let arbitrary policy
-            # outputs actuate robots that have no active evaluation motion.
-            # A zero normalized action maps to the stable default PD pose for
-            # the standard mimic action configurations.
-            if inactive_env_ids.numel() > 0:
-                actions = actions.clone()
-                actions[inactive_env_ids] = 0.0
 
             # Apply EMA smoothing (deployment simulation)
             if ema_alpha is not None:

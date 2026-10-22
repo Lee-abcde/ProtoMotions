@@ -517,6 +517,35 @@ def test_mimic_evaluate_episode_applies_action_ema_and_records_actions(tmp_path)
     assert torch.equal(evaluator._metrics["actions"].data[0, 1], torch.full((2,), 1.5))
 
 
+def test_mimic_evaluate_episode_fills_idle_envs_instead_of_parking(tmp_path):
+    evaluator = _evaluator(tmp_path, num_envs=4)
+    motion_manager = evaluator.motion_manager
+    motion_manager.motion_ids = torch.tensor([2, 0, 1, 2])
+    evaluator._episode_ctx = MimicEpisodeContext(
+        motion_ids=torch.tensor([0, 1]),
+        frame_limits=torch.tensor([2, 2]),
+    )
+    evaluator._metrics = {"actions": _metric(num_motions=2, features=2)}
+    checked = []
+    evaluator._check_evaluation_failures = (
+        lambda active_env_ids, active_motion_ids: checked.append(
+            active_env_ids.clone()
+        )
+    )
+
+    evaluator.evaluate_episode(torch.tensor([1, 3]), max_steps=2)
+
+    reset_env_ids, _ = evaluator.env.reset_calls[0]
+    assert torch.equal(reset_env_ids, torch.tensor([1, 3, 0, 2]))
+    assert evaluator.env.simulator.parked == []
+    # Fillers replay the motion they already hold, from frame 0.
+    assert torch.equal(motion_manager.motion_ids, torch.tensor([2, 0, 1, 1]))
+    assert torch.equal(motion_manager.motion_times, torch.zeros(4))
+    # Fillers are driven by the policy, but only the batch is evaluated.
+    assert torch.equal(evaluator.env.step_actions[0], torch.ones(4, 2))
+    assert all(torch.equal(env_ids, torch.tensor([1, 3])) for env_ids in checked)
+
+
 def test_mimic_episode_reports_both_jitter_windows_without_trajectory_buffers(tmp_path):
     evaluator = _evaluator(
         tmp_path, compute_jitter=True, collect_trajectory_metrics=False
