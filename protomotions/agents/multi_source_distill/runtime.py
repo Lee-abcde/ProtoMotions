@@ -478,6 +478,22 @@ def summarize_evaluation(records: list[dict]) -> dict:
                 k: v / max(1, len(evaluated)) for k, v in means.items()
             },
         }
+        jitter_modes = sorted(
+            {mode for r in evaluated for mode in r.get("jitter_by_mode", {})}
+        )
+        if jitter_modes:
+            result[key]["jitter_by_mode"] = {}
+            for mode in jitter_modes:
+                values = [
+                    r["jitter_by_mode"][mode]
+                    for r in evaluated
+                    if mode in r.get("jitter_by_mode", {})
+                    and math.isfinite(r["jitter_by_mode"][mode])
+                ]
+                result[key]["jitter_by_mode"][mode] = {
+                    "mean": sum(values) / len(values) if values else None,
+                    "num_valid": len(values),
+                }
     return result
 
 

@@ -84,6 +84,11 @@ def parser():
         help="Run the complete-motion protocol for this source instead of the viewer",
     )
     p.add_argument(
+        "--compute-jitter",
+        action="store_true",
+        help="Report whole-body acceleration jitter (m/s^2) during evaluation",
+    )
+    p.add_argument(
         "--output-dir",
         help="Where --evaluate writes its report; defaults to the checkpoint directory",
     )
@@ -204,6 +209,8 @@ def run(args):
     model_config = model_config_from_checkpoint(saved)
     cfg = load_source_config(source, evaluate=args.evaluate)
     validate_source_against_checkpoint(saved, source, cfg)
+    if args.compute_jitter:
+        cfg["agent"].evaluator.compute_jitter = True
 
     configs = [None] * len(manifest.sources)
     configs[index] = cfg
