@@ -368,15 +368,15 @@ def evaluate_sources(
     Supply both sampling_curriculum and evaluation_iteration to update student
     sampling weights, or omit both for evaluation without a curriculum update.
     Validate the update before constructing an evaluator or running any waves.
+    Repeated trials are evaluation-only: the curriculum expects one record per
+    motion, while the student and teachers are stateless across trials.
     """
     if (sampling_curriculum is None) != (evaluation_iteration is None):
         raise ValueError(
             "sampling_curriculum and evaluation_iteration must be provided together"
         )
-    if trials_per_motion != 1 and (
-        teacher_router is None or sampling_curriculum is not None
-    ):
-        raise ValueError("Repeated trials are only supported for teacher evaluation")
+    if trials_per_motion != 1 and sampling_curriculum is not None:
+        raise ValueError("Repeated trials cannot update the sampling curriculum")
     if sampling_curriculum is not None:
         sampling_curriculum.validate_update_iteration(evaluation_iteration)
 

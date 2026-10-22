@@ -89,6 +89,13 @@ def parser():
         help="Report whole-body acceleration jitter (m/s^2) during evaluation",
     )
     p.add_argument(
+        "--trials-per-motion",
+        type=int,
+        default=1,
+        help="Evaluate each motion this many times and report best-of-K metrics, "
+        "as inference_agent --parallel-trials-per-motion does",
+    )
+    p.add_argument(
         "--output-dir",
         help="Where --evaluate writes its report; defaults to the checkpoint directory",
     )
@@ -181,6 +188,22 @@ def object_curriculum_envs(source, cfg: dict) -> int:
     return len(types) * per_type
 
 
+def best_trial_report(records: list[dict], trials_per_motion: int) -> dict:
+    """Aggregate repeated-trial records exactly like inference_agent's best trials."""
+    from protomotions.agents.evaluators.inference_trials import aggregate_best_trials
+
+    trials = [[] for _ in range(trials_per_motion)]
+    for record in sorted(records, key=lambda r: (r["trial_index"], r["motion_id"])):
+        trials[record["trial_index"]].append(record)
+    if any(
+        [r["motion_id"] for r in trial] != [r["motion_id"] for r in trials[0]]
+        for trial in trials
+    ):
+        raise ValueError("Every trial must cover the same motions")
+    names = [Path(r["motion_name"]).stem for r in trials[0]]
+    return aggregate_best_trials([{"motions": trial} for trial in trials], names)
+
+
 def build_evaluator(agent, env, eval_config):
     """Mimic evaluation criteria from the teacher, reading the student action key."""
     from protomotions.agents.evaluators.mimic_evaluator import MimicEvaluator
@@ -202,6 +225,10 @@ def run(args):
         summarize_evaluation,
     )
 
+    if args.trials_per_motion < 1:
+        raise ValueError("--trials-per-motion must be at least 1")
+    if args.trials_per_motion > 1 and not args.evaluate:
+        raise ValueError("--trials-per-motion requires --evaluate")
     manifest = load_manifest(args.distillation_sources)
     index = resolve_source(manifest, args.source)
     source = manifest.sources[index]
@@ -287,18 +314,31 @@ def run(args):
                 output_dir,
                 slot,
                 teacher_router=router,
+                trials_per_motion=args.trials_per_motion,
             )
             report = {
                 "policy": args.policy,
                 "source_id": source.id,
                 "iteration": saved["iteration"],
-                "summary": summarize_evaluation(records),
-                "motions": records,
             }
-            path = output_dir / f"eval_local_{args.policy}_{source.id}.json"
+            if args.trials_per_motion == 1:
+                report["summary"] = summarize_evaluation(records)
+                report["motions"] = records
+                printed = report["summary"]
+                name = f"eval_local_{args.policy}_{source.id}.json"
+            else:
+                # summarize_evaluation keeps one record per motion, so it would
+                # silently report only the first trial.
+                report.update(best_trial_report(records, args.trials_per_motion))
+                printed = {k: v for k, v in report.items() if k != "motions"}
+                name = (
+                    f"eval_local_{args.policy}_{source.id}"
+                    f"_{args.trials_per_motion}x.json"
+                )
+            path = output_dir / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(report, indent=2))
-            print(json.dumps(report["summary"], indent=2), flush=True)
+            print(json.dumps(printed, indent=2), flush=True)
             print(f"Wrote {path}", flush=True)
             return
         agent = EvaluationAgent(model, env, source.task, output_dir, source_ids, router)
