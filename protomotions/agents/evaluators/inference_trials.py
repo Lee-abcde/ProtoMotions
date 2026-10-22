@@ -140,19 +140,6 @@ def _parallel_evaluation_compatibility(evaluator: Any) -> torch.Tensor:
     return compatibility
 
 
-def _mask_parallel_trial_actions(
-    actions: torch.Tensor,
-    inactive_env_ids: torch.Tensor,
-) -> torch.Tensor:
-    """Zero actions for environments that are parked outside this wave."""
-    if inactive_env_ids.numel() == 0:
-        return actions
-
-    actions = actions.clone()
-    actions[inactive_env_ids] = 0.0
-    return actions
-
-
 def _fill_idle_envs(
     env_ids: torch.Tensor,
     motion_ids: torch.Tensor,
@@ -167,20 +154,20 @@ def _fill_idle_envs(
     lets some robots reset in the same step lose ground contact and fall
     through the floor. Fillers keep every env on the terrain instead. They are
     appended after the wave's trials, never run longer than its longest trial,
-    and are not recorded. Envs without a compatible motion stay idle.
+    and are not recorded. The motion manager guarantees every env at least one
+    compatible motion.
     """
     idle = torch.ones(
         compatibility.shape[0], dtype=torch.bool, device=env_ids.device
     )
     idle[env_ids] = False
-    weights = compatibility.to(env_ids.device)[idle].float()
-    fillable = weights.sum(dim=-1) > 0
-    filler_env_ids = torch.nonzero(idle, as_tuple=False).flatten()[fillable]
+    filler_env_ids = torch.nonzero(idle, as_tuple=False).flatten()
     if filler_env_ids.numel() == 0:
         return env_ids, motion_ids, frame_limits
 
+    weights = compatibility.to(env_ids.device)[idle].float()
     filler_motion_ids = torch.multinomial(
-        weights[fillable].cpu(), 1, generator=generator
+        weights.cpu(), 1, generator=generator
     ).flatten().to(motion_ids.device)
     filler_frame_limits = torch.minimum(
         motion_frame_limits[filler_motion_ids], frame_limits.max()
@@ -309,7 +296,6 @@ def run_parallel_mimic_trials(
                 frame_limits=frame_limits,
             )
             evaluator._on_episode_start(env_ids)
-            inactive_env_ids = evaluator._park_inactive_envs(env_ids)
             obs, _ = evaluator.env.reset(
                 env_ids,
                 sample_flat=True,
@@ -368,14 +354,6 @@ def run_parallel_mimic_trials(
                         ema_alpha * actions
                         + (1.0 - ema_alpha) * previous_actions
                     )
-
-                # Every environment advances in the vectorized simulator, so
-                # prevent parked environments outside this wave from actuating.
-                actions = _mask_parallel_trial_actions(
-                    actions,
-                    inactive_env_ids,
-                )
-                if ema_alpha is not None:
                     previous_actions = actions.clone()
 
                 obs, _, _, _, _ = evaluator.env.step(actions)

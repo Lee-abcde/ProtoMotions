@@ -78,7 +78,6 @@ def test_parallel_trials_error_windows_and_unchanged_success(compute_jitter):
         initialize_eval=lambda: {},
         cleanup_after_evaluation=lambda: None,
         _select_evaluation_actions=lambda actions: actions,
-        _park_inactive_envs=lambda ids: torch.tensor([], dtype=torch.long),
     )
     motion_ids_per_env = torch.zeros(4, dtype=torch.long)
 
@@ -163,7 +162,7 @@ def test_parallel_trials_error_windows_and_unchanged_success(compute_jitter):
 def test_fill_idle_envs_uses_compatible_motions_within_the_wave_length():
     compatibility = torch.zeros(6, 4, dtype=torch.bool)
     compatibility[:3, :2] = True
-    compatibility[3:5, 2:] = True  # env 5 has no compatible motion
+    compatibility[3:, 2:] = True
 
     env_ids, motion_ids, frame_limits = _fill_idle_envs(
         torch.tensor([0, 3]),
@@ -175,7 +174,7 @@ def test_fill_idle_envs_uses_compatible_motions_within_the_wave_length():
     )
 
     assert env_ids.tolist()[:2] == [0, 3]
-    assert sorted(env_ids.tolist()[2:]) == [1, 2, 4]
+    assert sorted(env_ids.tolist()[2:]) == [1, 2, 4, 5]
     assert motion_ids.tolist()[:2] == [1, 2]
     assert frame_limits.tolist()[:2] == [30, 12]
     for env_id, motion_id, limit in zip(
@@ -187,7 +186,7 @@ def test_fill_idle_envs_uses_compatible_motions_within_the_wave_length():
 
 def test_parallel_trials_fill_idle_envs_without_recording_them():
     env = _TrialEnv()
-    reset_env_ids, parked_env_ids, contexts = [], [], []
+    reset_env_ids, contexts = [], []
 
     def reset(env_ids, **kwargs):
         reset_env_ids.append(env_ids.tolist())
@@ -202,10 +201,6 @@ def test_parallel_trials_fill_idle_envs_without_recording_them():
         eval_action_ema_alpha=None,
         compute_jitter=False,
     )
-
-    def park(env_ids):
-        parked_env_ids.append(env_ids.tolist())
-        return torch.tensor([], dtype=torch.long)
 
     evaluator = SimpleNamespace(
         env=env,
@@ -229,7 +224,6 @@ def test_parallel_trials_fill_idle_envs_without_recording_them():
         initialize_eval=lambda: {},
         cleanup_after_evaluation=lambda: None,
         _select_evaluation_actions=lambda actions: actions,
-        _park_inactive_envs=park,
         _on_episode_start=lambda env_ids: contexts.append(evaluator._episode_ctx),
         _component_manager=SimpleNamespace(
             execute_all=lambda configs, context: {"human_error": torch.zeros(4)}
@@ -240,7 +234,6 @@ def test_parallel_trials_fill_idle_envs_without_recording_them():
 
     # Three trials fill one wave; the fourth env runs an unrecorded filler.
     assert len(reset_env_ids) == 1 and sorted(reset_env_ids[0]) == [0, 1, 2, 3]
-    assert sorted(parked_env_ids[0]) == [0, 1, 2, 3]
     assert contexts[0].motion_ids.numel() == 4
     assert int(contexts[0].frame_limits[3]) <= 3
     assert env.total_steps == 3  # The filler does not extend the wave.

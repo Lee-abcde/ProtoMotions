@@ -393,34 +393,6 @@ class MimicEvaluator(BaseEvaluator):
             return float(min_weight)
         return float(min_weight)
 
-    def _park_inactive_envs(self, active_env_ids: Tensor) -> Tensor:
-        """Move envs not in ``active_env_ids`` far below the terrain.
-
-        With scene-paired motions, ``_build_eval_batches`` returns a single
-        batch whose ``env_ids`` (from ``get_unique_fixed_motions``) can be
-        much smaller than ``num_envs`` -- the remaining envs would otherwise
-        keep running physics with their (replicated) scenes, contributing
-        substantially to the PhysX broadphase pair budget and triggering
-        ``foundLostPairsCapacity`` overflow at large num_envs (silent contact
-        drops -> tunneling -> phantom failures).
-
-        Parking those envs at z << 0 removes their AABBs from the broadphase
-        active region without changing the policy's view of the rollout.
-
-        Returns:
-            Environment IDs that were parked. Evaluation uses this list to
-            keep policy actions from driving parked robots during the rollout.
-        """
-        if active_env_ids is None or active_env_ids.numel() >= self.num_envs:
-            return torch.empty(0, dtype=torch.long, device=self.device)
-        all_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        all_mask[active_env_ids] = False
-        inactive_env_ids = torch.nonzero(all_mask, as_tuple=False).flatten()
-        if inactive_env_ids.numel() == 0:
-            return inactive_env_ids
-        self.env.simulator.park_envs(inactive_env_ids)
-        return inactive_env_ids
-
     def _fill_idle_envs(self, active_env_ids: Tensor) -> Tensor:
         """Restart the current motion from frame 0 on every env outside a batch.
 

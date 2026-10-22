@@ -384,17 +384,6 @@ def test_mimic_motion_sampling_weights_handles_no_failures_and_zero_failure_disc
     )
 
 
-def test_mimic_parks_inactive_envs_only_when_batch_is_partial(tmp_path):
-    evaluator = _evaluator(tmp_path, num_envs=4)
-
-    evaluator._park_inactive_envs(torch.tensor([1, 3]))
-    evaluator._park_inactive_envs(torch.arange(4))
-    evaluator._park_inactive_envs(None)
-
-    assert len(evaluator.env.simulator.parked) == 1
-    assert torch.equal(evaluator.env.simulator.parked[0], torch.tensor([0, 2]))
-
-
 def test_mimic_build_eval_batches_prefers_fixed_motions_then_chunks_all_motions(tmp_path):
     evaluator = _evaluator(tmp_path, num_envs=2)
     evaluator.motion_manager.fixed = (
