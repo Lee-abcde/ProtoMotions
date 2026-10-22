@@ -153,6 +153,45 @@ def _mask_parallel_trial_actions(
     return actions
 
 
+def _fill_idle_envs(
+    env_ids: torch.Tensor,
+    motion_ids: torch.Tensor,
+    frame_limits: torch.Tensor,
+    compatibility: torch.Tensor,
+    motion_frame_limits: torch.Tensor,
+    generator: torch.Generator,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Give envs outside a wave a random compatible filler motion to run.
+
+    At 2048 envs, a wave that parks over a thousand envs below the terrain
+    lets some robots reset in the same step lose ground contact and fall
+    through the floor. Fillers keep every env on the terrain instead. They are
+    appended after the wave's trials, never run longer than its longest trial,
+    and are not recorded. Envs without a compatible motion stay idle.
+    """
+    idle = torch.ones(
+        compatibility.shape[0], dtype=torch.bool, device=env_ids.device
+    )
+    idle[env_ids] = False
+    weights = compatibility.to(env_ids.device)[idle].float()
+    fillable = weights.sum(dim=-1) > 0
+    filler_env_ids = torch.nonzero(idle, as_tuple=False).flatten()[fillable]
+    if filler_env_ids.numel() == 0:
+        return env_ids, motion_ids, frame_limits
+
+    filler_motion_ids = torch.multinomial(
+        weights[fillable].cpu(), 1, generator=generator
+    ).flatten().to(motion_ids.device)
+    filler_frame_limits = torch.minimum(
+        motion_frame_limits[filler_motion_ids], frame_limits.max()
+    )
+    return (
+        torch.cat([env_ids, filler_env_ids]),
+        torch.cat([motion_ids, filler_motion_ids]),
+        torch.cat([frame_limits, filler_frame_limits]),
+    )
+
+
 def _component_means(
     component_sums: Dict[str, torch.Tensor],
     component_counts: Dict[str, torch.Tensor],
@@ -234,17 +273,34 @@ def run_parallel_mimic_trials(
         ).floor().long().clamp(max=config.max_eval_steps)
         total_trials = num_motions * trials_per_motion
         completed_trials = 0
+        filler_generator = torch.Generator().manual_seed(seed)
 
         for wave_index, batch in enumerate(batches, start=1):
             env_ids = batch["env_ids"].to(evaluator.device)
             motion_ids = batch["motion_ids"].to(evaluator.device)
             trial_indices = batch["trial_indices"].to(evaluator.device)
             frame_limits = motion_frame_limits[motion_ids]
+            num_trials = len(env_ids)
+            # Filler entries follow the wave's trials in every per-env tensor.
+            env_ids, motion_ids, frame_limits = _fill_idle_envs(
+                env_ids,
+                motion_ids,
+                frame_limits,
+                compatibility,
+                motion_frame_limits,
+                filler_generator,
+            )
             batch_size = len(env_ids)
 
+            fillers = (
+                f" + {batch_size - num_trials} fillers"
+                if batch_size > num_trials
+                else ""
+            )
             print(
                 f"[parallel-eval] wave {wave_index}/{len(batches)}: "
-                f"{batch_size} trials, completed {completed_trials}/{total_trials}",
+                f"{num_trials} trials{fillers}, "
+                f"completed {completed_trials}/{total_trials}",
                 flush=True,
             )
 
@@ -370,7 +426,7 @@ def run_parallel_mimic_trials(
                 failed |= newly_failed
 
             jitter_means = jitter.means() if jitter is not None else {}
-            for batch_index in range(batch_size):
+            for batch_index in range(num_trials):
                 motion_id = int(motion_ids[batch_index].item())
                 trial_index = int(trial_indices[batch_index].item())
                 record = _parallel_trial_result(
@@ -399,7 +455,7 @@ def run_parallel_mimic_trials(
                         for mode, counts in jitter.counts.items()
                     }
                 trial_records[motion_id][trial_index] = record
-            completed_trials += batch_size
+            completed_trials += num_trials
 
         missing_records = [
             (motion_id, trial_index)
