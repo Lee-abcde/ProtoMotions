@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """torchrun entry point for joint SMPL-X HOI/locomotion online distillation.
@@ -605,16 +605,41 @@ def restore_checkpoint(
     return saved
 
 
+def resolve_student_action_gain(args, configs):
+    """New students use gain one; existing students retain their saved mapping."""
+    path = args.resume or args.warm_start
+    if not path:
+        return 1.0
+    saved = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    gain = saved["model_config"].get("student_action_gain")
+    if gain is None:
+        names = configs[0]["robot"].kinematic_info.dof_names
+        for cfg in configs[1:]:
+            if action_differences(
+                configs[0]["env"].action_config, cfg["env"].action_config, names
+            ):
+                raise ValueError(
+                    "Legacy students require identical teacher action gains; "
+                    "start a new distillation run to use student gain 1.0"
+                )
+    return gain
+
+
 def validate_warm_start_contract(saved, manifest, contract):
     """Adding data cannot silently redefine an existing student input or action."""
     old_tasks = {}
+    student_gain = saved.get("model_config", {}).get("student_action_gain")
+    from protomotions.agents.multi_source_distill.actions import student_action_config
+
     for source, cfg in zip(saved["manifest"]["sources"], saved["teacher_contract"]):
         old_tasks.setdefault(source["task"], cfg)
     for source, cfg in zip(manifest.sources, contract):
         old = old_tasks[source.task]
         names = old["robot"]["kinematic_info"]["dof_names"]
         differences = action_differences(
-            old["env"]["action_config"], cfg["env"]["action_config"], names
+            student_action_config(old["env"]["action_config"], student_gain),
+            student_action_config(cfg["env"]["action_config"], student_gain),
+            names,
         )
         if differences:
             raise ValueError(
@@ -746,6 +771,9 @@ def run(args):
 
     rank, world_size = dist.get_rank(), dist.get_world_size()
     manifest, configs = collective_call(lambda: preflight(args, world_size))
+    student_action_gain = collective_call(
+        lambda: resolve_student_action_gain(args, configs)
+    )
     filter_path = hoi_teacher_filter_path(args)
     filter_pair = collective_call(
         lambda: load_hoi_filter_for_start(args, manifest) if rank == 0 else None
@@ -803,6 +831,7 @@ def run(args):
                 equal_motion_sampling=not args.evaluate_only,
                 scene_motion_weights=scene_motion_weights,
                 locomotion_frames_on_cpu=args.locomotion_frames_on_cpu,
+                student_action_gain=student_action_gain,
             )
         )
         print(
@@ -813,7 +842,14 @@ def run(args):
         initial_motion_weights = env.motion_manager.motion_weights.clone()
         task = manifest.sources[assigned[0]].task
         router = collective_call(
-            lambda: load_teachers(manifest, configs, assigned, obs, device)
+            lambda: load_teachers(
+                manifest,
+                configs,
+                assigned,
+                obs,
+                device,
+                student_action_gain=student_action_gain,
+            )
         )
         if filter_document is None:
             print(
@@ -886,6 +922,7 @@ def run(args):
             ),
             normalizer_min_std=args.normalizer_min_std,
             normalize_latent=args.normalize_latent,
+            student_action_gain=student_action_gain,
         )
         model = JointPVQModel(model_config).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)

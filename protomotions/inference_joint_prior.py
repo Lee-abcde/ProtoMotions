@@ -225,6 +225,7 @@ def run(args):
             torch.device(args.device),
             launcher.app,
             assigned=(index,),
+            student_action_gain=model.posterior.config.student_action_gain,
             headless=args.headless,
             custom_key_handlers={
                 "F9": switch_motion,

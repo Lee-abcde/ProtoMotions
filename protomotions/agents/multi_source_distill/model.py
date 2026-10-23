@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Two task-specific posteriors with one product codebook and action decoder."""
@@ -42,6 +42,9 @@ class JointModelConfig:
     # SMPL PULSE-input trunk does. Raw codes are ~0.05 in scale next to unit-scale
     # state inputs, which starves the latent pathway of gradient early on.
     normalize_latent: bool = False
+    # New distillation runs use one shared raw-action coordinate system.
+    # None retains the teacher action mapping for legacy saved students.
+    student_action_gain: float | None = None
 
 
 def joint_model_config_from_dict(stored: dict) -> JointModelConfig:
@@ -198,8 +201,9 @@ class JointPVQModel(nn.Module):
             config.decoder_widths,
             config.num_actions,
         )
-        # Predict raw teacher actions. The environment applies tanh(gain * action);
-        # another tanh here would prevent matching unbounded teacher means.
+        # Predict actions in the student's coordinates. TeacherRouter rescales
+        # labels by teacher_gain / student_gain; the environment applies tanh.
+        # Another tanh here would prevent matching unbounded action targets.
         if config.normalize_latent:
             self.latent_normalizer = MaskedNormalizer(config.latent_dim)
 

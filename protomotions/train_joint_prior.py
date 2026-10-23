@@ -501,6 +501,7 @@ def run(args):
                 psi=args.student_psi != "off",
                 equal_motion_sampling=True,
                 locomotion_frames_on_cpu=args.locomotion_frames_on_cpu,
+                student_action_gain=mc.student_action_gain,
             )
         )
         task = manifest.sources[assigned[0]].task

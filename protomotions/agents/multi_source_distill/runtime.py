@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """IsaacLab environment construction and native teacher/evaluator adapters."""
@@ -14,6 +14,11 @@ from types import SimpleNamespace
 import torch
 from tensordict import TensorDict
 
+from protomotions.agents.multi_source_distill.actions import (
+    action_gain,
+    require_raw_action_history,
+    student_action_config,
+)
 from protomotions.agents.multi_source_distill.config import canonical
 from protomotions.agents.multi_source_distill.data import (
     TeacherRouter,
@@ -140,6 +145,7 @@ def build_environment(
     equal_motion_sampling=False,
     scene_motion_weights=None,
     locomotion_frames_on_cpu=False,
+    student_action_gain=None,
 ):
     """Build one simulator per rank from the corresponding frozen teacher config.
 
@@ -154,6 +160,8 @@ def build_environment(
     does on resume. Without them every object type gets an equal share.
     ``locomotion_frames_on_cpu`` keeps the locomotion clips' per-frame tensors
     in host RAM, so a full dataset fits next to the simulator on a 24 GB GPU.
+    ``student_action_gain`` overrides only the copied environment's tanh gain;
+    frozen teacher configs remain available for action/history conversion.
     """
     from protomotions.components.motion_lib import MotionLib
     from protomotions.components.scene_lib import ReplicationMethod, SceneLib
@@ -169,6 +177,9 @@ def build_environment(
         manifest.assignment(rank, world_size) if assigned is None else tuple(assigned)
     )
     cfg = deepcopy(configs[assigned[0]])
+    cfg["env"].action_config = student_action_config(
+        cfg["env"].action_config, student_action_gain
+    )
     task = manifest.sources[assigned[0]].task
     cfg["simulator"].num_envs = num_envs
     cfg["simulator"].headless = headless
@@ -253,9 +264,12 @@ def build_environment(
     return env, obs, assigned, source_ids, local_ids, cfg
 
 
-def load_teachers(manifest, configs, assigned, obs, device) -> TeacherRouter:
+def load_teachers(
+    manifest, configs, assigned, obs, device, student_action_gain=None
+) -> TeacherRouter:
     """Load only actor weights; frozen observation normalizers stay teacher-local."""
     teachers = {}
+    scales = {}
     for i in assigned:
         actor_cfg = configs[i]["agent"].model.actor
         actor = get_class(actor_cfg._target_)(actor_cfg).to(device).eval()
@@ -277,7 +291,15 @@ def load_teachers(manifest, configs, assigned, obs, device) -> TeacherRouter:
             raise ValueError(f"{manifest.sources[i].id}: checkpoint has no PPO actor")
         actor.load_state_dict(weights, strict=True)
         teachers[i] = actor
-    return TeacherRouter(teachers, configs[assigned[0]]["robot"].number_of_actions)
+        if student_action_gain is not None:
+            require_raw_action_history(configs[i])
+            gain = action_gain(
+                configs[i]["env"].action_config, configs[i]["robot"].number_of_actions
+            )
+            scales[i] = (gain / student_action_gain).to(device)
+    return TeacherRouter(
+        teachers, configs[assigned[0]]["robot"].number_of_actions, scales
+    )
 
 
 def object_mask(env, task):

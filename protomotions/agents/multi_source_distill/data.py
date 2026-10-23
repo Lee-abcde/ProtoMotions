@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """In-memory source composition; original dataset IDs remain explicit."""
@@ -265,9 +265,15 @@ def complete_observations(
 class TeacherRouter:
     """Evaluate frozen actors on source-specific subsets of the same simulator state."""
 
-    def __init__(self, teachers: dict[int, torch.nn.Module], num_actions: int):
+    def __init__(
+        self,
+        teachers: dict[int, torch.nn.Module],
+        num_actions: int,
+        action_scales: dict[int, torch.Tensor] | None = None,
+    ):
         self.teachers = teachers
         self.num_actions = num_actions
+        self.action_scales = action_scales or {}
         for teacher in teachers.values():
             teacher.eval()
             teacher.requires_grad_(False)
@@ -284,6 +290,18 @@ class TeacherRouter:
                 {k: obs[k][selected] for k in teacher.in_keys},
                 batch_size=[int(selected.sum())],
             )
+            scale = self.action_scales.get(source_index)
+            if scale is not None:
+                scale = scale.to(actions)
+                if "previous_actions" in inputs:
+                    history = inputs["previous_actions"]
+                    inputs["previous_actions"] = (
+                        history.reshape(len(history), -1, self.num_actions) / scale
+                    ).reshape_as(history)
             outputs = teacher(inputs)
-            actions[selected] = outputs["mean_action"]
+            actions[selected] = (
+                outputs["mean_action"]
+                if scale is None
+                else outputs["mean_action"] * scale
+            )
         return actions

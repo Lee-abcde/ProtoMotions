@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Source manifests, rank assignment, and frozen-teacher compatibility checks."""
@@ -12,6 +12,12 @@ from typing import Any
 
 import torch
 import yaml
+
+from protomotions.agents.multi_source_distill.actions import (
+    action_gain,
+    require_raw_action_history,
+    student_action_config,
+)
 
 
 @dataclass(frozen=True)
@@ -333,8 +339,12 @@ def validate_teacher_configs(manifest: SourceManifest, configs: list[dict]) -> N
             raise ValueError(f"{label}: skeleton/kinematic configuration differs")
         if canonical(cfg["robot"].control) != canonical(base["robot"].control):
             raise ValueError(f"{label}: robot actuator configuration differs")
+        action_gain(cfg["env"].action_config, len(names))
+        require_raw_action_history(cfg)
         diffs = action_differences(
-            base["env"].action_config, cfg["env"].action_config, names
+            student_action_config(base["env"].action_config, 1.0),
+            student_action_config(cfg["env"].action_config, 1.0),
+            names,
         )
         if diffs:
             raise ValueError(
@@ -363,7 +373,11 @@ def validate_teacher_configs(manifest: SourceManifest, configs: list[dict]) -> N
             if offsets != reference_offsets(other):
                 raise ValueError(f"{source.id}: reference times differ within task")
             for key in ("env", "terrain"):
-                if canonical(cfg[key]) != canonical(other[key]):
+                a, b = canonical(cfg[key]), canonical(other[key])
+                if key == "env":
+                    a["action_config"] = student_action_config(a["action_config"], 1.0)
+                    b["action_config"] = student_action_config(b["action_config"], 1.0)
+                if a != b:
                     raise ValueError(
                         f"{source.id}: incompatible pooled {key} configuration"
                     )

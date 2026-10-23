@@ -281,6 +281,7 @@ def run(args):
             device,
             launcher.app,
             assigned=(index,),
+            student_action_gain=model_config.student_action_gain,
             headless=args.headless,
             custom_key_handlers={
                 "F9": switch_motion_id,
@@ -297,7 +298,14 @@ def run(args):
         model.load_state_dict(saved["model"], strict=True)
         model.eval()
         router = (
-            load_teachers(manifest, configs, assigned, obs, device)
+            load_teachers(
+                manifest,
+                configs,
+                assigned,
+                obs,
+                device,
+                student_action_gain=model_config.student_action_gain,
+            )
             if args.policy == "teacher"
             else None
         )
