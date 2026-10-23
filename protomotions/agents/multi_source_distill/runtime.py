@@ -30,8 +30,9 @@ from protomotions.agents.multi_source_distill.data import (
 )
 from protomotions.utils.hydra_replacement import get_class
 
-# Peak GPU contact patches per HOI env (~200 observed at 4096 envs), with margin.
-PHYSX_PATCHES_PER_ENV = 256
+# Peak GPU contact patches per HOI env, with margin: ~200 with the v8_29 teachers,
+# 257 with the gripping v9_3 teachers (4096 envs per rank on Clariden).
+PHYSX_PATCHES_PER_ENV = 384
 
 
 def scale_physx_patch_capacity(simulator_config, num_envs: int) -> None:

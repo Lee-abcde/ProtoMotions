@@ -23,6 +23,14 @@ def test_patch_capacity_grows_with_env_count():
     assert cfg.sim.physx.gpu_max_rigid_patch_count > 805597
 
 
+def test_patch_capacity_covers_gripping_teachers():
+    # The v9_3 teachers grip with their fingers and needed 1053552 patches at
+    # 4096 HOI envs, overflowing the earlier 256 patches per env.
+    cfg = simulator(5 * 2**17)
+    scale_physx_patch_capacity(cfg, 4096)
+    assert cfg.sim.physx.gpu_max_rigid_patch_count > 1053552
+
+
 def test_patch_capacity_never_shrinks():
     cfg = simulator(2**22)
     scale_physx_patch_capacity(cfg, 1024)
