@@ -49,6 +49,27 @@ def scale_physx_patch_capacity(simulator_config, num_envs: int) -> None:
     )
 
 
+# Peak GPU broad-phase found/lost pairs per HOI env, with margin: up to 3712 with
+# the v9_3 teachers at 8192 envs per rank on Clariden, where 2**21 overflowed.
+PHYSX_FOUND_LOST_PAIRS_PER_HOI_ENV = 6144
+
+
+def scale_physx_found_lost_pairs_capacity(simulator_config, num_envs: int) -> None:
+    """Grow an HOI teacher's broad-phase found/lost pair buffer with the env count.
+
+    PhysX misses the new interactions that overflow it. HOI only: locomotion has
+    never overflowed and its GPU has little memory to spare. Capacity only, so it
+    never shrinks a buffer.
+    """
+    physx = getattr(getattr(simulator_config, "sim", None), "physx", None)
+    if physx is None or not hasattr(physx, "gpu_found_lost_pairs_capacity"):
+        return
+    physx.gpu_found_lost_pairs_capacity = max(
+        physx.gpu_found_lost_pairs_capacity,
+        PHYSX_FOUND_LOST_PAIRS_PER_HOI_ENV * num_envs,
+    )
+
+
 def launch_isaaclab(
     device,
     distributed=False,
@@ -185,6 +206,8 @@ def build_environment(
     cfg["simulator"].num_envs = num_envs
     cfg["simulator"].headless = headless
     scale_physx_patch_capacity(cfg["simulator"], num_envs)
+    if task == "hoi":
+        scale_physx_found_lost_pairs_capacity(cfg["simulator"], num_envs)
     for control in cfg["env"].control_components.values():
         if not psi and hasattr(control, "physical_buffer_size"):
             control.physical_buffer_size = 1

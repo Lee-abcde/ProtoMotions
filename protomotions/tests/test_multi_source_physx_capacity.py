@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from protomotions.agents.multi_source_distill.runtime import (
     PHYSX_PATCHES_PER_ENV,
+    scale_physx_found_lost_pairs_capacity,
     scale_physx_patch_capacity,
 )
 
@@ -43,3 +44,26 @@ def test_configs_without_physx_patch_field_are_left_alone():
     legacy = SimpleNamespace(sim=SimpleNamespace(physx=SimpleNamespace()))
     scale_physx_patch_capacity(legacy, 4096)
     assert not hasattr(legacy.sim.physx, "gpu_max_rigid_patch_count")
+
+
+def pairs_simulator(pairs):
+    return SimpleNamespace(
+        sim=SimpleNamespace(physx=SimpleNamespace(gpu_found_lost_pairs_capacity=pairs))
+    )
+
+
+def test_found_lost_pair_capacity_covers_8192_hoi_envs():
+    # The IsaacLab default overflowed at 8192 HOI envs per GPU; the worst rank
+    # asked for 30403333 pairs.
+    cfg = pairs_simulator(2**21)
+    scale_physx_found_lost_pairs_capacity(cfg, 8192)
+    assert cfg.sim.physx.gpu_found_lost_pairs_capacity > 30403333
+
+
+def test_found_lost_pair_capacity_never_shrinks_and_skips_legacy_configs():
+    cfg = pairs_simulator(2**27)
+    scale_physx_found_lost_pairs_capacity(cfg, 1024)
+    assert cfg.sim.physx.gpu_found_lost_pairs_capacity == 2**27
+    legacy = SimpleNamespace(sim=SimpleNamespace(physx=SimpleNamespace()))
+    scale_physx_found_lost_pairs_capacity(legacy, 4096)
+    assert not hasattr(legacy.sim.physx, "gpu_found_lost_pairs_capacity")
