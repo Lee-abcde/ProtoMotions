@@ -740,6 +740,19 @@ def extract_transforms_from_qpos_non_root_ignore_fixed_helper(
             f"robot than the one being used. Check that --motion-file matches "
             f"the robot in your checkpoint/config."
         )
+    # Callers scatter the result by body index, so a root entry would overwrite
+    # the root rotation on either path below.
+    assert 0 not in hinge_axes_map, "Hinge DOF mapped to root body index 0"
+
+    if qpos_is_exp_map_on_3dof_joints and all(
+        len(axes) == 3 for axes in hinge_axes_map.values()
+    ):
+        # Every movable body is one exponential map (e.g. SMPL-X): convert them all
+        # in one batched call instead of a chain of small kernels per body.
+        exp_maps = qpos_non_root.reshape(B, num_movable_bodies, 3)
+        return quaternion_to_matrix(
+            exp_map_to_quat(exp_maps, w_last=False), w_last=False
+        )
 
     joint_rot_mats = (
         torch.eye(3, device=device, dtype=dtype)
@@ -749,9 +762,7 @@ def extract_transforms_from_qpos_non_root_ignore_fixed_helper(
     )
 
     # Process each body's DOFs
-    for i, (body_idx, axes) in enumerate(hinge_axes_map.items()):
-        assert body_idx != 0, "Hinge DOF mapped to root body index 0"
-
+    for i, axes in enumerate(hinge_axes_map.values()):
         num_body_dofs = len(axes)
         qpos_indices = torch.arange(
             joint_start, joint_start + num_body_dofs, device=device, dtype=torch.long

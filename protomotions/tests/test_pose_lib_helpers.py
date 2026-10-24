@@ -1028,6 +1028,43 @@ def test_extract_transforms_from_qpos_assigns_non_contiguous_hinge_bodies():
     assert torch.allclose(joint_rot_mats[0, 4], expected_x, atol=1e-6)
 
 
+def test_all_exp_map_bodies_match_per_body_conversion():
+    # SMPL-X layout: every movable body is one 3-DOF exponential map, which takes
+    # the batched path; it must equal converting each body on its own.
+    hinge_axes_map = {body: torch.eye(3) for body in range(1, 52)}
+    qpos = torch.randn(64, 51 * 3, generator=torch.Generator().manual_seed(0)) * 2.0
+    qpos[0, :3] = 0.0  # a zero rotation takes the default-axis branch
+
+    batched = extract_transforms_from_qpos_non_root_ignore_fixed_helper(
+        hinge_axes_map, qpos, qpos_is_exp_map_on_3dof_joints=True
+    )
+
+    per_body = torch.stack(
+        [
+            quaternion_to_matrix(
+                exp_map_to_quat(qpos[:, 3 * i : 3 * i + 3], w_last=False), w_last=False
+            )
+            for i in range(51)
+        ],
+        dim=1,
+    )
+    assert batched.shape == (64, 51, 3, 3)
+    assert torch.equal(batched, per_body)
+
+
+@pytest.mark.parametrize("dofs_per_body", [3, 1])
+def test_hinge_map_entry_for_the_root_is_rejected(dofs_per_body):
+    # Three DOFs take the batched path, one DOF the per-body loop. Callers scatter
+    # by body index, so a root entry would silently overwrite the root rotation.
+    hinge_axes_map = {0: torch.eye(3)[:dofs_per_body], 1: torch.eye(3)[:dofs_per_body]}
+    qpos = torch.zeros(2, 2 * dofs_per_body)
+
+    with pytest.raises(AssertionError, match="root body index 0"):
+        extract_transforms_from_qpos_non_root_ignore_fixed_helper(
+            hinge_axes_map, qpos, qpos_is_exp_map_on_3dof_joints=True
+        )
+
+
 def test_extract_qpos_from_transforms_handles_root_only_qpos():
     info = _kin_info(
         parent_indices=[-1, 0],
