@@ -98,6 +98,15 @@ if TYPE_CHECKING:
     from protomotions.components.motion_lib import MotionLib
 
 
+def scene_has_objects(scene_lib) -> bool:
+    """Whether the scene library places objects with pointclouds in every env."""
+    return (
+        scene_lib is not None
+        and getattr(scene_lib, "num_objects_per_scene", 0) > 0
+        and getattr(scene_lib, "_object_pointclouds", None) is not None
+    )
+
+
 class BaseEnv:
     """Base class for all reinforcement learning environments.
 
@@ -1133,15 +1142,7 @@ class BaseEnv:
         if context_num_envs is None:
             context_num_envs = self.num_envs if env_ids is None else env_ids.shape[0]
         scene_lib = getattr(self, "scene_lib", None)
-        num_objects_per_scene = (
-            getattr(scene_lib, "num_objects_per_scene", 0)
-            if scene_lib is not None
-            else 0
-        )
-        has_object_pointclouds = (
-            getattr(scene_lib, "_object_pointclouds", None) is not None
-        )
-        if num_objects_per_scene <= 0 or not has_object_pointclouds:
+        if not scene_has_objects(scene_lib):
             object_pos = torch.zeros(context_num_envs, 0, 3, device=self.device)
             object_rot = torch.zeros(context_num_envs, 0, 4, device=self.device)
             object_vel = torch.zeros(context_num_envs, 0, 3, device=self.device)
@@ -1188,8 +1189,24 @@ class BaseEnv:
             object_contacts=object_contacts,
             object_contact_forces=object_contact_forces,
             neutral_pointclouds=scene_lib.get_scene_neutral_pointcloud(scene_env_ids),
-            object_valid_mask=scene_lib.get_per_object_valid_mask(scene_env_ids),
+            object_valid_mask=self.object_valid_mask(env_ids),
         )
+
+    def object_valid_mask(self, env_ids: Optional[Tensor] = None) -> Tensor:
+        """Per-object validity of each env's scene, as in its scene context.
+
+        Reads only the mask, so callers that need nothing else from the context
+        do not rebuild it after a reset has invalidated the cached one.
+        """
+        if env_ids is not None:
+            env_ids = env_ids.to(self.device)
+        num_envs = self.num_envs if env_ids is None else env_ids.shape[0]
+        scene_lib = getattr(self, "scene_lib", None)
+        if not scene_has_objects(scene_lib):
+            return torch.zeros(num_envs, 0, dtype=torch.bool, device=self.device)
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        return scene_lib.get_per_object_valid_mask(env_ids)
 
     def _build_global_context(
         self, current_state: Optional[RobotState] = None

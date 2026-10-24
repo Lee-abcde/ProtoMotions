@@ -142,6 +142,7 @@ def environment():
         progress_buf=torch.zeros(2, dtype=torch.long),
         config=SimpleNamespace(ref_object_respawn_offset=0),
         context=SimpleNamespace(current=robot, scene=scene),
+        object_valid_mask=lambda: scene.object_valid_mask,
         motion_manager=SimpleNamespace(
             motion_ids=torch.zeros(2, dtype=torch.long),
             motion_times=torch.zeros(2),

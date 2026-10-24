@@ -654,6 +654,43 @@ def test_base_env_scene_surface_context_ignores_objects_without_pointclouds():
     assert context.object_valid_mask.shape == (2, 0)
 
 
+def test_object_valid_mask_matches_scene_context_without_building_context():
+    env = _make_env(num_envs=4, scenes=1)
+    env.scene_lib._object_pointclouds = torch.zeros(1, 1, 8, 3)
+    env.scene_lib.get_per_object_valid_mask = lambda ids: (ids % 2 == 0).unsqueeze(1)
+    env.scene_lib.get_scene_neutral_pointcloud = lambda ids: torch.zeros(
+        len(ids), 1, 8, 3
+    )
+    env.simulator.get_object_contact_buf = lambda env_ids=None: torch.zeros(
+        4 if env_ids is None else len(env_ids), 1, 2, 3
+    )
+    subset = torch.tensor([3, 0])
+
+    assert torch.equal(
+        env.object_valid_mask(), env._build_scene_surface_context().object_valid_mask
+    )
+    assert torch.equal(
+        env.object_valid_mask(subset),
+        env._build_scene_surface_context(subset).object_valid_mask,
+    )
+    assert torch.equal(env.object_valid_mask(subset), torch.tensor([[False], [True]]))
+    assert env._current_context is None
+
+
+def test_object_valid_mask_is_empty_without_object_pointclouds():
+    env = _make_env(num_envs=2, scenes=1)
+
+    def _unexpected_mask_call(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("the object mask should not be read when disabled")
+
+    env.scene_lib.get_per_object_valid_mask = _unexpected_mask_call
+
+    mask = env.object_valid_mask()
+
+    assert mask.shape == (2, 0) and mask.dtype == torch.bool
+
+
 def test_base_env_build_context_selects_subset_without_caching_it():
     env = _make_env(num_envs=3, scenes=0, history=True)
     env.control_manager.populate_context = lambda ctx: setattr(ctx, "mimic", object())

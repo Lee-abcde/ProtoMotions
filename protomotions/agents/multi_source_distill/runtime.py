@@ -304,7 +304,9 @@ def load_teachers(
 
 
 def object_mask(env, task):
-    return env.context.scene.object_valid_mask if task == "hoi" else None
+    # Not env.context: a reset invalidates it, and rebuilding the all-env context
+    # every rollout step just for this mask cost several percent of HOI collection.
+    return env.object_valid_mask() if task == "hoi" else None
 
 
 class EvaluationAgent:
