@@ -1,0 +1,115 @@
+# Clariden (4x GH200 per node): one rank loads the full AMASS-X dataset; three ranks train HOI.
+# Motion libraries remain fixed throughout training (no shard switching).
+# Absolute Store paths, so the run does not depend on the scratch symlinks under data/ and results/.
+# OMOMO: 16 training subjects; sub14 is held out as the test set. Each has its own v9_3 tracker
+# (s0_hoi_tracker_v2.py, grip DOF tanh gain 2). The locomotion teacher keeps gain 1; a new run
+# distills both into a gain-one student.
+# HOI sources are assigned round-robin to the HOI ranks in the order listed.
+locomotion_num_ranks: 1
+hoi_weight: 0.5
+# task: split the loss hoi_weight : 1 - hoi_weight between tasks.
+# sample: every rollout sample weighs the same (hoi_weight is then unused), so the
+# task split follows the layout.
+loss_balance: task
+sources:
+  - id: amassx
+    task: locomotion
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/amassx/amass_smplx_train.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/gcc_s0_loco_tracker_amassx_v1/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub1
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub1.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub1.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub1_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub2
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub2.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub2.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub2_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub3
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub3.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub3.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub3_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub4
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub4.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub4.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub4_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub5
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub5.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub5.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub5_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub6
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub6.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub6.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub6_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub7
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub7.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub7.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub7_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub8
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub8.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub8.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub8_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub9
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub9.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub9.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub9_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub10
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub10.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub10.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub10_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub11
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub11.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub11.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub11_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub12
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub12.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub12.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub12_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub13
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub13.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub13.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub13_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub15
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub15.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub15.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub15_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub16
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub16.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub16.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub16_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
+  - id: omomo_sub17
+    task: hoi
+    motion_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/motions/by_subject/sub17.pt
+    scenes_file: /capstor/store/cscs/swissai/abs33/jli/data/omomo_correct_v2_contact_retarget_arms_v3/scenes/by_subject/sub17.pt
+    teacher_checkpoint: /capstor/store/cscs/swissai/abs33/jli/checkpoints/teachers/intermimic_sub17_v3data_v9_3_euler/score_based.ckpt
+    weight: 1.0
