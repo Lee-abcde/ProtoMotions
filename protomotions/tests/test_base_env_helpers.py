@@ -691,6 +691,33 @@ def test_object_valid_mask_is_empty_without_object_pointclouds():
     assert mask.shape == (2, 0) and mask.dtype == torch.bool
 
 
+def test_rewards_disabled_skips_rewards_and_restores_them():
+    env = _make_env(num_envs=3)
+    reward_calls, post_reward_calls = [], []
+
+    def _compute_reward(context):
+        reward_calls.append(context)
+        env.rew_buf[:] = 1.0
+
+    env.compute_reward = _compute_reward
+    env.control_manager.post_reward = post_reward_calls.append
+    env.rew_buf[:] = 5.0
+
+    with env.rewards_disabled():
+        env._compute_step_reward(context=None)
+    assert reward_calls == [] and post_reward_calls == []
+    assert torch.equal(env.rew_buf, torch.zeros(3))
+
+    env._compute_step_reward(context=None)
+    assert len(reward_calls) == 1 and len(post_reward_calls) == 1
+    assert torch.equal(env.rew_buf, torch.ones(3))
+
+    with pytest.raises(RuntimeError):
+        with env.rewards_disabled():
+            raise RuntimeError("rollout failed")
+    assert env._rewards_enabled is True
+
+
 def test_base_env_build_context_selects_subset_without_caching_it():
     env = _make_env(num_envs=3, scenes=0, history=True)
     env.control_manager.populate_context = lambda ctx: setattr(ctx, "mimic", object())

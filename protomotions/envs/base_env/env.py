@@ -45,6 +45,7 @@ Key Features:
 
 """
 
+from contextlib import contextmanager
 from functools import cached_property
 from typing import Any, Dict, Optional, TYPE_CHECKING, Tuple
 
@@ -136,6 +137,9 @@ class BaseEnv:
         >>> obs, _ = env.reset()
         >>> next_obs, rewards, dones, info = env.step(action_dict)
     """
+
+    # Cleared by rewards_disabled() for rollouts that ignore rewards.
+    _rewards_enabled = True
 
     def __init__(
         self,
@@ -835,10 +839,7 @@ class BaseEnv:
         self._current_context = self._build_global_context(current_state)
 
         self.compute_observations(context=self._current_context)
-        self.compute_reward(context=self._current_context)
-        post_reward = getattr(self.control_manager, "post_reward", None)
-        if post_reward is not None:
-            post_reward(self.rew_buf)
+        self._compute_step_reward(self._current_context)
         self.reset_buf[:], self.terminate_buf[:] = self.check_resets_and_terminations(
             context=self._current_context
         )
@@ -1243,6 +1244,29 @@ class BaseEnv:
         self.rew_buf[:] = combined_reward
         self.extras.update(reward_logging)
         self.extras["total_env_reward"] = combined_reward
+
+    def _compute_step_reward(self, context: EnvContext) -> None:
+        """Compute this step's reward and notify controls, unless rewards are off."""
+        if not self._rewards_enabled:
+            self.rew_buf.zero_()
+            return
+        self.compute_reward(context=context)
+        post_reward = getattr(self.control_manager, "post_reward", None)
+        if post_reward is not None:
+            post_reward(self.rew_buf)
+
+    @contextmanager
+    def rewards_disabled(self):
+        """Skip reward computation within the block, e.g. for distillation rollouts.
+
+        Observations, terminations and resets are unchanged; rew_buf reads zero.
+        """
+        previous = self._rewards_enabled
+        self._rewards_enabled = False
+        try:
+            yield
+        finally:
+            self._rewards_enabled = previous
 
     ###############################################################
     # Handle Resets

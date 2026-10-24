@@ -623,7 +623,8 @@ def run(args):
             prior_envs = torch.rand(env.num_envs, device=device) < probability
             resets = 0
             collect_start = time.perf_counter()
-            with torch.no_grad():
+            # The prior learns from posterior labels only, so rewards go unused.
+            with torch.no_grad(), env.rewards_disabled():
                 for _ in progress(
                     range(args.rollout_steps),
                     f"Epoch {iteration}, collecting data...",
