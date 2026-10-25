@@ -23,6 +23,9 @@ EDF="${EDF:-/users/jli/.edf/isaaclab.toml}"
 VENV="${VENV:-/users/jli/venvs/protomotions-isaaclab-pin}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/capstor/scratch/cscs/jli/joint_pvq_results}"
 RUN_NAME="${RUN_NAME:-joint_pvq_v2}"
+# Empty: dual_native for a fresh run, the checkpoint's mode on resume. A unified
+# run needs its own RUN_NAME; the default one holds the dual_native run.
+ENCODER_MODE="${ENCODER_MODE:-}"
 # Relative to PROTOMOTIONS_DIR, or absolute.
 SOURCES="${SOURCES:-examples/experiments/gcc/s1/Clariden/s1_joint_pvq_sources_clariden_v9_3.yaml}"
 # Layout from the Clariden sweeps (debug jobs 3731255-3737924): HOI collects in
@@ -66,7 +69,7 @@ TRAIN_TF32="${TRAIN_TF32:-0}"
 USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-physical_animation}"
 WANDB_MODE="${WANDB_MODE:-online}"
-export PROTOMOTIONS_DIR VENV OUTPUT_ROOT RUN_NAME SOURCES
+export PROTOMOTIONS_DIR VENV OUTPUT_ROOT RUN_NAME ENCODER_MODE SOURCES
 export NUM_ENVS BATCH_SIZE HOI_NUM_ENVS HOI_BATCH_SIZE ROLLOUT_STEPS LEARNING_RATE
 export NORMALIZER_MIN_STD NORMALIZE_LATENT ITERATIONS EVAL_EVERY STUDENT_PSI
 export EVALUATE_TEACHERS HOI_TEACHER_FILTER LOCO_FRAMES_ON_CPU TRAIN_TF32
@@ -124,6 +127,7 @@ common_args=(
   --rollout-steps "$ROLLOUT_STEPS"
   --student-psi "$STUDENT_PSI"
 )
+if [[ -n "$ENCODER_MODE" ]]; then common_args+=(--encoder-mode "$ENCODER_MODE"); fi
 if [[ -n "$HOI_TEACHER_FILTER" ]]; then
   common_args+=(--hoi-teacher-filter "$HOI_TEACHER_FILTER")
 fi

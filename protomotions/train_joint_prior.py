@@ -226,11 +226,13 @@ def prior_preflight(args, world_size):
         < 0
     ):
         raise ValueError("Invalid prior rollout schedule")
-    manifest, configs = preflight(args, world_size)
     saved = torch.load(
         args.checkpoint, map_location="cpu", weights_only=False, mmap=True
     )
     model_config = model_config_from_checkpoint(saved)
+    # Resolve/check the frozen posterior before Kit or run_config creation. A
+    # stage-two --resume must never be interpreted as a stage-one checkpoint.
+    manifest, configs = preflight(args, world_size, encoder_config=model_config)
     for source, cfg in zip(manifest.sources, configs):
         validate_source_against_checkpoint(saved, source, cfg)
     body_names = configs[0]["robot"].kinematic_info.body_names
@@ -502,6 +504,7 @@ def run(args):
                 equal_motion_sampling=True,
                 locomotion_frames_on_cpu=args.locomotion_frames_on_cpu,
                 student_action_gain=mc.student_action_gain,
+                encoder_mode=mc.encoder_mode,
             )
         )
         task = manifest.sources[assigned[0]].task

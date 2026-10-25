@@ -168,6 +168,7 @@ def build_environment(
     scene_motion_weights=None,
     locomotion_frames_on_cpu=False,
     student_action_gain=None,
+    encoder_mode="dual_native",
 ):
     """Build one simulator per rank from the corresponding frozen teacher config.
 
@@ -203,6 +204,11 @@ def build_environment(
         cfg["env"].action_config, student_action_gain
     )
     task = manifest.sources[assigned[0]].task
+    from protomotions.agents.multi_source_distill.unified import (
+        configure_student_observations,
+    )
+
+    configure_student_observations(cfg, task, encoder_mode)
     cfg["simulator"].num_envs = num_envs
     cfg["simulator"].headless = headless
     scale_physx_patch_capacity(cfg["simulator"], num_envs)

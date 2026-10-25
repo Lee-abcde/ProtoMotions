@@ -11,7 +11,11 @@ from pathlib import Path
 import torch
 
 from protomotions.agents.multi_source_distill.config import canonical
-from protomotions.agents.multi_source_distill.model import OBS_KEYS, JointModelConfig
+from protomotions.agents.multi_source_distill.model import (
+    OBS_KEYS,
+    STATE_OBS_KEYS,
+    JointModelConfig,
+)
 
 
 def merge_motion_libraries(
@@ -221,7 +225,10 @@ def complete_observations(
     example = obs["max_coords_obs"]
     batch_size = example.shape[0]
     result = {}
-    for key in OBS_KEYS:
+    # Teachers consume the original obs; do not retain their targets in the
+    # unified student's rollout buffer (including absent-task zero padding).
+    keys = OBS_KEYS if config.encoder_mode == "dual_native" else STATE_OBS_KEYS
+    for key in keys:
         missing = (task == "locomotion" and key.startswith("intermimic_")) or (
             task == "hoi" and key == "mimic_target_poses"
         )
@@ -250,15 +257,25 @@ def complete_observations(
         valid = object_valid.bool()
     result["object_valid_mask"] = valid
     # Native object_obs: five per-object fields followed by all-body nearest geometry.
+    has_contacts = config.object_obs_has_contacts is not False
+    object_widths = (3, 6, 3, 3, 1) if has_contacts else (3, 6, 3, 3)
     feature_masks = [
         valid.unsqueeze(-1).expand(-1, -1, width).reshape(batch_size, -1)
-        for width in (3, 6, 3, 3, 1)
+        for width in object_widths
     ]
-    remaining = config.obs_dims["intermimic_object_obs"] - 16 * config.num_objects
+    remaining = (
+        config.obs_dims["intermimic_object_obs"]
+        - sum(object_widths) * config.num_objects
+    )
     if remaining < 0:
         raise ValueError("Invalid InterMimic object feature layout")
     feature_masks.append(valid.any(-1, keepdim=True).expand(-1, remaining))
     result["object_feature_mask"] = torch.cat(feature_masks, -1)
+    if config.encoder_mode != "dual_native":
+        from protomotions.agents.multi_source_distill.unified import pack_unified_target
+
+        target, flags = pack_unified_target(obs, task, valid)
+        result.update(unified_target=target, unified_target_flags=flags)
     return result
 
 

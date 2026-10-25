@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Two task-specific posteriors with one product codebook and action decoder."""
+"""Native or unified posteriors sharing a product codebook and action decoder."""
 
 from __future__ import annotations
 
@@ -12,6 +12,18 @@ import torch.distributed as dist
 from torch import nn
 
 from protomotions.agents.common.vqvae import GradientVectorQuantizer
+from protomotions.agents.multi_source_distill.unified import (
+    ENCODER_MODES,
+    LAYOUT_VERSION,
+    NATIVE_DIMS,
+    NON_FINGER_IDS,
+    FINGER_IDS,
+    FLAG_DIM,
+    FUTURE_STEPS,
+    TARGET_DIM,
+    FEATURES_PER_STEP,
+    unified_target_mask,
+)
 
 OBS_KEYS = (
     "max_coords_obs",
@@ -20,6 +32,7 @@ OBS_KEYS = (
     "intermimic_target_obs",
     "intermimic_object_obs",
 )
+STATE_OBS_KEYS = ("max_coords_obs", "previous_actions", "intermimic_object_obs")
 
 
 @dataclass(frozen=True)
@@ -45,6 +58,30 @@ class JointModelConfig:
     # New distillation runs use one shared raw-action coordinate system.
     # None retains the teacher action mapping for legacy saved students.
     student_action_gain: float | None = None
+    encoder_mode: str = "dual_native"
+    # Unified students record the reference layout they were trained with.
+    # Native students leave it None, so a later layout version cannot change
+    # their saved architecture and break resume.
+    unified_layout_version: int | None = None
+    unified_non_finger_ids: tuple[int, ...] | None = None
+    unified_finger_ids: tuple[int, ...] | None = None
+    unified_future_steps: tuple[int, ...] | None = None
+    # None identifies legacy checkpoints; their native mask layout is retained.
+    object_obs_has_contacts: bool | None = None
+
+    def __post_init__(self):
+        if self.encoder_mode == "dual_native":
+            return
+        # A new unified config takes the current layout; a saved one keeps its own.
+        current = dict(
+            unified_layout_version=LAYOUT_VERSION,
+            unified_non_finger_ids=NON_FINGER_IDS,
+            unified_finger_ids=FINGER_IDS,
+            unified_future_steps=FUTURE_STEPS,
+        )
+        for name, value in current.items():
+            if getattr(self, name) is None:
+                object.__setattr__(self, name, value)
 
 
 def joint_model_config_from_dict(stored: dict) -> JointModelConfig:
@@ -168,20 +205,51 @@ class JointPVQModel(nn.Module):
                 "obs_dims must contain positive dimensions for every observation"
             )
         dims = config.obs_dims
+        if config.encoder_mode not in ENCODER_MODES:
+            raise ValueError(f"Unknown encoder mode: {config.encoder_mode}")
+        unified = config.encoder_mode != "dual_native"
+        self.observation_keys = STATE_OBS_KEYS if unified else OBS_KEYS
+        if unified and (
+            config.unified_layout_version != LAYOUT_VERSION
+            or tuple(config.unified_non_finger_ids) != NON_FINGER_IDS
+            or tuple(config.unified_finger_ids) != FINGER_IDS
+            or tuple(config.unified_future_steps) != FUTURE_STEPS
+            or config.num_objects != 1
+            or any(dims[key] != width for key, width in NATIVE_DIMS.items())
+            or config.object_obs_has_contacts is not False
+        ):
+            raise ValueError("Unsupported unified target layout")
         self.normalizers = nn.ModuleDict(
             {k: MaskedNormalizer(dims[k], config.normalizer_min_std) for k in OBS_KEYS}
         )
         shared = dims["max_coords_obs"] + dims["previous_actions"]
-        self.loco_encoder = make_mlp(
-            shared + dims["mimic_target_poses"],
-            config.encoder_widths,
-            config.latent_dim,
-        )
-        self.hoi_encoder = make_mlp(
-            shared + dims["intermimic_target_obs"] + dims["intermimic_object_obs"],
-            config.encoder_widths,
-            config.latent_dim,
-        )
+        if config.encoder_mode == "single_unified":
+            self.encoder = make_mlp(
+                shared + dims["intermimic_object_obs"] + TARGET_DIM + FLAG_DIM,
+                config.encoder_widths,
+                config.latent_dim,
+            )
+        elif config.encoder_mode == "dual_unified":
+            width = shared + dims["intermimic_object_obs"] + TARGET_DIM + FLAG_DIM
+            self.loco_encoder = make_mlp(
+                width, config.encoder_widths, config.latent_dim
+            )
+            self.hoi_encoder = make_mlp(width, config.encoder_widths, config.latent_dim)
+        else:
+            self.loco_encoder = make_mlp(
+                shared + dims["mimic_target_poses"],
+                config.encoder_widths,
+                config.latent_dim,
+            )
+            self.hoi_encoder = make_mlp(
+                shared + dims["intermimic_target_obs"] + dims["intermimic_object_obs"],
+                config.encoder_widths,
+                config.latent_dim,
+            )
+        if unified:
+            self.normalizers["unified_target"] = MaskedNormalizer(
+                TARGET_DIM, config.normalizer_min_std
+            )
         self.quantizers = nn.ModuleList(
             [
                 GradientVectorQuantizer(
@@ -246,9 +314,14 @@ class JointPVQModel(nn.Module):
 
     @torch.no_grad()
     def update_normalizers(self, obs: dict[str, torch.Tensor], task: str) -> None:
-        # All ranks call all five collectives, including absent modalities.
-        for key in OBS_KEYS:
+        # Every rank uses the same keys. Native target normalizer buffers remain
+        # in unified checkpoints for strict loading, but are no longer consumed.
+        for key in self.observation_keys:
             self.normalizers[key].update(obs[key], self.validity(obs, key, task))
+        if self.config.encoder_mode != "dual_native":
+            self.normalizers["unified_target"].update(
+                obs["unified_target"], unified_target_mask(obs["unified_target_flags"])
+            )
 
     def _encode(self, obs: dict[str, torch.Tensor], task: str):
         """Normalized state inputs, the posterior latent and its product codes."""
@@ -256,10 +329,26 @@ class JointPVQModel(nn.Module):
             raise ValueError(f"Unknown task {task}")
         normalized = {
             k: self.normalizers[k](obs[k], self.validity(obs, k, task))
-            for k in OBS_KEYS
+            for k in self.observation_keys
         }
         state = [normalized["max_coords_obs"], normalized["previous_actions"]]
-        if task == "hoi":
+        if self.config.encoder_mode != "dual_native":
+            target = self.normalizers["unified_target"](
+                obs["unified_target"], unified_target_mask(obs["unified_target_flags"])
+            ).reshape(-1, 2, FEATURES_PER_STEP)
+            target = torch.cat(
+                (target, obs["unified_target_flags"].float()), -1
+            ).flatten(1)
+            inputs = torch.cat(
+                state + [target, normalized["intermimic_object_obs"]], -1
+            )
+            encoder = (
+                self.encoder
+                if self.config.encoder_mode == "single_unified"
+                else (self.hoi_encoder if task == "hoi" else self.loco_encoder)
+            )
+            latent = encoder(inputs)
+        elif task == "hoi":
             latent = self.hoi_encoder(
                 torch.cat(
                     state

@@ -47,6 +47,7 @@ from protomotions.agents.multi_source_distill.curriculum import MotionSamplingCu
 from protomotions.agents.multi_source_distill.data import complete_observations
 from protomotions.agents.multi_source_distill.model import (
     OBS_KEYS,
+    STATE_OBS_KEYS,
     JointPVQModel,
     joint_model_config_from_dict,
     model_config_from_layouts,
@@ -72,6 +73,14 @@ from protomotions.agents.multi_source_distill.teacher_filter import (
     export_filter,
     load_filter,
 )
+from protomotions.agents.multi_source_distill.unified import (
+    ENCODER_MODES,
+    FLAG_DIM,
+    FUTURE_STEPS,
+    NATIVE_DIMS,
+    TARGET_DIM,
+    validate_unified_teacher,
+)
 
 BEST_CHECKPOINT = "score_based.ckpt"
 SNAPSHOT_DIR = "snapshots"
@@ -90,6 +99,12 @@ def is_new_best(score, best_evaluation):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--distillation-sources", required=True)
+    p.add_argument(
+        "--encoder-mode",
+        choices=ENCODER_MODES,
+        default=None,
+        help="Default: dual_native for new runs, checkpoint mode on resume/warm-start",
+    )
     p.add_argument("--output-dir", default="results/hoi_loco_pvq")
     p.add_argument("--num-envs", type=int, default=1024, help="Environments per GPU")
     p.add_argument(
@@ -832,6 +847,7 @@ def run(args):
                 scene_motion_weights=scene_motion_weights,
                 locomotion_frames_on_cpu=args.locomotion_frames_on_cpu,
                 student_action_gain=student_action_gain,
+                encoder_mode=args.encoder_mode,
             )
         )
         print(
@@ -923,8 +939,18 @@ def run(args):
             normalizer_min_std=args.normalizer_min_std,
             normalize_latent=args.normalize_latent,
             student_action_gain=student_action_gain,
+            encoder_mode=args.encoder_mode,
+            object_obs_has_contacts=args.object_obs_has_contacts,
         )
         model = JointPVQModel(model_config).to(device)
+        encoder_parameters = sum(
+            p.numel() for name, p in model.named_parameters() if "encoder." in name
+        )
+        print(
+            f"[rank {rank}] encoder_mode={model_config.encoder_mode}, "
+            f"encoder_parameters={encoder_parameters}",
+            flush=True,
+        )
         optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
         contract = teacher_contract(configs)
         training_config = {
@@ -1072,6 +1098,12 @@ def run(args):
                             "args": vars(args),
                             "sources": manifest_state(manifest),
                             "model": asdict(model_config),
+                            "encoder_parameters": encoder_parameters,
+                            "student_reference_steps": (
+                                list(FUTURE_STEPS)
+                                if args.encoder_mode != "dual_native"
+                                else None
+                            ),
                             "reference_offsets_seconds": {
                                 s.id: reference_offsets(c)
                                 for s, c in zip(manifest.sources, configs)
@@ -1477,18 +1509,94 @@ def run(args):
         launcher.app.close()
 
 
-def preflight(args, world_size):
+def preflight(args, world_size, *, encoder_config=None):
     manifest = load_manifest(args.distillation_sources)
     for rank in range(world_size):
         manifest.assignment(rank, world_size)
     configs = load_teacher_configs(manifest)
-    # Build the resume contract here too, so stale saved configs fail before launch.
-    teacher_contract(configs)
     # DDP synchronizes every optimizer step, so all ranks must take as many.
+    # Reject invalid task layouts before resolving encoder/observation details.
     counts = {t: minibatch_count(args, t) for t in {s.task for s in manifest.sources}}
     if len(set(counts.values())) > 1:
         raise ValueError(f"Ranks need equal minibatches per epoch, got {counts}")
+    if encoder_config is None:
+        resolve_encoder_mode(args, configs, manifest)
+    else:
+        resolve_encoder_mode(args, configs, manifest, checkpoint_config=encoder_config)
+    if args.encoder_mode != "dual_native":
+        for source in manifest.sources:
+            weights = torch.load(
+                source.teacher_checkpoint,
+                map_location="cpu",
+                weights_only=False,
+                mmap=True,
+            )["model"]
+            keys = (
+                ("intermimic_target_obs", "intermimic_object_obs")
+                if source.task == "hoi"
+                else ("mimic_target_poses",)
+            )
+            expected = sum(
+                NATIVE_DIMS[k] for k in ("max_coords_obs", "previous_actions") + keys
+            )
+            first_layer = weights.get("_actor.mu.mlp.0.weight")
+            if first_layer is None or first_layer.shape[1] != expected:
+                raise ValueError(
+                    f"{source.id}: unified targets require a {expected}D native tracker "
+                    "(52-body SMPL-X; one object for HOI)"
+                )
+    # Build the resume contract here too, so stale saved configs fail before launch.
+    teacher_contract(configs)
     return manifest, configs
+
+
+def resolve_encoder_mode(args, configs, manifest, *, checkpoint_config=None):
+    """Restore architecture before environment construction; never migrate weights."""
+    requested = getattr(args, "encoder_mode", None)
+    checkpoint = getattr(args, "resume", None) or getattr(args, "warm_start", None)
+    # Stage two supplies its frozen posterior config explicitly. Its --resume
+    # points to a prior checkpoint, not a stage-one student checkpoint.
+    saved_config = checkpoint_config
+    if saved_config is None and checkpoint:
+        saved = torch.load(
+            checkpoint, map_location="cpu", weights_only=False, mmap=True
+        )
+        saved_config = joint_model_config_from_dict(saved["model_config"])
+    if (
+        saved_config is not None
+        and requested is not None
+        and requested != saved_config.encoder_mode
+    ):
+        raise ValueError("Encoder mode differs from checkpoint; start a fresh run")
+    args.encoder_mode = (
+        saved_config.encoder_mode if saved_config else (requested or "dual_native")
+    )
+    contact_layouts = {
+        c["env"]
+        .observation_components["intermimic_object_obs"]
+        .static_params.get("include_object_contacts", True)
+        for s, c in zip(manifest.sources, configs)
+        if s.task == "hoi"
+    }
+    if len(contact_layouts) > 1:
+        raise ValueError("HOI sources must share the object contact feature layout")
+    args.object_obs_has_contacts = (
+        saved_config.object_obs_has_contacts
+        if saved_config
+        else next(iter(contact_layouts), True)
+    )
+    if args.encoder_mode != "dual_native":
+        if {s.task for s in manifest.sources} != {"hoi", "locomotion"}:
+            raise ValueError(
+                "Unified experiments require both HOI and locomotion sources"
+            )
+        for source, config in zip(manifest.sources, configs):
+            validate_unified_teacher(config, source.task)
+        if (
+            saved_config is not None
+            and saved_config.object_obs_has_contacts is not False
+        ):
+            raise ValueError("Unified checkpoint requires the v9_3 object layout")
 
 
 def check_teacher_psi(args, manifest, configs) -> dict[str, str]:
@@ -1562,6 +1670,23 @@ def main():
             json.dumps(
                 {
                     "valid": True,
+                    "encoder_mode": args.encoder_mode,
+                    "unified_target_dim": TARGET_DIM
+                    if args.encoder_mode != "dual_native"
+                    else None,
+                    "unified_target_flags": FLAG_DIM
+                    if args.encoder_mode != "dual_native"
+                    else None,
+                    "unified_encoder_input_dim": sum(
+                        NATIVE_DIMS[k] for k in STATE_OBS_KEYS
+                    )
+                    + TARGET_DIM
+                    + FLAG_DIM
+                    if args.encoder_mode != "dual_native"
+                    else None,
+                    "student_reference_steps": list(FUTURE_STEPS)
+                    if args.encoder_mode != "dual_native"
+                    else None,
                     "hoi_teacher_filter": (
                         "existing" if filter_path.is_file() else "build_on_start"
                     ),

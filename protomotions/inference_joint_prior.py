@@ -226,6 +226,7 @@ def run(args):
             launcher.app,
             assigned=(index,),
             student_action_gain=model.posterior.config.student_action_gain,
+            encoder_mode=model.posterior.config.encoder_mode,
             headless=args.headless,
             custom_key_handlers={
                 "F9": switch_motion,

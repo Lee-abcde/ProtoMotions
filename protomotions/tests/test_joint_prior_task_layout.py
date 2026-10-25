@@ -66,7 +66,18 @@ def test_stage_one_preflight_rejects_unequal_minibatch_counts(monkeypatch):
     balanced = stage_one_args(
         "--batch-size", "8192", "--hoi-num-envs", "2048", "--hoi-batch-size", "4096"
     )
-    assert stage_one.preflight(balanced, 2) == (manifest, [{}, {}])
+    # This test's empty teacher configs model task layout only. Isolate encoder
+    # resolution for the successful path; its real behavior is tested separately.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            stage_one,
+            "resolve_encoder_mode",
+            lambda args, configs, manifest: setattr(
+                args, "encoder_mode", "dual_native"
+            ),
+        )
+        assert stage_one.preflight(balanced, 2) == (manifest, [{}, {}])
+    # Keep the real resolver here: incorrect ordering would raise KeyError('env').
     unbalanced = stage_one_args("--batch-size", "8192", "--hoi-num-envs", "2048")
     with pytest.raises(ValueError, match="equal minibatches"):
         stage_one.preflight(unbalanced, 2)
