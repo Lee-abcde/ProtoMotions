@@ -103,6 +103,9 @@ export TORCH_NCCL_DESYNC_DEBUG=1
 # Runs inside the container, once per task. MODE=check is the preflight.
 inner_script=$(cat <<'INNER'
 set -euo pipefail
+# Isaac Sim's PhysX plugin occasionally aborts at startup (double free); each
+# rank's core dump is ~20 GB and would land in PROTOMOTIONS_DIR on the Home quota.
+ulimit -c 0
 # activate reads variables that may be unset.
 set +u
 source "$VENV/bin/activate"
