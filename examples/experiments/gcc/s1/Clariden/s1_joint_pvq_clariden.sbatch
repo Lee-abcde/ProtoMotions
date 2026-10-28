@@ -193,5 +193,88 @@ INNER
 echo "Clariden preflight: code, data, checkpoints, action contract, and rank assignment"
 MODE=check srun --ntasks=1 --environment="$EDF" bash -c "$inner_script"
 
+# Isaac Sim's PhysX plugin occasionally aborts (double free) or hangs while the
+# environments start, on any node. Such an attempt is retried in this allocation
+# instead of failing the job and queueing again; the retry resumes from last.ckpt
+# like a new submission. A failure after the attempt's first iteration is not
+# retried: the job ends with its status.
+STARTUP_ATTEMPTS="${STARTUP_ATTEMPTS:-3}"
+# Healthy starts reach the first iteration in 8-14 minutes.
+STARTUP_TIMEOUT_MIN="${STARTUP_TIMEOUT_MIN:-30}"
+# No retry with less time left than this.
+RETRY_MIN_LEFT_MIN="${RETRY_MIN_LEFT_MIN:-60}"
+# Iterations are counted in this job's log; the fallback is the --output pattern.
+LOG_FILE=$(scontrol show job "$SLURM_JOB_ID" | sed -n 's/^ *StdOut=//p')
+[[ -f $LOG_FILE ]] || LOG_FILE="$OUTPUT_ROOT/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.log"
+if [[ ! -f $LOG_FILE ]]; then
+  # Without the log a healthy start looks hung, so only crashes are retried.
+  echo "Job log not found; startup hang detection is off" >&2
+  STARTUP_TIMEOUT_MIN=$((7 * 24 * 60))
+fi
+
+iterations_logged() {
+  local n
+  n=$(grep -cE 'Epoch [0-9]+: collect' "$LOG_FILE" 2>/dev/null) || true
+  echo "${n:-0}"
+}
+
+seconds_left() {
+  local t d=0 s=0 x fields
+  t=$(squeue -h -j "$SLURM_JOB_ID" -o %L 2>/dev/null) || true
+  if [[ ! $t =~ ^[0-9:-]+$ ]]; then echo 0; return; fi
+  if [[ $t == *-* ]]; then d=${t%%-*}; t=${t#*-}; fi
+  IFS=: read -ra fields <<<"$t"
+  for x in "${fields[@]}"; do s=$((s * 60 + 10#$x)); done
+  echo $((d * 86400 + s))
+}
+
+stop_training_step() {
+  local step
+  for step in $(squeue -h -s -j "$SLURM_JOB_ID" -o %i | grep -vE '\.(batch|extern)$'); do
+    scancel "$step" || true
+  done
+}
+
 echo "Starting $PREFLIGHT_RANKS-rank training in $RUN_DIR"
-MODE=train srun --kill-on-bad-exit=1 --wait=60 --environment="$EDF" bash -c "$inner_script"
+attempt=1
+while :; do
+  before=$(iterations_logged)
+  started=$SECONDS
+  MODE=train srun --kill-on-bad-exit=1 --wait=60 --environment="$EDF" \
+    bash -c "$inner_script" </dev/null &
+  srun_pid=$!
+  progressed=0
+  while kill -0 "$srun_pid" 2>/dev/null; do
+    sleep 30
+    if (($(iterations_logged) > before)); then
+      progressed=1
+      break
+    fi
+    if ((SECONDS - started > STARTUP_TIMEOUT_MIN * 60)); then
+      echo "[attempt $attempt] no iteration after $STARTUP_TIMEOUT_MIN min: stopping the training step" >&2
+      stop_training_step
+      break
+    fi
+  done
+  set +e
+  wait "$srun_pid"
+  status=$?
+  set -e
+  if ((status == 0)); then exit 0; fi
+  if ((progressed || $(iterations_logged) > before)); then
+    echo "[attempt $attempt] training failed after it started (status $status); not retrying" >&2
+    exit "$status"
+  fi
+  if ((attempt >= STARTUP_ATTEMPTS)); then
+    echo "[attempt $attempt] startup failed (status $status); no attempts left" >&2
+    exit "$status"
+  fi
+  if (($(seconds_left) < RETRY_MIN_LEFT_MIN * 60)); then
+    echo "[attempt $attempt] startup failed (status $status); under $RETRY_MIN_LEFT_MIN min left, not retrying" >&2
+    exit "$status"
+  fi
+  attempt=$((attempt + 1))
+  echo "Startup failed (status $status); retrying in this allocation, attempt $attempt of $STARTUP_ATTEMPTS" >&2
+  # Let the old step release its GPUs.
+  sleep 30
+done
