@@ -109,7 +109,9 @@ class SceneCfg(InteractiveSceneCfg):
                 setattr(self, f"object_{obj_idx}", object)
 
                 # Object contact sensors are used to detect collisions between objects.
-                object_contact_paths = ["/World/ground/terrain/mesh"]
+                object_contact_paths = (
+                    ["/World/ground/terrain/mesh"] if terrain is not None else []
+                )
                 if support_surface_size is not None:
                     # Keep the fixture in a dedicated filter column so its
                     # force can be removed from the task contact signal. This
@@ -272,7 +274,9 @@ class SceneCfg(InteractiveSceneCfg):
             self.robot.spawn = self.robot.spawn.replace(rigid_props=new_rigid_props)
 
         if activate_contact_sensors:
-            sensing_filter = ["/World/ground/terrain/mesh"]
+            sensing_filter = (
+                ["/World/ground/terrain/mesh"] if terrain is not None else []
+            )
             for obj_idx in range(num_objects_per_scene):
                 sensing_filter.append(f"/World/envs/env_.*/Object_{obj_idx}")
             for body_name in robot_config.contact_bodies:

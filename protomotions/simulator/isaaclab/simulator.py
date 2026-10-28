@@ -152,8 +152,6 @@ class IsaacLabSimulator(Simulator):
         -1: (0.0, 0.0, 1.0),
         2: (1.0, 1.0, 1.0),
     }
-    # Object contact filters are ordered as ground, support surface, objects.
-    _SUPPORT_SURFACE_OBJECT_CONTACT_FILTER_INDEX = 1
     _OBJECT_RESET_STAGING_HEIGHT = 10.0
 
     # =====================================================
@@ -1111,7 +1109,7 @@ class IsaacLabSimulator(Simulator):
                 rigid_body_contact_forces[:, body_idx, :] = (
                     wp.to_torch(contact_sensor.data.net_forces_w).clone()[:, 0, :]
                 )
-                # The body sensor filters ground first, followed by every
+                # The body sensor filters optional ground first, followed by every
                 # scene object. Keep only the object columns so self-contact
                 # and ground contact cannot satisfy object-contact tracking.
                 if num_objects > 0:
@@ -1121,8 +1119,9 @@ class IsaacLabSimulator(Simulator):
                             f"Contact sensor for {body_name!r} has no "
                             "force_matrix_w; object filters are required"
                         )
+                    object_start = int(self.terrain is not None)
                     object_forces = wp.to_torch(force_matrix_w)[
-                        :, 0, 1 : 1 + num_objects, :
+                        :, 0, object_start : object_start + num_objects, :
                     ]
                     if object_forces.shape[1] != num_objects:
                         raise RuntimeError(
@@ -1175,7 +1174,7 @@ class IsaacLabSimulator(Simulator):
                         net_forces = exclude_contact_filter_force(
                             net_forces,
                             force_matrix,
-                            self._SUPPORT_SURFACE_OBJECT_CONTACT_FILTER_INDEX,
+                            int(self.terrain is not None),
                         )
                     object_forces.append(net_forces.unsqueeze(2))
                 else:
