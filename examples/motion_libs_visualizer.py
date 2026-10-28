@@ -8,6 +8,7 @@
 from typing import Dict, List
 import argparse
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -394,6 +395,8 @@ class MotionVisualizerSmoothness:
             )
         self.current_motion_idx = self.start_motion_idx
         self.current_frame = 0
+        self._motion_step_requested = 0
+        self._motion_index_prompt_requested = False
         self.current_motion_length = (
             self.motion_libs[0]
             .get_motion_num_frames(None)[self.current_motion_idx]
@@ -410,6 +413,9 @@ class MotionVisualizerSmoothness:
 
         # Load robot configuration using factory function
         self.robot_cfg = robot_config(robot_name)
+        # Playback shows recorded contacts from the motion file; physics contact
+        # sensors are unused, so skip creating them.
+        self.robot_cfg.contact_bodies = None
 
         # Store kinematic info for later use
         self.kinematic_info = self.robot_cfg.kinematic_info
@@ -437,11 +443,12 @@ class MotionVisualizerSmoothness:
         # Initialize body markers after kinematic info is loaded
         self._initialize_body_markers()
 
-        # Create custom key handlers. R must be REGISTERED here (not left to a legacy
-        # simulator.user_requested_reset flag that the UserInterface sim layer no longer sets) — otherwise
-        # IsaacGym, which only delivers keys it subscribed via subscribe_viewer_keyboard_event, never sees it.
+        # Register navigation keys explicitly for every simulator backend.
         custom_key_handlers = {
             "R": self._request_next_motion,  # Key R: switch to the next motion
+            "LEFT": self._request_previous_motion,
+            "RIGHT": self._request_next_motion,
+            "F9": self._request_motion_index,
             "1": self.increase_speed,  # Key 1: Increase playback speed
             "2": self.decrease_speed,  # Key 2: Decrease playback speed
             "3": self.increase_smoothness_threshold,  # Key 3: Increase smoothness threshold
@@ -484,7 +491,9 @@ class MotionVisualizerSmoothness:
         print("  Yellow spheres - Bodies exceeding smoothness threshold")
         print("  Purple spheres - Bodies in contact with ground")
         print("Controls:")
-        print("  'R' - Switch to next motion")
+        print("  Left arrow - Previous motion (wraps to last)")
+        print("  Right arrow / 'R' - Next motion (wraps to first)")
+        print("  F9 - Enter a motion index in the terminal (empty to cancel)")
         print("  '1' - Increase playback speed by 150% (NumPad 1 for IsaacLab)")
         print("  '2' - Decrease playback speed by 150% (NumPad 2 for IsaacLab)")
         print("  '3' - Increase smoothness threshold by 1.5x (NumPad 3 for IsaacLab)")
@@ -562,15 +571,43 @@ class MotionVisualizerSmoothness:
             markers=contact_marker_configs,
         )
 
-    def _request_next_motion(self):
-        """R key press: ask the main loop to advance to the next motion. Deferred via the flag (rather than
-        switching here) so the heavy per-motion smoothness recompute runs on the loop, not in the key
-        callback fired from inside the viewer's event poll."""
-        self.simulator.user_requested_reset = True
+    def _request_next_motion(self) -> None:
+        """Queue a forward step; recompute smoothness outside the key callback."""
+        self._motion_step_requested += 1
 
-    def _switch_to_next_motion(self):
-        """Switch to the next motion in the dataset"""
-        self.current_motion_idx = (self.current_motion_idx + 1) % self.total_motions
+    def _request_previous_motion(self) -> None:
+        """Queue a backward step for the playback loop."""
+        self._motion_step_requested -= 1
+
+    def _request_motion_index(self) -> None:
+        """Defer terminal input until after the viewer's keyboard callback."""
+        self._motion_index_prompt_requested = True
+
+    def _prompt_motion_index(self) -> int | None:
+        """Read a zero-based motion index; blank or invalid input keeps playback."""
+        try:
+            raw = input(
+                f"\nEnter motion index [0, {self.total_motions - 1}] "
+                f"(current {self.current_motion_idx}, empty to cancel): "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nMotion selection cancelled.")
+            return None
+        if not raw:
+            return None
+        try:
+            index = int(raw)
+        except ValueError:
+            print(f"Invalid motion index: {raw!r}")
+            return None
+        if not 0 <= index < self.total_motions:
+            print(f"Motion index must be in [0, {self.total_motions - 1}].")
+            return None
+        return index
+
+    def _switch_motion(self, offset: int) -> None:
+        """Switch by a signed offset, wrapping at either end of the dataset."""
+        self.current_motion_idx = (self.current_motion_idx + offset) % self.total_motions
         self.current_frame = 0
         self._last_text_signature = None
         self.current_motion_length = (
@@ -1010,13 +1047,24 @@ class MotionVisualizerSmoothness:
         marker_states = None
         target_dt = 1.0 / FPS  # wall-clock time per motion frame
 
-        while True:
+        while self.simulator.is_simulation_running():
             frame_start = time.perf_counter()
 
-            # Check for reset request (the registered R key handler sets this flag)
-            if self.simulator.user_requested_reset:
-                self._switch_to_next_motion()
-                self.simulator.user_requested_reset = False
+            # Process navigation outside the viewer's keyboard callbacks.
+            if self._motion_index_prompt_requested:
+                self._motion_index_prompt_requested = False
+                index = self._prompt_motion_index()
+                if index is not None:
+                    self._motion_step_requested = 0
+                    self._switch_motion(index - self.current_motion_idx)
+                    step_count = 0
+                    marker_states = None
+            if self._motion_step_requested:
+                offset = self._motion_step_requested
+                self._motion_step_requested = 0
+                self._switch_motion(offset)
+                step_count = 0
+                marker_states = None
 
             # Calculate playback parameters based on speed
             # For speed < 1.0: slow down by updating motion less frequently (frames_per_step > 1)
@@ -1073,6 +1121,7 @@ def main():
 
     # Extra simulator parameters for IsaacLab
     extra_simulator_params = {}
+    simulation_app = None
     if args.simulator == "isaaclab":
         app_launcher_flags = {
             "headless": args.headless,
@@ -1080,32 +1129,41 @@ def main():
             # # Performance settings for faster-than-realtime rendering
             # "rendering_mode": "performance",  # Options: "performance", "balanced", "quality"
         }
+        if not args.headless:
+            app_launcher_flags["visualizer"] = ["kit"]
         app_launcher = AppLauncher(app_launcher_flags)
         simulation_app = app_launcher.app
         extra_simulator_params["simulation_app"] = simulation_app
 
-    visualizer = MotionVisualizerSmoothness(
-        motion_files=args.motion_files,
-        start_motion_idx=args.start_motion_idx,
-        robot_name=args.robot,
-        simulator_type=args.simulator,
-        headless=args.headless,
-        cpu_only=args.cpu_only,
-        extra_simulator_params=extra_simulator_params,
-        playback_speed=args.playback_speed,
-        metric=args.metric,
-        use_data_vel=args.use_data_vel,
-        window_sec=args.window_sec,
-        text_display=args.text_display,
-        text_selection=args.text_selection,
-    )
-
+    visualizer = None
     try:
+        visualizer = MotionVisualizerSmoothness(
+            motion_files=args.motion_files,
+            start_motion_idx=args.start_motion_idx,
+            robot_name=args.robot,
+            simulator_type=args.simulator,
+            headless=args.headless,
+            cpu_only=args.cpu_only,
+            extra_simulator_params=extra_simulator_params,
+            playback_speed=args.playback_speed,
+            metric=args.metric,
+            use_data_vel=args.use_data_vel,
+            window_sec=args.window_sec,
+            text_display=args.text_display,
+            text_selection=args.text_selection,
+        )
         visualizer.run()
     except KeyboardInterrupt:
         print("\nShutting down...")
+    except Exception:
+        # Kit shutdown can terminate Python before it reports the exception.
+        traceback.print_exc()
+        raise
     finally:
-        visualizer.simulator.close()
+        if visualizer is not None:
+            visualizer.simulator.close()
+        elif simulation_app is not None and not simulation_app.is_exiting():
+            simulation_app.close()
 
 
 if __name__ == "__main__":

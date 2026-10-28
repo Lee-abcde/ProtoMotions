@@ -299,6 +299,8 @@ class IsaacGymSimulator(Simulator):
     def _gym_key_for_user_interface_key(key_name: str):
         if key_name == ";":
             return gymapi.KEY_SEMICOLON
+        if key_name in ("LEFT", "RIGHT", "F9"):
+            return getattr(gymapi, f"KEY_{key_name}")
         if len(key_name) == 1 and key_name.isalpha():
             return getattr(gymapi, f"KEY_{key_name.upper()}")
         if len(key_name) == 1 and key_name.isdigit():
