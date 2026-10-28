@@ -1540,12 +1540,17 @@ class IsaacLabSimulator(Simulator):
         vp_api = get_active_viewport()
         capture_viewport_to_file(vp_api, file_name)
 
+    def is_simulation_running(self) -> bool:
+        """Stop on a user close request or when the Kit application exits."""
+        return super().is_simulation_running() and self._simulation_app.is_running()
+
     def close(self) -> None:
         """
         Close the simulation application and perform cleanup.
         """
         super().close()
-        self._simulation_app.close()
+        if not self._simulation_app.is_exiting():
+            self._simulation_app.close()
 
     def _build_markers(
         self, visualization_markers: Dict[str, VisualizationMarkerConfig]
