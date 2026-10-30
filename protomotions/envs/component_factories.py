@@ -1685,6 +1685,49 @@ def gr_error_factory(threshold: float = None) -> MdpComponent:
     )
 
 
+def finger_local_rot_error_factory(
+    kinematic_info, threshold: float = None
+) -> MdpComponent:
+    """Factory for worst parent-relative finger rotation error metric.
+
+    Covers the 30 SMPL-X finger segments ``{L,R}_{Thumb,Index,Middle,Ring,Pinky}{1,2,3}``.
+
+    Args:
+        kinematic_info: Robot kinematic structure (``robot_cfg.kinematic_info``).
+        threshold: If set, fail when the worst segment error > threshold (degrees).
+
+    Returns:
+        MdpComponent configured for finger rotation error evaluation [deg].
+    """
+    from protomotions.envs.rewards.hand_tracking import (
+        max_finger_local_rotation_error_deg,
+    )
+
+    names = [
+        f"{side}_{finger}{segment}"
+        for side in ("L", "R")
+        for finger in ("Thumb", "Index", "Middle", "Ring", "Pinky")
+        for segment in (1, 2, 3)
+    ]
+    finger_ids = [kinematic_info.body_names.index(name) for name in names]
+    static_params = {
+        "finger_indices": torch.tensor(finger_ids, dtype=torch.long),
+        "parent_indices": torch.tensor(
+            [kinematic_info.parent_indices[i] for i in finger_ids], dtype=torch.long
+        ),
+    }
+    if threshold is not None:
+        static_params["threshold"] = threshold
+    return MdpComponent(
+        compute_func=max_finger_local_rotation_error_deg,
+        dynamic_vars={
+            "current_rot": EnvContext.current.rigid_body_rot,
+            "ref_rot": EnvContext.mimic.ref_state.rigid_body_rot,
+        },
+        static_params=static_params,
+    )
+
+
 def masked_condition_position_error_factory(
     conditionable_body_ids: Tensor,
     threshold: float = 0.25,

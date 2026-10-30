@@ -18,15 +18,13 @@ from protomotions.utils.rotations import (
 )
 
 
-def compute_finger_local_rotation_rew(
+def finger_local_rotation_error(
     current_rot: Tensor,
     ref_rot: Tensor,
     finger_indices: Tensor,
     parent_indices: Tensor,
-    coarse_sigma: float = 0.35,
-    fine_sigma: float = 0.10,
 ) -> Tensor:
-    """Reward parent-relative rotation accuracy at two scales [rad]."""
+    """Parent-relative rotation error per finger segment [env, finger] [rad]."""
     current_local = quat_mul(
         quat_conjugate(current_rot[:, parent_indices], True),
         current_rot[:, finger_indices],
@@ -39,11 +37,41 @@ def compute_finger_local_rotation_rew(
     )
     difference = quat_mul(quat_conjugate(current_local, True), ref_local, True)
     # atan2 stays accurate near identity, where acos(w) loses the tiny errors
-    # that this reward is intended to resolve; abs(w) handles q/-q equivalence.
-    angle = 2.0 * torch.atan2(
+    # that the reward is intended to resolve; abs(w) handles q/-q equivalence.
+    return 2.0 * torch.atan2(
         difference[..., :3].norm(dim=-1), difference[..., 3].abs()
     )
-    error_sq = angle.square()
+
+
+def max_finger_local_rotation_error_deg(
+    current_rot: Tensor,
+    ref_rot: Tensor,
+    finger_indices: Tensor,
+    parent_indices: Tensor,
+) -> Tensor:
+    """Worst parent-relative finger segment rotation error per env [deg].
+
+    Evaluation metric: excludes wrist/arm error, and takes the maximum so a
+    single untracked finger is not averaged away by the others.
+    """
+    error = finger_local_rotation_error(
+        current_rot, ref_rot, finger_indices, parent_indices
+    )
+    return torch.rad2deg(error.amax(dim=-1))
+
+
+def compute_finger_local_rotation_rew(
+    current_rot: Tensor,
+    ref_rot: Tensor,
+    finger_indices: Tensor,
+    parent_indices: Tensor,
+    coarse_sigma: float = 0.35,
+    fine_sigma: float = 0.10,
+) -> Tensor:
+    """Reward parent-relative rotation accuracy at two scales [rad]."""
+    error_sq = finger_local_rotation_error(
+        current_rot, ref_rot, finger_indices, parent_indices
+    ).square()
     reward = 0.5 * torch.exp(-error_sq / coarse_sigma**2)
     reward += 0.5 * torch.exp(-error_sq / fine_sigma**2)
     return reward.mean(dim=-1)
