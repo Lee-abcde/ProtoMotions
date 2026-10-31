@@ -9,7 +9,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from examples.experiments.gcc import s0_loco_tracker, s0_loco_tracker_v3
+from examples.experiments.gcc import (
+    s0_loco_tracker,
+    s0_loco_tracker_v3,
+    s0_loco_tracker_v5,
+)
 from protomotions.envs.base_env.utils import combine_evaluation
 from protomotions.envs.component_factories import finger_local_rot_error_factory
 from protomotions.envs.rewards.hand_tracking import (
@@ -17,6 +21,8 @@ from protomotions.envs.rewards.hand_tracking import (
 )
 from protomotions.robot_configs.smplx import SMPLXRobotConfig
 from protomotions.utils.rotations import exp_map_to_quat, quat_mul
+
+FINGER_NAMES = {"Thumb", "Index", "Middle", "Ring", "Pinky"}
 
 
 @pytest.fixture(scope="module")
@@ -64,10 +70,7 @@ def test_factory_binds_smplx_fingers_and_fails_only_above_threshold(robot):
     params = finger_local_rot_error_factory(kin).static_params
     fingers = params["finger_indices"].tolist()
     assert len(fingers) == 30 and "threshold" not in params
-    assert all(
-        names[i][2:-1] in {"Thumb", "Index", "Middle", "Ring", "Pinky"}
-        for i in fingers
-    )
+    assert all(names[i][2:-1] in FINGER_NAMES for i in fingers)
     for finger, parent in zip(fingers, params["parent_indices"].tolist()):
         assert parent == kin.parent_indices[finger]
 
@@ -82,9 +85,7 @@ def test_factory_binds_smplx_fingers_and_fails_only_above_threshold(robot):
         components = {
             "finger_local_rot_error": finger_local_rot_error_factory(kin, threshold)
         }
-        raw = {
-            name: component.compute(ctx) for name, component in components.items()
-        }
+        raw = {name: component.compute(ctx) for name, component in components.items()}
         failed, values, _ = combine_evaluation(raw, components, 2, torch.device("cpu"))
         torch.testing.assert_close(
             values["finger_local_rot_error"],
@@ -107,3 +108,19 @@ def test_v3_trains_like_v1_and_only_adds_finger_evaluation(robot):
     finger = v3.evaluation_components["finger_local_rot_error"].static_params
     assert finger["threshold"] == 35.0
     assert v3.evaluation_components["gt_error"].static_params["threshold"] == 0.5
+
+
+def test_v5_only_widens_finger_action_std(robot):
+    args = SimpleNamespace(batch_size=16, training_max_steps=1)
+    env = s0_loco_tracker.env_config(robot, args)
+    v3 = s0_loco_tracker_v3.agent_config(robot, env, args)
+    v5 = s0_loco_tracker_v5.agent_config(robot, env, args)
+    assert v3.model.actor.actor_logstd == -2.9
+    assert not v5.model.actor.learnable_std
+    logstd = dict(zip(robot.kinematic_info.dof_names, v5.model.actor.actor_logstd))
+    fingers = [name for name, value in logstd.items() if value == -1.5]
+    assert len(fingers) == 90 and all(n[2:-3] in FINGER_NAMES for n in fingers)
+    assert all(value == -2.9 for name, value in logstd.items() if name not in fingers)
+    assert set(v5.evaluator.evaluation_components) == set(
+        v3.evaluator.evaluation_components
+    )
