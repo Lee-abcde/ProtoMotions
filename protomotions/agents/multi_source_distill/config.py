@@ -52,10 +52,10 @@ class SourceManifest:
         if len({s.id for s in self.sources}) != len(self.sources):
             raise ValueError("Dataset IDs must be unique")
         locomotion_sources = sum(s.task == "locomotion" for s in self.sources)
-        if locomotion_sources != int(self.locomotion_num_ranks > 0):
-            raise ValueError(
-                "Require one locomotion source iff locomotion_num_ranks > 0"
-            )
+        if (locomotion_sources > 0) != (self.locomotion_num_ranks > 0):
+            raise ValueError("Require locomotion sources iff locomotion_num_ranks > 0")
+        if locomotion_sources > 1 and locomotion_sources != self.locomotion_num_ranks:
+            raise ValueError("Several locomotion sources need one locomotion rank each")
         if (self.locomotion_num_ranks == 0) != (self.hoi_weight == 1):
             raise ValueError(
                 "HOI-only runs require hoi_weight=1; joint runs require hoi_weight<1"
@@ -80,7 +80,12 @@ class SourceManifest:
                     "List each HOI subset as an explicit, unsharded source"
                 )
             if s.task == "locomotion":
-                if "slurmrank" in s.motion_file:
+                if locomotion_sources > 1:
+                    if indices or "slurmrank" in s.motion_file:
+                        raise ValueError(
+                            "Several locomotion sources must each be unsharded"
+                        )
+                elif "slurmrank" in s.motion_file:
                     if len(indices) != self.locomotion_num_ranks:
                         raise ValueError(
                             "One explicit shard index per locomotion rank is required"
@@ -93,7 +98,11 @@ class SourceManifest:
                     )
 
     def assignment(self, rank: int, world_size: int) -> tuple[int, ...]:
-        """Locomotion ranks come first; HOI sources are distributed round-robin."""
+        """Locomotion ranks come first; HOI sources are distributed round-robin.
+
+        One locomotion source is shared by every locomotion rank (one shard each);
+        several locomotion sources take one locomotion rank each, in listed order.
+        """
         has_hoi = any(s.task == "hoi" for s in self.sources)
         valid_world_size = (
             world_size > self.locomotion_num_ranks
@@ -105,9 +114,10 @@ class SourceManifest:
                 "World size must match locomotion ranks, plus HOI ranks when present"
             )
         if rank < self.locomotion_num_ranks:
-            return (
-                next(i for i, s in enumerate(self.sources) if s.task == "locomotion"),
-            )
+            locomotion = [
+                i for i, s in enumerate(self.sources) if s.task == "locomotion"
+            ]
+            return (locomotion[rank] if len(locomotion) > 1 else locomotion[0],)
         hoi = [i for i, s in enumerate(self.sources) if s.task == "hoi"]
         offset = rank - self.locomotion_num_ranks
         count = world_size - self.locomotion_num_ranks
@@ -128,13 +138,12 @@ class SourceManifest:
         )
 
     def target_weights(self) -> list[float]:
-        hoi_sum = sum(s.weight for s in self.sources if s.task == "hoi")
-        return [
-            self.hoi_weight * s.weight / hoi_sum
-            if s.task == "hoi"
-            else 1 - self.hoi_weight
-            for s in self.sources
-        ]
+        sums = {
+            task: sum(s.weight for s in self.sources if s.task == task)
+            for task in ("hoi", "locomotion")
+        }
+        mass = {"hoi": self.hoi_weight, "locomotion": 1 - self.hoi_weight}
+        return [mass[s.task] * s.weight / sums[s.task] for s in self.sources]
 
 
 def load_manifest(path: str) -> SourceManifest:

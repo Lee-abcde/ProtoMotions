@@ -167,6 +167,7 @@ def build_environment(
     equal_motion_sampling=False,
     scene_motion_weights=None,
     locomotion_frames_on_cpu=False,
+    frames_on_cpu_sources=(),
     student_action_gain=None,
     encoder_mode="dual_native",
 ):
@@ -182,7 +183,8 @@ def build_environment(
     then sizes its per-object-type env quotas from them, as the HOI tracker
     does on resume. Without them every object type gets an equal share.
     ``locomotion_frames_on_cpu`` keeps the locomotion clips' per-frame tensors
-    in host RAM, so a full dataset fits next to the simulator on a 24 GB GPU.
+    in host RAM, so a full dataset fits next to the simulator on a 24 GB GPU;
+    ``frames_on_cpu_sources`` does so only for the listed locomotion source IDs.
     ``student_action_gain`` overrides only the copied environment's tanh gain;
     frozen teacher configs remain available for action/history conversion.
     """
@@ -226,7 +228,10 @@ def build_environment(
 
         mc.motion_file_switch_mode = MotionFileSwitchMode.FIXED
         mc.motion_file_shard_indices = None
-        on_cpu = locomotion_frames_on_cpu and manifest.sources[i].task == "locomotion"
+        source = manifest.sources[i]
+        on_cpu = source.task == "locomotion" and (
+            locomotion_frames_on_cpu or source.id in frames_on_cpu_sources
+        )
         libraries.append(
             MotionLib(mc, device=device, frame_device="cpu" if on_cpu else None)
         )

@@ -128,6 +128,14 @@ def parser():
         "dataset on one 24 GB GPU; only the queried frames are copied over",
     )
     p.add_argument(
+        "--frames-on-cpu-sources",
+        nargs="+",
+        default=[],
+        metavar="SOURCE_ID",
+        help="Like --locomotion-frames-on-cpu, but only for these locomotion "
+        "sources, e.g. one dataset too large to sit next to its simulator",
+    )
+    p.add_argument(
         "--train-tf32",
         action="store_true",
         help="TF32 tensor-core matmuls for student updates; rollouts stay FP32",
@@ -846,6 +854,7 @@ def run(args):
                 equal_motion_sampling=not args.evaluate_only,
                 scene_motion_weights=scene_motion_weights,
                 locomotion_frames_on_cpu=args.locomotion_frames_on_cpu,
+                frames_on_cpu_sources=set(args.frames_on_cpu_sources),
                 student_action_gain=student_action_gain,
                 encoder_mode=args.encoder_mode,
             )
@@ -1513,6 +1522,13 @@ def preflight(args, world_size, *, encoder_config=None):
     manifest = load_manifest(args.distillation_sources)
     for rank in range(world_size):
         manifest.assignment(rank, world_size)
+    # The joint prior reuses this preflight without the option.
+    if on_cpu := set(getattr(args, "frames_on_cpu_sources", ())):
+        locomotion = {s.id for s in manifest.sources if s.task == "locomotion"}
+        if unknown := on_cpu - locomotion:
+            raise ValueError(
+                f"--frames-on-cpu-sources are not locomotion sources: {sorted(unknown)}"
+            )
     configs = load_teacher_configs(manifest)
     # DDP synchronizes every optimizer step, so all ranks must take as many.
     # Reject invalid task layouts before resolving encoder/observation details.
