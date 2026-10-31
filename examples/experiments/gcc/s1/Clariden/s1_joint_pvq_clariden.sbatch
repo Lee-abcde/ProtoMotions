@@ -63,6 +63,9 @@ HOI_TEACHER_FILTER="${HOI_TEACHER_FILTER-/capstor/store/cscs/swissai/abs33/jli/c
 # A GH200 holds the full AMASS-X frames (~18.5 GiB) on the GPU; Euler's 24 GB
 # RTX 4090s need 1 to keep them in host RAM.
 LOCO_FRAMES_ON_CPU="${LOCO_FRAMES_ON_CPU:-0}"
+# Space-separated locomotion source IDs whose frames stay in host RAM, e.g.
+# "embody3d" for the Embody3D manifest (~37 GiB of frames).
+FRAMES_ON_CPU_SOURCES="${FRAMES_ON_CPU_SOURCES:-}"
 TRAIN_TF32="${TRAIN_TF32:-0}"
 # Online with the key that "wandb login" on a login node writes to ~/.netrc;
 # without it the run logs offline (upload later with wandb sync). 0 disables it.
@@ -72,7 +75,7 @@ WANDB_MODE="${WANDB_MODE:-online}"
 export PROTOMOTIONS_DIR VENV OUTPUT_ROOT RUN_NAME ENCODER_MODE SOURCES
 export NUM_ENVS BATCH_SIZE HOI_NUM_ENVS HOI_BATCH_SIZE ROLLOUT_STEPS LEARNING_RATE
 export NORMALIZER_MIN_STD NORMALIZE_LATENT ITERATIONS EVAL_EVERY STUDENT_PSI
-export EVALUATE_TEACHERS HOI_TEACHER_FILTER LOCO_FRAMES_ON_CPU TRAIN_TF32
+export EVALUATE_TEACHERS HOI_TEACHER_FILTER LOCO_FRAMES_ON_CPU FRAMES_ON_CPU_SOURCES TRAIN_TF32
 export USE_WANDB WANDB_PROJECT WANDB_MODE
 # Read here, where it is the job's task count: inside the one-task preflight
 # step it would be 1. Not WORLD_SIZE, which would make the ranks expect torchrun.
@@ -133,6 +136,10 @@ common_args=(
 if [[ -n "$ENCODER_MODE" ]]; then common_args+=(--encoder-mode "$ENCODER_MODE"); fi
 if [[ -n "$HOI_TEACHER_FILTER" ]]; then
   common_args+=(--hoi-teacher-filter "$HOI_TEACHER_FILTER")
+fi
+if [[ -n "$FRAMES_ON_CPU_SOURCES" ]]; then
+  read -ra on_cpu_sources <<<"$FRAMES_ON_CPU_SOURCES"
+  common_args+=(--frames-on-cpu-sources "${on_cpu_sources[@]}")
 fi
 if [[ -f "$OUTPUT_ROOT/$RUN_NAME/last.ckpt" ]]; then
   common_args+=(--resume "$OUTPUT_ROOT/$RUN_NAME/last.ckpt")
