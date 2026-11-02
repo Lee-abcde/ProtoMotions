@@ -11,7 +11,6 @@ import torch
 
 from examples.experiments.gcc import (
     s0_loco_tracker,
-    s0_loco_tracker_v3,
     s0_loco_tracker_v5,
 )
 from protomotions.envs.base_env.utils import combine_evaluation
@@ -96,31 +95,22 @@ def test_factory_binds_smplx_fingers_and_fails_only_above_threshold(robot):
         assert failed.tolist() == [should_fail] * 2
 
 
-def test_v3_trains_like_v1_and_only_adds_finger_evaluation(robot):
+def test_v5_adds_finger_evaluation_and_only_widens_finger_std(robot):
     args = SimpleNamespace(batch_size=16, training_max_steps=1)
-    assert s0_loco_tracker_v3.env_config is s0_loco_tracker.env_config
+    assert s0_loco_tracker_v5.env_config is s0_loco_tracker.env_config
     env = s0_loco_tracker.env_config(robot, args)
-    v1 = s0_loco_tracker.agent_config(robot, env, args).evaluator
-    v3 = s0_loco_tracker_v3.agent_config(robot, env, args).evaluator
-    assert set(v3.evaluation_components) - set(v1.evaluation_components) == {
-        "finger_local_rot_error"
-    }
-    finger = v3.evaluation_components["finger_local_rot_error"].static_params
-    assert finger["threshold"] == 35.0
-    assert v3.evaluation_components["gt_error"].static_params["threshold"] == 0.5
-
-
-def test_v5_only_widens_finger_action_std(robot):
-    args = SimpleNamespace(batch_size=16, training_max_steps=1)
-    env = s0_loco_tracker.env_config(robot, args)
-    v3 = s0_loco_tracker_v3.agent_config(robot, env, args)
+    v1 = s0_loco_tracker.agent_config(robot, env, args)
     v5 = s0_loco_tracker_v5.agent_config(robot, env, args)
-    assert v3.model.actor.actor_logstd == -2.9
+    v1_eval = v1.evaluator.evaluation_components
+    v5_eval = v5.evaluator.evaluation_components
+    assert set(v5_eval) - set(v1_eval) == {"finger_local_rot_error"}
+    assert v5_eval["finger_local_rot_error"].static_params["threshold"] == 35.0
+    assert v5_eval["gt_error"].static_params["threshold"] == 0.5
+
+    assert v1.model.actor.actor_logstd == -2.9
     assert not v5.model.actor.learnable_std
     logstd = dict(zip(robot.kinematic_info.dof_names, v5.model.actor.actor_logstd))
     fingers = [name for name, value in logstd.items() if value == -1.5]
     assert len(fingers) == 90 and all(n[2:-3] in FINGER_NAMES for n in fingers)
     assert all(value == -2.9 for name, value in logstd.items() if name not in fingers)
-    assert set(v5.evaluator.evaluation_components) == set(
-        v3.evaluator.evaluation_components
-    )
+
