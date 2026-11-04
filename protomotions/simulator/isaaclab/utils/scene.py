@@ -12,7 +12,10 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.terrains.terrain_importer_cfg import TerrainImporterCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-from protomotions.simulator.isaaclab.utils.usd_utils import TrimeshTerrainImporter
+from protomotions.simulator.isaaclab.utils.usd_utils import (
+    GroundGridStyle,
+    TrimeshTerrainImporter,
+)
 
 
 def _stage_marker(message: str) -> None:
@@ -42,6 +45,8 @@ class TrimeshTerrainImporterCfg(TerrainImporterCfg):
     terrain_type: str = "trimesh"
     terrain_vertices: list = None
     terrain_faces: list = None
+    # When set, replaces visual_material with a flat color + grid line texture.
+    grid_style: object = None
 
 
 @configclass
@@ -312,6 +317,7 @@ class SceneCfg(InteractiveSceneCfg):
                 collision_group=-1,
                 visual_material=terrain_visual_material,
                 physics_material=terrain_physics_material,
+                grid_style=GroundGridStyle.from_env(),
             )
         else:
             self.terrain = None
