@@ -12,6 +12,7 @@ import torch
 from examples.experiments.gcc import (
     s0_loco_tracker,
     s0_loco_tracker_v5,
+    s0_loco_tracker_v6,
 )
 from protomotions.envs.base_env.utils import combine_evaluation
 from protomotions.envs.component_factories import finger_local_rot_error_factory
@@ -114,3 +115,16 @@ def test_v5_adds_finger_evaluation_and_only_widens_finger_std(robot):
     assert len(fingers) == 90 and all(n[2:-3] in FINGER_NAMES for n in fingers)
     assert all(value == -2.9 for name, value in logstd.items() if name not in fingers)
 
+
+def test_v6_is_v5_with_finger_logstd_minus_one(robot):
+    args = SimpleNamespace(batch_size=16, training_max_steps=1)
+    env = s0_loco_tracker.env_config(robot, args)
+    v5 = s0_loco_tracker_v5.agent_config(robot, env, args)
+    v6 = s0_loco_tracker_v6.agent_config(robot, env, args)
+    assert set(v6.evaluator.evaluation_components) == set(
+        v5.evaluator.evaluation_components
+    )
+    for v5_logstd, v6_logstd in zip(
+        v5.model.actor.actor_logstd, v6.model.actor.actor_logstd
+    ):
+        assert v6_logstd == (-1.0 if v5_logstd == -1.5 else v5_logstd)
